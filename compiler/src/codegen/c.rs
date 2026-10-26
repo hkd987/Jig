@@ -216,6 +216,82 @@ struct FnCx {
     /// Locals that are `&mut` parameters (accessed through a pointer).
     mutref: FxHashSet<Local>,
     params: FxHashSet<Local>,
+    /// Lists made unique where they are defined, whose element writes need no copy check.
+    unique: FxHashSet<Local>,
+}
+
+/// Lists that stay unique once made so: they are written through indices, and otherwise used
+/// only by intrinsics that read them in place or keep them unique (`len`, `push`, `swap`, ...).
+/// Nothing copies one whole or passes it `&mut` to a function that could replace it, so after
+/// it is made unique where it is defined (at entry for `&mut` parameters, after each
+/// assignment for locals) its element writes can skip the copy-on-write check.
+fn unique_lists(mf: &MFn, tys: &crate::sema::ty::TyCtx) -> FxHashSet<Local> {
+    fn whole(op: &Operand, bad: &mut FxHashSet<Local>) {
+        if let Operand::Copy(p) = op {
+            if p.proj.is_empty() {
+                bad.insert(p.local);
+            }
+        }
+    }
+    let reads_in_place =
+        |op: Op| matches!(op, Op::ListLen | Op::ListIsEmpty | Op::Get | Op::ListSlice | Op::ListRepeat | Op::Show);
+    let mut written: FxHashSet<Local> = FxHashSet::default();
+    let mut bad: FxHashSet<Local> = FxHashSet::default();
+    for block in mf.blocks.iter() {
+        for (stmt, _) in &block.stmts {
+            let Stmt::Assign(p, rv) = stmt else { continue };
+            if matches!(p.proj.first(), Some(PlaceElem::Index(..))) {
+                written.insert(p.local);
+            }
+            match rv {
+                Rvalue::Use(a) | Rvalue::Unary(_, a, _) | Rvalue::Cast(a, _, _) | Rvalue::Inc(a, _) => {
+                    whole(a, &mut bad)
+                }
+                Rvalue::Binary(_, a, b, _) => {
+                    whole(a, &mut bad);
+                    whole(b, &mut bad);
+                }
+                Rvalue::Aggregate(_, _, ops) | Rvalue::Closure(_, ops) => ops.iter().for_each(|o| whole(o, &mut bad)),
+                Rvalue::Discriminant(_) => {}
+                Rvalue::Call(callee, args, _) => {
+                    let intr = match callee {
+                        Callee::Intrinsic(i) => Some(i.op),
+                        Callee::Value(f) => {
+                            whole(f, &mut bad);
+                            None
+                        }
+                        Callee::Fn(_) => None,
+                    };
+                    for a in args {
+                        match (a, intr) {
+                            (Arg::Value(o), Some(op)) if reads_in_place(op) => {}
+                            (Arg::Value(o), _) => whole(o, &mut bad),
+                            // List intrinsics taking `&mut` keep a unique list unique.
+                            (Arg::MutRef(_), Some(_)) => {}
+                            (Arg::MutRef(p), None) if p.proj.is_empty() => {
+                                bad.insert(p.local);
+                            }
+                            (Arg::MutRef(p), None) => {
+                                if matches!(p.proj.first(), Some(PlaceElem::Index(..))) {
+                                    written.insert(p.local);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let by_value: FxHashSet<Local> = mf.params.iter().filter(|(_, m)| *m != Mode::MutRef).map(|(l, _)| *l).collect();
+    written
+        .into_iter()
+        .filter(|l| {
+            l.0 != 0
+                && !bad.contains(l)
+                && !by_value.contains(l)
+                && matches!(tys.kind(mf.locals[*l].ty), TyKind::List(_))
+        })
+        .collect()
 }
 
 impl<'l, 'a> CGen<'l, 'a> {
@@ -874,7 +950,8 @@ impl<'l, 'a> CGen<'l, 'a> {
     fn emit_fn(&mut self, f: MFnId) {
         let mf = self.lw.mir.fns[f].clone();
         let sig = self.fn_sig(f);
-        let mut cx = FnCx { out: String::new(), mutref: FxHashSet::default(), params: FxHashSet::default() };
+        let unique = unique_lists(&mf, self.lw.tys);
+        let mut cx = FnCx { out: String::new(), mutref: FxHashSet::default(), params: FxHashSet::default(), unique };
         for &(l, m) in &mf.params {
             cx.params.insert(l);
             if m == Mode::MutRef {
@@ -889,6 +966,12 @@ impl<'l, 'a> CGen<'l, 'a> {
             let c = self.cty(d.ty);
             let _ = writeln!(cx.out, "    {c} l{} = {{0}};", l.0);
         }
+        let mut entry: Vec<Local> = cx.unique.iter().copied().filter(|l| cx.mutref.contains(l)).collect();
+        entry.sort();
+        for l in entry {
+            let s = self.make_unique(&mf, &cx, l);
+            cx.out.push_str(&s);
+        }
         for (b, block) in mf.blocks.iter_enumerated() {
             let _ = writeln!(cx.out, "bb{}:;", b.0);
             for (stmt, span) in &block.stmts {
@@ -898,6 +981,15 @@ impl<'l, 'a> CGen<'l, 'a> {
         }
         cx.out.push_str("}\n\n");
         self.fns.push(cx.out);
+    }
+
+    fn make_unique(&mut self, mf: &MFn, cx: &FnCx, l: Local) -> String {
+        let lv = self.local_lval(cx, l);
+        let d = match self.kind(mf.locals[l].ty) {
+            TyKind::List(e) => self.desc(e),
+            _ => unreachable!("only lists are made unique"),
+        };
+        format!("    if ({lv} && {lv}->rc != 1) jig_list_make_unique(&{lv}, {d});\n")
     }
 
     fn local_lval(&self, cx: &FnCx, l: Local) -> String {
@@ -928,7 +1020,9 @@ impl<'l, 'a> CGen<'l, 'a> {
     fn place_expr(&mut self, mf: &MFn, cx: &FnCx, p: &Place, write: bool, span: crate::diag::Span) -> String {
         let mut e = self.local_lval(cx, p.local);
         let mut t = mf.locals[p.local].ty;
-        for el in &p.proj {
+        for (k, el) in p.proj.iter().enumerate() {
+            // A list that is already unique is written like it is read.
+            let write = write && !(k == 0 && cx.unique.contains(&p.local));
             match el {
                 PlaceElem::Field(i) => {
                     e = format!("{e}.f{i}");
@@ -1162,6 +1256,10 @@ impl<'l, 'a> CGen<'l, 'a> {
                         let _ = writeln!(cx.out, "    {{ {c} v{n} = {val}; {rel} {dst} = v{n}; }}");
                     } else {
                         let _ = writeln!(cx.out, "    {dst} = {val};");
+                    }
+                    if cx.unique.contains(&p.local) {
+                        let s = self.make_unique(mf, cx, p.local);
+                        cx.out.push_str(&s);
                     }
                     return;
                 }
@@ -1796,9 +1894,17 @@ impl<'l, 'a> CGen<'l, 'a> {
                 let e = self.elem_of(lt);
                 let ec = self.cty(e);
                 let d = self.desc(e);
+                let check = if self.lw.mir.elide.bounds.contains(&span) {
+                    String::new()
+                } else {
+                    format!("\n      if ((uint64_t)si >= (uint64_t)sn || (uint64_t)sj >= (uint64_t)sn) jig_swap_oob(si, sj, sn, {loc});")
+                };
+                let unique = matches!(&args[0], Arg::MutRef(p) if p.proj.is_empty() && cx.unique.contains(&p.local));
+                let cow =
+                    if unique { String::new() } else { format!("if ((*lp)->rc != 1) jig_list_make_unique(lp, {d}); ") };
                 let _ = writeln!(
                     cx.out,
-                    "    {{ jig_list **lp = {}; int64_t si = {}, sj = {}, sn = jig_list_len(*lp);\n      if ((uint64_t)si >= (uint64_t)sn || (uint64_t)sj >= (uint64_t)sn) jig_swap_oob(si, sj, sn, {loc});\n      if (si != sj) {{ if ((*lp)->rc != 1) jig_list_make_unique(lp, {d}); {ec} *sp = ({ec} *)(*lp)->data; {ec} st = sp[si]; sp[si] = sp[sj]; sp[sj] = st; }} }}",
+                    "    {{ jig_list **lp = {}; int64_t si = {}, sj = {}, sn = jig_list_len(*lp); (void)sn;{check}\n      if (si != sj) {{ {cow}{ec} *sp = ({ec} *)(*lp)->data; {ec} st = sp[si]; sp[si] = sp[sj]; sp[sj] = st; }} }}",
                     a[0],
                     a[1],
                     a[2]

@@ -80,6 +80,13 @@ fn bump_all(items: &mut List<Item>, by: Int) {
   }
 }
 
+fn fill(xs: &mut List<Int>, v: Int) {
+  for i in 0..xs.len() {
+    xs[i] = v
+    xs.swap(0, i)
+  }
+}
+
 fn make_adder(n: Int) -> fn(Int) -> Int {
   return fn(x) { x + n }
 }
@@ -128,6 +135,14 @@ fn main() effects {io} {
   var rows = [["x"]].repeat(2)
   rows[0].push("y")
   io.println(rows.str() + " " + ["ab", ""].repeat(2).str())
+  // Lists written in place are copied first when shared, including constant ones.
+  let orig = [1, 2, 3]
+  var copy = orig
+  fill(&mut copy, 9)
+  var lit = [4, 5]
+  lit[0] = 6
+  fill(&mut lit, 1)
+  io.println(orig.str() + " " + copy.str() + " " + lit.str() + " " + [4, 5].str())
 
   // Structs holding heap values, mutated through &mut.
   var items = [

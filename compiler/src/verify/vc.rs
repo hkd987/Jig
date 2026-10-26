@@ -1442,9 +1442,14 @@ impl<'a> Gen<'a> {
                     if let (Res::Method(f), ExprKind::Field { base, .. }) =
                         (self.res(fr, callee), ast.exprs[callee].kind)
                     {
-                        if self.defs.fns[f].self_mode == Some(Mode::MutRef) {
-                            if let Some((l, path, _)) = self.place_root(fr, base) {
-                                out.push((l, path, true));
+                        let fd = &self.defs.fns[f];
+                        if fd.self_mode == Some(Mode::MutRef) {
+                            // Reordering a list in place keeps its length.
+                            let reorders = !fd.has_body
+                                && Some(fd.pkg) == self.prelude
+                                && matches!(fd.name.as_str(), "swap" | "reverse" | "sort" | "sort_by");
+                            if let Some((l, path, whole)) = self.place_root(fr, base) {
+                                out.push((l, path, whole && !reorders));
                             }
                         }
                     }
