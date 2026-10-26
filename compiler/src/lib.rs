@@ -1,9 +1,10 @@
 //! The Jig compiler and toolchain.
 
+pub mod cli;
 pub mod diag;
-pub mod util;
-pub mod syntax;
-pub mod sema;
+pub mod fmt;
 pub mod mir;
 pub mod runner;
-pub mod cli;
+pub mod sema;
+pub mod syntax;
+pub mod util;

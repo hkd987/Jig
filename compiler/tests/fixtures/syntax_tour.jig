@@ -27,7 +27,9 @@ pub enum Tree<T> {
 
 type Cents = Int where self >= 0
 type Grid = List<List<Int>>
+
 const MAX_USERS: Int = 1_000
+
 unit m
 unit s
 
@@ -148,12 +150,11 @@ fn divmod(a: Int, b: Int) -> (Int, Int)
   return (a / b, a % b)
 }
 
-fn main() effects {io} {
+fn main()
+  effects {io}
+{
   var a = Acct { id: 1, bal: 100 }
-  var b = Acct {
-    id: 2
-    bal: 0
-  }
+  var b = Acct { id: 2, bal: 0 }
   transfer(&mut a, &mut b, 40)
   a.deposit(5)
   io.println("a = " + a.bal.str())
