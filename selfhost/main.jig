@@ -14,7 +14,7 @@ import "syntax"
 // scenarios on the interpreter and prints the lines of `jig test --json`; `jigc sim DIR STD`
 // runs `main` there with simulated effects.
 
-fn main() effects {io, fs, env} {
+fn main() effects {io, fs, env, ffi} {
   let args = os.args()
   if args.len() == 4 && args[1] == "check" {
     io.print(sema.check_dump(args[2], args[3]))

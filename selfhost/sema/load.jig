@@ -339,6 +339,8 @@ struct Loaded {
   diags: List<syntax.Diag>
   root: Int
   project_root: Option<Str>
+  /// The C libraries `jig.mod` links.
+  links: List<Str>
 }
 
 fn diag(code: Str, span: syntax.Span, msg: Str) -> syntax.Diag {
@@ -364,10 +366,12 @@ fn load_program(dir: Str, std_dir: Str) -> Loaded effects {fs, env} {
     modules: []
     pkg_module: []
   }
+  var links: List<Str> = []
   match project_root {
     Some(r) => match fs.read(join_path(r, "jig.mod")) {
       Ok(text) => {
         let m = parse_mod(text)
+        links = m.links
         for (line, e) in m.errors {
           ld.diags.push(diag("E0211", dummy_span(), "jig.mod line " + line.str() + ": " + e))
         }
@@ -419,6 +423,7 @@ fn load_program(dir: Str, std_dir: Str) -> Loaded effects {fs, env} {
     diags: ld.diags
     root: root.unwrap_or(prelude)
     project_root: project_root
+    links: links
   }
 }
 

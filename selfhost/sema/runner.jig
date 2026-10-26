@@ -394,7 +394,7 @@ fn Interp.result(self, name: Str, pkg: Str, c: Case) -> TestResult {
 }
 
 /// Every scenario, then every test of the packages being tested, whose name contains `filter`.
-fn run_tests(lw: Lw, cwd: Str, filter: Str) -> List<TestResult> {
+fn run_tests(lw: Lw, cwd: Str, filter: Str) -> List<TestResult> effects {ffi} {
   var it = new_interp(lw, fake_effects(1), cwd)
   var out: List<TestResult> = []
   var scenarios: List<ScenarioDef> = []
@@ -478,7 +478,9 @@ fn Interp.run_case(
   args: List<Value>,
   seed: U64,
   discard: List<syntax.Span>,
-) -> Case {
+) -> Case
+  effects {ffi}
+{
   self.fx = fake_effects(seed)
   self.stack = []
   self.fuel = 200000000
@@ -512,7 +514,7 @@ const PROPERTY_CASES: Int = 100
 
 /// A property test: generated inputs, discarded when they fail the test's `requires`, and
 /// shrunk to a small counterexample when a case fails.
-fn Interp.run_property(&mut self, tid: Int, m: Int, seed: U64) -> Case {
+fn Interp.run_property(&mut self, tid: Int, m: Int, seed: U64) -> Case effects {ffi} {
   let td = self.lw.s.defs.tests[tid]
   let ast = self.lw.s.pkgs[td.pkg].files[td.file].ast
   var discard: List<syntax.Span> = []
@@ -588,7 +590,9 @@ fn Interp.shrink_failure(
   first: List<Value>,
   seed: U64,
   discard: List<syntax.Span>,
-) -> Case {
+) -> Case
+  effects {ffi}
+{
   var args = first
   var fail = self.run_case(m, args, seed, discard)
   var budget = 500
@@ -686,7 +690,7 @@ fn test_result_json(r: TestResult) -> Str {
 
 /// `main` on the interpreter with faked effects, as the run tests do: its output, then how it
 /// ended unless it returned.
-fn run_main_sim(lw: Lw, cwd: Str) -> Result<Str, Str> {
+fn run_main_sim(lw: Lw, cwd: Str) -> Result<Str, Str> effects {ffi} {
   let main = match lw.s.defs.main {
     Some(f) => f
     None => {

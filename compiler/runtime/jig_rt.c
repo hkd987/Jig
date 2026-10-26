@@ -1934,6 +1934,49 @@ int64_t jig_rand_int(int64_t lo, int64_t hi, const char *loc) {
 
 double jig_rand_float(void) { return (double)(next_rand() >> 11) / (double)(1ull << 53); }
 
+/* ---------- C calls from an interpreter ----------
+   jigc's test runner calls C functions by name: one is looked up among the process's symbols
+   and those of the libraries opened here, then called through one signature that fills every
+   argument register (six integer, eight floating point). That is how the x86-64 System V and
+   AArch64 conventions pass arguments to a non-variadic C function, whatever its parameters;
+   the checker limits C functions to what fits. `dlsym` and `dlopen` are weak references, so
+   a program that never does this needs no extra library (where they are missing, nothing is
+   found). */
+
+#include <dlfcn.h>
+#pragma weak dlsym
+#pragma weak dlopen
+
+static void *g_ccall_fn;
+
+bool jig_ccall_open(const char *lib) { return dlopen && dlopen(lib, RTLD_NOW | RTLD_GLOBAL) != NULL; }
+
+bool jig_ccall_find(const char *name) {
+    g_ccall_fn = dlsym ? dlsym(RTLD_DEFAULT, name) : NULL;
+    return g_ccall_fn != NULL;
+}
+
+typedef int64_t (*jig_ccall_int_fn)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, double, double, double,
+                                    double, double, double, double, double);
+typedef double (*jig_ccall_float_fn)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, double, double, double,
+                                     double, double, double, double, double);
+
+int64_t jig_ccall_int(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, double x0, double x1,
+                      double x2, double x3, double x4, double x5, double x6, double x7) {
+    return ((jig_ccall_int_fn)g_ccall_fn)(a, b, c, d, e, f, x0, x1, x2, x3, x4, x5, x6, x7);
+}
+
+double jig_ccall_float(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, double x0, double x1,
+                       double x2, double x3, double x4, double x5, double x6, double x7) {
+    return ((jig_ccall_float_fn)g_ccall_fn)(a, b, c, d, e, f, x0, x1, x2, x3, x4, x5, x6, x7);
+}
+
+/* A C string's copy, as an address to pass in an integer register; freed after the call. */
+int64_t jig_ccall_strdup(const char *s) { return (int64_t)(intptr_t)strdup(s); }
+void jig_ccall_free(int64_t p) { free((void *)(intptr_t)p); }
+/* The string a C function returned (empty for NULL). */
+const char *jig_ccall_str(int64_t p) { return p ? (const char *)(intptr_t)p : ""; }
+
 /* ---------- runtime element types ---------- */
 
 static void str_retain(void *p) { jig_str_retain(*(jig_str **)p); }

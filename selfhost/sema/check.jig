@@ -67,6 +67,8 @@ struct Sema {
   scenario_steps: Set<Int>
   scenario_roots: List<Int>
   scenarios: List<ScenarioDef>
+  /// The C libraries `jig.mod` links (for the interpreter's C calls).
+  links: List<Str>
   // ---- the item being checked ----
   pkg: Int
   file: Int
@@ -142,6 +144,7 @@ fn new_sema(ld: Loaded) -> Sema {
     scenario_steps: Set.new()
     scenario_roots: []
     scenarios: []
+    links: ld.links
     pkg: 0
     file: 0
     ast: empty_ast()

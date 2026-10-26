@@ -1,0 +1,169 @@
+// C calls from the interpreter, ported from the bootstrap compiler's `mir/ffi.rs`: the C
+// function is found by name among the process's symbols and those of the libraries `jig.mod`
+// links, then called through the runtime's `jig_ccall_*`, which fill every argument register.
+
+import "syntax"
+
+fn jig_ccall_open(lib: Str) -> Bool effects {ffi}
+
+fn jig_ccall_find(name: Str) -> Bool effects {ffi}
+
+fn jig_ccall_int(
+  a: Int,
+  b: Int,
+  c: Int,
+  d: Int,
+  e: Int,
+  f: Int,
+  x0: Float,
+  x1: Float,
+  x2: Float,
+  x3: Float,
+  x4: Float,
+  x5: Float,
+  x6: Float,
+  x7: Float,
+) -> Int
+  effects {ffi}
+
+fn jig_ccall_float(
+  a: Int,
+  b: Int,
+  c: Int,
+  d: Int,
+  e: Int,
+  f: Int,
+  x0: Float,
+  x1: Float,
+  x2: Float,
+  x3: Float,
+  x4: Float,
+  x5: Float,
+  x6: Float,
+  x7: Float,
+) -> Float
+  effects {ffi}
+
+fn jig_ccall_strdup(s: Str) -> Int effects {ffi}
+
+fn jig_ccall_free(p: Int) effects {ffi}
+
+fn jig_ccall_str(p: Int) -> Str effects {ffi}
+
+/// The 64 bits of a `U64` as an `Int`, and back.
+fn int_bits_of(u: U64) -> Int {
+  return if u >= 9223372036854775808 {
+    ((u - 9223372036854775808) as Int) - 9223372036854775807 - 1
+  } else {
+    u as Int
+  }
+}
+
+fn u64_bits_of(i: Int) -> U64 {
+  return if i < 0 { ((i + 9223372036854775807 + 1) as U64) + 9223372036854775808 } else { i as U64 }
+}
+
+/// Call the C function `name` with argument values; `ret` is its result type.
+fn Interp.ffi(
+  &mut self,
+  name: Str,
+  args: List<Value>,
+  ret: Int,
+  span: syntax.Span,
+) -> Result<Value, Trap>
+  effects {ffi}
+{
+  if !self.links_open {
+    self.links_open = true
+    for l in self.lw.s.links {
+      for file in ["lib" + l + ".so", "lib" + l + ".so.6", "lib" + l + ".dylib"] {
+        if jig_ccall_open(file) {
+          break
+        }
+      }
+    }
+  }
+  if !jig_ccall_find(name) {
+    return Err(
+      self.panic(
+        "no C function `" + name + "` in this process or the libraries `jig.mod` links",
+        span,
+      ),
+    )
+  }
+  var ints = [0, 0, 0, 0, 0, 0]
+  var floats = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  var ni = 0
+  var nf = 0
+  var copies: List<Int> = []
+  for v in args {
+    match v {
+      Float(f) => if nf < 8 {
+        floats[nf] = f
+        nf += 1
+      }
+      _ => if ni < 6 {
+        ints[ni] = match v {
+          Int(i) => i
+          UInt(u) => int_bits_of(u)
+          Bool(b) => if b { 1 } else { 0 }
+          Str(s) => {
+            let p = jig_ccall_strdup(s)
+            copies.push(p)
+            p
+          }
+          _ => 0
+        }
+        ni += 1
+      }
+    }
+  }
+  let (a, b, c, d, e, f) = (ints[0], ints[1], ints[2], ints[3], ints[4], ints[5])
+  let fs = floats
+  let kind = self.lw.s.tys.kinds[ret]
+  var out = Value.Unit
+  match kind {
+    Float(_) => {
+      out = Value.Float(
+        jig_ccall_float(a, b, c, d, e, f, fs[0], fs[1], fs[2], fs[3], fs[4], fs[5], fs[6], fs[7]),
+      )
+    }
+    _ => {
+      let r = jig_ccall_int(
+        a,
+        b,
+        c,
+        d,
+        e,
+        f,
+        fs[0],
+        fs[1],
+        fs[2],
+        fs[3],
+        fs[4],
+        fs[5],
+        fs[6],
+        fs[7],
+      )
+      out = match kind {
+        Str => Value.Str(jig_ccall_str(r))
+        Bool => Value.Bool((r & 255) != 0)
+        Int(k, _) => match k {
+          I32 => {
+            let m = r & 4294967295
+            Value.Int(if m >= 2147483648 { m - 4294967296 } else { m })
+          }
+          U8 => Value.Int(r & 255)
+          U32 => Value.Int(r & 4294967295)
+          U64 => Value.UInt(u64_bits_of(r))
+          I64 => Value.Int(r)
+        }
+        _ => Value.Unit
+      }
+    }
+  }
+  for p in copies {
+    jig_ccall_free(p)
+  }
+  return Ok(out)
+}

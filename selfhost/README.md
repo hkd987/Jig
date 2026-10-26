@@ -60,7 +60,10 @@ property tests with the same seeds, generated inputs and shrinking. The test com
 `jigc test` with `jig test --json` (results, messages, locations, backtraces, captured
 output) on every package with tests, every run test called from a test, and 150 mutated
 copies that still check, about a third of them with failing tests; `jigc sim` must print
-every run test's expected output. Calling C from the interpreter is not ported yet.
+every run test's expected output. C functions are called as the bootstrap's interpreter
+calls them (`sema/ffi.jig`): found by name with `dlsym` among the process's symbols and the
+libraries `jig.mod` links, and called through the runtime's `jig_ccall_*`, which fill every
+argument register.
 
 The back end (about 6,600 lines of Jig for 7,300 of Rust) lowers to the same MIR, runs the
 same ownership analyses (borrowed locals, last uses, unique lists) and prints the same C:

@@ -225,7 +225,7 @@ pub fn c_unit(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs,
 /// `jigc test DIR STD [FILTER]`: run the tests and scenarios of DIR on the interpreter, printing
 /// the same lines as `jig test --json`. Locations name files relative to `cwd`.
 pub fn test_json(dir: Str, std_dir: Str, cwd: Str, filter: Str) -> Result<(Str, Bool), Str>
-  effects {fs, env}
+  effects {fs, env, ffi}
 {
   let (s, _) = analyze(dir, std_dir)
   if !s.diags.is_empty() {
@@ -250,7 +250,7 @@ pub fn test_json(dir: Str, std_dir: Str, cwd: Str, filter: Str) -> Result<(Str, 
 
 /// `jigc sim DIR STD`: run `main` of DIR on the interpreter with simulated effects, printing
 /// its output and then `<exit N>` or `<panic: MESSAGE>` if it did not return.
-pub fn sim_main(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs, env} {
+pub fn sim_main(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs, env, ffi} {
   let (s, _) = analyze(dir, std_dir)
   if !s.diags.is_empty() {
     return Err(dir + " has errors")

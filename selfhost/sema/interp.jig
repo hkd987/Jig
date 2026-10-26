@@ -302,12 +302,21 @@ struct Interp {
   stack: List<(Int, syntax.Span)>
   /// Remaining steps before the run is stopped (guards tests against infinite loops).
   fuel: Int
+  /// Whether the libraries `jig.mod` links are open (for C calls).
+  links_open: Bool
 }
 
 const MAX_DEPTH: Int = 20000
 
 fn new_interp(lw: Lw, fx: Effects, cwd: Str) -> Interp {
-  return Interp { lw: lw, fx: fx, cwd: cwd, stack: [], fuel: 9223372036854775807 }
+  return Interp {
+    lw: lw
+    fx: fx
+    cwd: cwd
+    stack: []
+    fuel: 9223372036854775807
+    links_open: false
+  }
 }
 
 /// `path:line:col` for a global offset, as diagnostics name places.
@@ -356,7 +365,9 @@ fn Interp.panic(self, msg: Str, span: syntax.Span) -> Trap {
 
 /// Call a function with argument values (which it takes, leaving `()`): the result and the
 /// final values of `&mut` parameters.
-fn Interp.call(&mut self, f: Int, args: &mut List<Value>) -> Result<(Value, List<Value>), Trap> {
+fn Interp.call(&mut self, f: Int, args: &mut List<Value>) -> Result<(Value, List<Value>), Trap>
+  effects {ffi}
+{
   self.lw.ensure_lowered(f)
   let code = self.lw.mir.fns[f]
   match code.intrinsic {
@@ -375,7 +386,9 @@ fn Interp.call(&mut self, f: Int, args: &mut List<Value>) -> Result<(Value, List
   return r
 }
 
-fn Interp.run(&mut self, code: MFn, args: &mut List<Value>) -> Result<(Value, List<Value>), Trap> {
+fn Interp.run(&mut self, code: MFn, args: &mut List<Value>) -> Result<(Value, List<Value>), Trap>
+  effects {ffi}
+{
   var locals = [Value.Unit].repeat(code.locals.len())
   for i in 0..min(code.params.len(), args.len()) {
     locals[code.params[i].0] = take_at(&mut args, i)
@@ -646,7 +659,9 @@ fn Interp.rvalue(
   rv: Rvalue,
   locals: &mut List<Value>,
   span: syntax.Span,
-) -> Result<Value, Trap> {
+) -> Result<Value, Trap>
+  effects {ffi}
+{
   match rv {
     Use(op) => {
       return self.operand(op, locals, span)
@@ -712,10 +727,7 @@ fn Interp.rvalue(
       let (r, outs) = match callee {
         Fn(f) => self.call(f, &mut vals)?
         Intrinsic(i) => self.intrinsic(i, &mut vals, span)?
-        Ffi(name) => {
-          let _ = ret
-          return Err(self.panic("C functions cannot run in the test runner: `" + name + "`", span))
-        }
+        Ffi(name) => (self.ffi(name, vals, ret, span)?, [])
         Value(op) => match self.operand(op, locals, span)? {
           Fn(f) => self.call(f, &mut vals)?
           Closure(f, env) => {
@@ -1293,7 +1305,7 @@ fn quoted_char(c: Int) -> Str {
 }
 
 /// Format a value the way `.str()` does. `nested` quotes strings and characters.
-fn Interp.show(&mut self, v: Value, ty: Int, nested: Bool) -> Result<Str, Trap> {
+fn Interp.show(&mut self, v: Value, ty: Int, nested: Bool) -> Result<Str, Trap> effects {ffi} {
   let kind = self.lw.s.tys.kinds[ty]
   match (v, kind) {
     (Str(s), _) => {
@@ -1361,7 +1373,9 @@ fn Interp.show(&mut self, v: Value, ty: Int, nested: Bool) -> Result<Str, Trap> 
   }
 }
 
-fn Interp.show_adt(&mut self, v: Value, a: Int, args: List<Int>) -> Result<Str, Trap> {
+fn Interp.show_adt(&mut self, v: Value, a: Int, args: List<Int>) -> Result<Str, Trap>
+  effects {ffi}
+{
   // A user-defined `str` takes precedence.
   match self.lw.s.defs.methods.get((TyKey.Adt(a), "str")) {
     Some(f) => {

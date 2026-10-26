@@ -995,18 +995,11 @@ fn compare_tests(exe: &Path, std_dir: &Path, dir: &Path) -> Option<String> {
     ))
 }
 
-/// Whether a package calls C (which jigc's test runner cannot do yet).
-fn calls_c(dir: &Path) -> bool {
-    let mut files = Vec::new();
-    jig_files(dir, &mut files);
-    files.iter().any(|f| std::fs::read_to_string(f).unwrap_or_default().contains("ffi}"))
-}
-
 /// jigc's interpreter and test runner agree with the bootstrap's: `jigc test` prints what
 /// `jig test --json` prints (results, failure messages, locations, backtraces and captured
 /// output) for every package with tests or scenarios, every run test turned into a test of its
 /// `main`, and mutated copies of them (code, `.feature` files and step patterns); and
-/// `jigc sim` gives every run test's expected output.
+/// `jigc sim` gives every run test's expected output. C calls included.
 #[test]
 fn jigc_tests_match_bootstrap() {
     if !have_cc() {
@@ -1027,9 +1020,6 @@ fn jigc_tests_match_bootstrap() {
     for p in entries.iter().filter(|p| p.extension().is_some_and(|x| x == "jig")) {
         let name = p.file_stem().unwrap().to_string_lossy().to_string();
         let src = std::fs::read_to_string(p).unwrap();
-        if src.contains("ffi}") {
-            continue;
-        }
         let d = work.join(format!("run-{name}"));
         write_file(&d.join("main.jig"), &src);
         let expected = std::fs::read_to_string(p.with_extension("out")).unwrap_or_default();
@@ -1043,7 +1033,7 @@ fn jigc_tests_match_bootstrap() {
     let mut entries: Vec<PathBuf> =
         std::fs::read_dir(root.join("examples")).unwrap().map(|e| e.unwrap().path()).collect();
     entries.sort();
-    cases.extend(entries.into_iter().filter(|p| p.is_dir() && !calls_c(p)));
+    cases.extend(entries.into_iter().filter(|p| p.is_dir()));
     cases.push(root.join("compiler/tests/props"));
     cases.push(root.join("selfhost"));
     let originals = cases.len();

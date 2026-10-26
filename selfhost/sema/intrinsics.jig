@@ -175,7 +175,9 @@ fn Interp.intrinsic(
   intr: Intrinsic,
   a: &mut List<Value>,
   span: syntax.Span,
-) -> Result<(Value, List<Value>), Trap> {
+) -> Result<(Value, List<Value>), Trap>
+  effects {ffi}
+{
   match intr.op {
     Panic => {
       return Err(self.panic(str_v(a[0]), span))
@@ -967,7 +969,9 @@ fn Interp.serve_one(
   state: Value,
   req: Str,
   span: syntax.Span,
-) -> Result<(Value, Str), Trap> {
+) -> Result<(Value, Str), Trap>
+  effects {ffi}
+{
   match self.call_value(handle, [state, Value.Str(req)], span)? {
     Tuple(t) => if t.len() == 2 {
       return Ok((t[0], str_v(t[1])))
@@ -982,7 +986,9 @@ fn Interp.call_value(
   f: Value,
   args: List<Value>,
   span: syntax.Span,
-) -> Result<Value, Trap> {
+) -> Result<Value, Trap>
+  effects {ffi}
+{
   match f {
     Fn(m) => {
       var a = args
@@ -1005,7 +1011,9 @@ fn Interp.merge_sort(
   xs: &mut List<Value>,
   less: Value,
   span: syntax.Span,
-) -> Result<(), Trap> {
+) -> Result<(), Trap>
+  effects {ffi}
+{
   let n = xs.len()
   if n <= 1 {
     return Ok(())
