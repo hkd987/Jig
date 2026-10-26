@@ -1,0 +1,286 @@
+// The abstract syntax tree, ported from the bootstrap compiler's `syntax/ast.rs`. One `Ast`
+// holds a file in flat arenas; nodes refer to each other by index into them.
+
+/// A byte range of the source (global offsets).
+struct Span {
+  lo: Int
+  hi: Int
+}
+
+/// A name with its source location.
+struct Name {
+  text: Str
+  span: Span
+}
+
+struct Ast {
+  items: List<Item>
+  exprs: List<Expr>
+  stmts: List<Stmt>
+  types: List<TypeExpr>
+  pats: List<Pat>
+  /// The file's top-level items, in order.
+  top: List<Int>
+}
+
+struct Item {
+  kind: ItemKind
+  name: Name
+  span: Span
+  is_pub: Bool
+}
+
+enum ItemKind {
+  /// `import "path"`; the item's name is the last path segment.
+  Import(path: Str, path_span: Span)
+  Fn(decl: FnDecl)
+  Struct(generics: List<GenericParam>, fields: List<FieldDecl>, invariants: List<Int>)
+  Enum(generics: List<GenericParam>, variants: List<VariantDecl>)
+  Interface(generics: List<GenericParam>, methods: List<Int>)
+  TypeAlias(generics: List<GenericParam>, ty: Int)
+  Const(ty: Int, value: Int)
+  Unit
+  Test(label: Str, params: List<Param>, pre: List<Int>, body: Int)
+}
+
+struct FnDecl {
+  /// `fn Type.name`: the receiver type and the type's generic parameters.
+  recv: Option<Receiver>
+  self_param: Option<SelfParam>
+  generics: List<GenericParam>
+  params: List<Param>
+  ret: Option<Int>
+  pre: List<Int>
+  post: List<Int>
+  /// `None`: no clause (pure). `Some([])`: explicit `effects {}`.
+  effect_names: Option<List<Name>>
+  effects_span: Span
+  /// A `Block` expression; `None` for interface method signatures.
+  body: Option<Int>
+  /// `step "pattern"` attached to this function.
+  step_attr: Option<Step>
+  sig_span: Span
+}
+
+struct Receiver {
+  ty: Name
+  generics: List<GenericParam>
+}
+
+struct SelfParam {
+  mutable: Bool
+  span: Span
+}
+
+struct Step {
+  pattern: Str
+  span: Span
+}
+
+struct Param {
+  name: Name
+  /// `None` only for closure parameters whose type is inferred.
+  ty: Option<Int>
+  mut_ref: Bool
+  /// `x: Int where x > 0`
+  refine: Option<Int>
+  span: Span
+}
+
+struct GenericParam {
+  name: Name
+  bounds: List<Int>
+}
+
+struct FieldDecl {
+  name: Name
+  ty: Int
+  is_pub: Bool
+  refine: Option<Int>
+  span: Span
+}
+
+struct VariantDecl {
+  name: Name
+  fields: List<FieldDecl>
+  /// Whether the variant was written with parentheses (`Empty` vs `Empty()`).
+  has_parens: Bool
+  span: Span
+}
+
+struct UnitFactor {
+  name: Name
+  exp: Int
+}
+
+struct TypeExpr {
+  kind: TypeKind
+  span: Span
+}
+
+enum TypeKind {
+  /// `Name`, `pkg.Name`, `Name<A, B>`, `Float<m/s>`.
+  Named(pkg: Option<Name>, name: Name, args: List<Int>, units: Option<List<UnitFactor>>)
+  /// `()` and `(A, B)`.
+  Tuple(elems: List<Int>)
+  Fn(params: List<Int>, ret: Option<Int>, effect_names: Option<List<Name>>)
+  /// `T where pred` (aliases use `self` in `pred`).
+  Refined(base: Int, pred: Int)
+}
+
+struct Expr {
+  kind: ExprKind
+  span: Span
+}
+
+enum UnOp {
+  Neg
+  Not
+  BitNot
+}
+
+enum BinOp {
+  Mul
+  Div
+  Rem
+  Shl
+  Shr
+  BitAnd
+  Add
+  Sub
+  BitOr
+  BitXor
+  Eq
+  Ne
+  Lt
+  Le
+  Gt
+  Ge
+  And
+  Or
+}
+
+fn BinOp.precedence(self) -> Int
+  ensures result >= 1 && result <= 5
+{
+  return match self {
+    Mul | Div | Rem | Shl | Shr | BitAnd => 5
+    Add | Sub | BitOr | BitXor => 4
+    Eq | Ne | Lt | Le | Gt | Ge => 3
+    And => 2
+    Or => 1
+  }
+}
+
+fn BinOp.text(self) -> Str {
+  return match self {
+    Mul => "*"
+    Div => "/"
+    Rem => "%"
+    Shl => "<<"
+    Shr => ">>"
+    BitAnd => "&"
+    Add => "+"
+    Sub => "-"
+    BitOr => "|"
+    BitXor => "^"
+    Eq => "=="
+    Ne => "!="
+    Lt => "<"
+    Le => "<="
+    Gt => ">"
+    Ge => ">="
+    And => "&&"
+    Or => "||"
+  }
+}
+
+fn UnOp.text(self) -> Str {
+  return match self {
+    Neg => "-"
+    Not => "!"
+    BitNot => "~"
+  }
+}
+
+enum ExprKind {
+  Int(value: U64)
+  /// The value is the source text.
+  Float
+  Bool(value: Bool)
+  Str(value: Str)
+  Char(value: Int)
+  Name(name: Str)
+  /// `(e)`, kept so the formatter preserves the author's grouping.
+  Paren(inner: Int)
+  Tuple(elems: List<Int>)
+  List(elems: List<Int>)
+  Field(base: Int, name: Name)
+  TupleField(base: Int, index: Int, index_span: Span)
+  Call(callee: Int, args: List<Int>)
+  /// `&mut place`, only valid as a call argument.
+  MutArg(place: Int)
+  Index(base: Int, index: Int)
+  Range(lo: Option<Int>, hi: Option<Int>)
+  Unary(op: UnOp, expr: Int)
+  Binary(op: BinOp, lhs: Int, rhs: Int)
+  Cast(expr: Int, ty: Int)
+  Try(expr: Int)
+  If(cond: Int, then: Int, els: Option<Int>)
+  Match(scrut: Int, arms: List<Arm>)
+  Block(stmts: List<Int>)
+  StructLit(ty: Int, fields: List<FieldInit>)
+  Closure(params: List<Param>, ret: Option<Int>, body: Int)
+  /// Explicit type arguments in expression position: `List<Int>.new()`.
+  TypeArgs(base: Int, args: List<Int>)
+  /// `forall i in lo..hi: body` / `exists ...`
+  Quant(is_forall: Bool, binder: Name, lo: Int, hi: Int, body: Int)
+}
+
+struct Arm {
+  pat: Int
+  guard: Option<Int>
+  body: Int
+  span: Span
+}
+
+struct FieldInit {
+  name: Name
+  value: Int
+}
+
+struct Stmt {
+  kind: StmtKind
+  span: Span
+}
+
+enum StmtKind {
+  Let(pat: Int, ty: Option<Int>, init: Int, mutable: Bool)
+  Assign(target: Int, op: Option<BinOp>, value: Int)
+  Expr(expr: Int)
+  Return(value: Option<Int>)
+  Break
+  Continue
+  For(head: ForHead, invariants: List<Int>, body: Int)
+}
+
+enum ForHead {
+  Forever
+  While(cond: Int)
+  In(pat: Int, iter: Int)
+}
+
+struct Pat {
+  kind: PatKind
+  span: Span
+}
+
+enum PatKind {
+  Wild
+  Bind(name: Str)
+  /// A literal expression: Int, Float, Str, Char, Bool, or a negated number.
+  Lit(expr: Int)
+  Variant(name: Name, args: List<Int>, has_parens: Bool)
+  Tuple(elems: List<Int>)
+  Or(alts: List<Int>)
+}

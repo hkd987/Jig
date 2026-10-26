@@ -1,0 +1,2021 @@
+// The parser, ported from the bootstrap compiler's `syntax/parser.rs`: recursive descent
+// over the lexer's tokens into the flat-arena `Ast`. It recovers at items, statements and
+// match arms, so one mistake is one error.
+
+struct Parsed {
+  ast: Ast
+  /// The lexer's errors, then the parser's.
+  errors: List<Diag>
+}
+
+struct Parser {
+  src: Str
+  base: Int
+  toks: List<Token>
+  pos: Int
+  ast: Ast
+  errors: List<Diag>
+  /// Inside `if`/`for`/`match` heads and contract clauses, `Name {` is not a struct literal.
+  no_struct: Bool
+  prev_hi: Int
+}
+
+/// A function's `requires`, `ensures` and `effects` clauses.
+struct Clauses {
+  pre: List<Int>
+  post: List<Int>
+  effect_names: Option<List<Name>>
+  effects_span: Span
+}
+
+/// `effects {io, fs}`.
+struct EffectSet {
+  names: List<Name>
+  span: Span
+}
+
+/// Parse `src`, whose first byte is at global offset `base`.
+fn parse(src: Str, base: Int) -> Parsed {
+  let lx = lex(src, base)
+  var p = Parser {
+    src: src
+    base: base
+    toks: lx.tokens
+    pos: 0
+    ast: Ast { items: [], exprs: [], stmts: [], types: [], pats: [], top: [] }
+    errors: lx.errors
+    no_struct: false
+    prev_hi: base
+  }
+  let top = p.parse_items()
+  p.ast.top = top
+  return Parsed { ast: p.ast, errors: p.errors }
+}
+
+/// Can this identifier start a struct literal or a variant pattern? Types are capitalized.
+fn is_type_like(s: Str) -> Bool {
+  if s.is_empty() {
+    return false
+  }
+  let c = s[0] as Char
+  return c >= 'A' && c <= 'Z'
+}
+
+fn is_numeric_type_name(s: Str) -> Bool {
+  return s == "Int" || s == "Float" || s == "I32" || s == "U8" || s == "U32" || s == "U64"
+}
+
+fn token_span(t: Token) -> Span {
+  return Span { lo: t.lo, hi: t.hi }
+}
+
+/// A string or character literal's text without its quotes (an unterminated one has no
+/// closing quote).
+fn literal_body(raw: Str, quote: Str) -> Str {
+  if raw.len() >= 2 && raw.ends_with(quote) {
+    return raw[1..raw.len() - 1]
+  }
+  if raw.is_empty() {
+    return ""
+  }
+  return raw[1..raw.len()]
+}
+
+/// The value of a hex digit, or -1.
+fn hex_digit(c: Char) -> Int
+  ensures result >= -1 && result <= 15
+{
+  if c >= '0' && c <= '9' {
+    return c as Int - 48
+  }
+  if c >= 'a' && c <= 'f' {
+    return c as Int - 87
+  }
+  if c >= 'A' && c <= 'F' {
+    return c as Int - 55
+  }
+  return -1
+}
+
+/// The character `\u{hex}` names: hex digits after an optional `+`, a Unicode scalar value.
+fn unicode_char(hex: List<Char>) -> Option<Char> {
+  var i = 0
+  if hex.len() > 0 && hex[0] == '+' {
+    i = 1
+  }
+  if i >= hex.len() {
+    return None
+  }
+  var v = 0
+  for i < hex.len() invariant i >= 0 && v >= 0 && v <= 1114111 * 16 + 15 {
+    let d = hex_digit(hex[i])
+    if d < 0 {
+      return None
+    }
+    if v <= 1114111 {
+      v = v * 16 + d
+    }
+    i += 1
+  }
+  if v > 1114111 || (v >= 55296 && v <= 57343) {
+    return None
+  }
+  return Some(v as Char)
+}
+
+/// The value of a literal's text between its quotes (`\n`, `\u{e9}`, ...).
+fn unescape(body: Str) -> Str {
+  let cs = body.chars()
+  var out: List<Char> = []
+  var i = 0
+  for i < cs.len() invariant i >= 0 {
+    let c = cs[i]
+    i += 1
+    if c != '\\' {
+      out.push(c)
+      continue
+    }
+    if i >= cs.len() {
+      break
+    }
+    let e = cs[i]
+    i += 1
+    if e == 'n' {
+      out.push('\n')
+    } else if e == 't' {
+      out.push('\t')
+    } else if e == 'r' {
+      out.push('\r')
+    } else if e == '0' {
+      out.push('\0')
+    } else if e == 'u' {
+      if i < cs.len() && cs[i] == '{' {
+        i += 1
+        var hex: List<Char> = []
+        for i < cs.len() invariant i >= 0 {
+          let h = cs[i]
+          i += 1
+          if h == '}' {
+            break
+          }
+          hex.push(h)
+        }
+        match unicode_char(hex) {
+          Some(ch) => out.push(ch)
+          None => {}
+        }
+      }
+    } else {
+      out.push(e)
+    }
+  }
+  return Str.from_chars(out)
+}
+
+/// The value of a digit in `radix`, or -1.
+fn digit_value(b: Int, radix: Int) -> Int
+  ensures result >= -1 && result < 36
+{
+  var d = -1
+  if b >= 48 && b <= 57 {
+    d = b - 48
+  } else if b >= 97 && b <= 122 {
+    d = b - 87
+  } else if b >= 65 && b <= 90 {
+    d = b - 55
+  }
+  if d >= radix {
+    return -1
+  }
+  return d
+}
+
+/// An integer literal's value (underscores removed), or `None` if it has a bad digit or
+/// does not fit in 64 bits.
+fn int_value(text: Str) -> Option<U64> {
+  var radix = 10
+  var digits = text
+  if text.len() >= 2 && text[0] as Char == '0' {
+    let c = text[1] as Char
+    if c == 'x' || c == 'b' || c == 'o' {
+      radix = if c == 'x' { 16 } else if c == 'b' { 2 } else { 8 }
+      digits = text[2..text.len()]
+    }
+  }
+  if digits.is_empty() {
+    return None
+  }
+  let max: U64 = 18446744073709551615
+  let r = radix as U64
+  var v: U64 = 0
+  for b in digits.bytes() {
+    let d = digit_value(b as Int, radix)
+    if d < 0 {
+      return None
+    }
+    let du = d as U64
+    if v > (max - du) / r {
+      return None
+    }
+    v = v * r + du
+  }
+  return Some(v)
+}
+
+/// A small decimal number (`.0`, `^2`), or `fallback` if the text is not one that fits
+/// below `limit`.
+fn small_decimal(text: Str, limit: Int, fallback: Int) -> Int
+  requires limit >= 0
+  ensures result == fallback || (result >= 0 && result <= limit)
+{
+  if text.is_empty() {
+    return fallback
+  }
+  var v = 0
+  for b in text.bytes() invariant v >= 0 && v <= limit {
+    let d = b as Int - 48
+    if d < 0 || d > 9 {
+      return fallback
+    }
+    if d > limit || v > (limit - d) / 10 {
+      return fallback
+    }
+    v = v * 10 + d
+  }
+  return v
+}
+
+// ---------- token helpers ----------
+
+fn Parser.tok(self) -> Token {
+  return self.toks[self.pos]
+}
+
+fn Parser.peek(self) -> Kind {
+  return self.toks[self.pos].kind
+}
+
+fn Parser.peek_at(self, n: Int) -> Kind {
+  return match self.toks.get(self.pos + n) {
+    Some(t) => t.kind
+    None => Kind.Eof
+  }
+}
+
+fn Parser.at(self, k: Kind) -> Bool {
+  return self.peek() == k
+}
+
+fn Parser.bump(&mut self) -> Token {
+  let t = self.toks[self.pos]
+  if t.kind != Kind.Eof {
+    self.pos += 1
+  }
+  // An inserted statement end is zero-width.
+  if t.kind != Kind.Semi || t.lo != t.hi {
+    self.prev_hi = t.hi
+  }
+  return t
+}
+
+fn Parser.advance(&mut self) {
+  let _ = self.bump()
+}
+
+fn Parser.eat(&mut self, k: Kind) -> Bool {
+  if self.at(k) {
+    self.advance()
+    return true
+  }
+  return false
+}
+
+fn Parser.text(self, t: Token) -> Str {
+  return self.src[t.lo - self.base..t.hi - self.base]
+}
+
+fn Parser.tok_is_ident(self, s: Str) -> Bool {
+  return self.at(Kind.Ident) && self.text(self.tok()) == s
+}
+
+fn Parser.ident_at(self, n: Int, s: Str) -> Bool {
+  return match self.toks.get(self.pos + n) {
+    Some(t) => t.kind == Kind.Ident && self.text(t) == s
+    None => false
+  }
+}
+
+fn Parser.span_from(self, lo: Int) -> Span {
+  if self.prev_hi > lo {
+    return Span { lo: lo, hi: self.prev_hi }
+  }
+  return Span { lo: lo, hi: lo }
+}
+
+fn Parser.skip_semis(&mut self) {
+  for self.at(Kind.Semi) {
+    self.advance()
+  }
+}
+
+/// Skip line-break terminators if the next real token is one of `ks`.
+fn Parser.skip_semis_before_any(&mut self, ks: List<Kind>) -> Bool {
+  var n = 0
+  for self.peek_at(n) == Kind.Semi {
+    n += 1
+  }
+  if !ks.contains(self.peek_at(n)) {
+    return false
+  }
+  for _ in 0..n {
+    self.advance()
+  }
+  return true
+}
+
+fn Parser.skip_semis_before(&mut self, k: Kind) -> Bool {
+  return self.skip_semis_before_any([k])
+}
+
+fn Parser.error_at(&mut self, span: Span, msg: Str) {
+  // Avoid cascades at one position.
+  match self.errors.last() {
+    Some(d) => if d.lo == span.lo {
+      return
+    }
+    None => {}
+  }
+  self.errors.push(Diag { code: "E0105", lo: span.lo, hi: span.hi, msg: msg })
+}
+
+/// How an error names the token `t`.
+fn Parser.found(self, t: Token) -> Str {
+  if t.kind == Kind.Ident {
+    return "`" + self.text(t) + "`"
+  }
+  return t.kind.describe()
+}
+
+fn Parser.expected(&mut self, what: Str) {
+  let t = self.tok()
+  var span = token_span(t)
+  if t.kind == Kind.Semi || t.kind == Kind.Eof {
+    span = Span { lo: t.lo, hi: t.lo }
+  }
+  self.error_at(span, "expected " + what + ", found " + self.found(t))
+}
+
+fn Parser.expect(&mut self, k: Kind) -> Result<Token, ()> {
+  if self.at(k) {
+    return Ok(self.bump())
+  }
+  self.expected(k.describe())
+  return Err(())
+}
+
+fn Parser.expect_ident(&mut self, what: Str) -> Result<Name, ()> {
+  if self.at(Kind.Ident) {
+    let t = self.bump()
+    return Ok(Name { text: self.text(t), span: token_span(t) })
+  }
+  self.expected(what)
+  return Err(())
+}
+
+// ---------- node constructors ----------
+
+fn Parser.mk_expr(&mut self, kind: ExprKind, span: Span) -> Int {
+  self.ast.exprs.push(Expr { kind: kind, span: span })
+  return self.ast.exprs.len() - 1
+}
+
+fn Parser.mk_type(&mut self, kind: TypeKind, span: Span) -> Int {
+  self.ast.types.push(TypeExpr { kind: kind, span: span })
+  return self.ast.types.len() - 1
+}
+
+fn Parser.mk_pat(&mut self, kind: PatKind, span: Span) -> Int {
+  self.ast.pats.push(Pat { kind: kind, span: span })
+  return self.ast.pats.len() - 1
+}
+
+fn Parser.mk_stmt(&mut self, kind: StmtKind, span: Span) -> Int {
+  self.ast.stmts.push(Stmt { kind: kind, span: span })
+  return self.ast.stmts.len() - 1
+}
+
+fn Parser.push_item(&mut self, kind: ItemKind, name: Name, lo: Int, is_pub: Bool) -> Int {
+  let span = self.span_from(lo)
+  self.ast.items.push(Item { kind: kind, name: name, span: span, is_pub: is_pub })
+  return self.ast.items.len() - 1
+}
+
+/// An expression where `Name {` does not start a struct literal.
+fn Parser.expr_no_struct(&mut self) -> Result<Int, ()> {
+  let saved = self.no_struct
+  self.no_struct = true
+  let r = self.parse_expr()
+  self.no_struct = saved
+  return r
+}
+
+// ---------- recovery ----------
+
+fn is_open(k: Kind) -> Bool {
+  return k == Kind.LBrace || k == Kind.LParen || k == Kind.LBracket
+}
+
+fn is_close(k: Kind) -> Bool {
+  return k == Kind.RBrace || k == Kind.RParen || k == Kind.RBracket
+}
+
+fn starts_item(k: Kind) -> Bool {
+  return match k {
+    Fn | Struct | Enum | Interface | Type | Const | Unit | Test | Step | Import | Pub => true
+    _ => false
+  }
+}
+
+/// Skip to the end of the current statement (a terminator or a closing brace at depth 0).
+fn Parser.recover_stmt(&mut self) {
+  var depth = 0
+  for {
+    let k = self.peek()
+    if k == Kind.Eof {
+      return
+    }
+    if is_open(k) {
+      depth += 1
+    } else if is_close(k) {
+      if depth == 0 {
+        return
+      }
+      depth -= 1
+    } else if k == Kind.Semi && depth == 0 {
+      self.advance()
+      return
+    }
+    self.advance()
+  }
+}
+
+/// Skip to the next token that can start an item at the start of a line.
+fn Parser.recover_item(&mut self) {
+  var depth = 0
+  for {
+    let k = self.peek()
+    if k == Kind.Eof {
+      return
+    }
+    if is_open(k) {
+      depth += 1
+    } else if is_close(k) {
+      depth -= 1
+    } else if starts_item(k) &&
+      depth <= 0 &&
+      (self.pos == 0 || self.toks[self.pos - 1].kind == Kind.Semi) {
+      return
+    }
+    self.advance()
+  }
+}
+
+/// After a bad match arm: skip to the end of its line (outside any brackets). Returns false
+/// at the end of the file.
+fn Parser.skip_to_arm_end(&mut self) -> Bool {
+  var depth = 0
+  for {
+    let k = self.peek()
+    if k == Kind.Eof {
+      return false
+    }
+    if k == Kind.LParen || k == Kind.LBracket || k == Kind.LBrace {
+      depth += 1
+    } else if k == Kind.RParen || k == Kind.RBracket {
+      depth -= 1
+    } else if k == Kind.RBrace {
+      if depth == 0 {
+        return true
+      }
+      depth -= 1
+    } else if k == Kind.Semi && depth <= 0 {
+      self.advance()
+      return true
+    }
+    self.advance()
+  }
+}
+
+// ---------- items ----------
+
+fn Parser.parse_items(&mut self) -> List<Int> {
+  var items: List<Int> = []
+  for {
+    self.skip_semis()
+    if self.at(Kind.Eof) {
+      break
+    }
+    let before = self.pos
+    match self.parse_item() {
+      Ok(id) => items.push(id)
+      Err(_) => {
+        if self.pos == before {
+          self.advance()
+        }
+        self.recover_item()
+      }
+    }
+  }
+  return items
+}
+
+fn Parser.end_item(&mut self) -> Result<(), ()> {
+  if self.at(Kind.Semi) || self.at(Kind.Eof) {
+    self.skip_semis()
+    return Ok(())
+  }
+  self.expected("end of line")
+  return Err(())
+}
+
+/// The quoted string at the cursor and its value.
+fn Parser.string_lit(&mut self) -> Result<(Str, Span), ()> {
+  let t = self.expect(Kind.Str)?
+  return Ok((unescape(literal_body(self.text(t), "\"")), token_span(t)))
+}
+
+fn Parser.parse_item(&mut self) -> Result<Int, ()> {
+  let lo = self.tok().lo
+  let is_pub = self.eat(Kind.Pub)
+  match self.peek() {
+    Import => {
+      self.advance()
+      let (path, span) = self.string_lit()?
+      let parts = path.split("/")
+      let name = Name { text: parts.last().unwrap_or(path), span: span }
+      let id = self.push_item(ItemKind.Import(path, span), name, lo, is_pub)
+      self.end_item()?
+      return Ok(id)
+    }
+    // Bodiless functions are intrinsics; the checker allows them only in `std`.
+    Fn => {
+      return self.parse_fn(lo, is_pub, None, false)
+    }
+    Step => {
+      self.advance()
+      let (pattern, span) = self.string_lit()?
+      self.skip_semis()
+      let fn_lo = self.tok().lo
+      let fn_pub = self.eat(Kind.Pub)
+      if !self.at(Kind.Fn) {
+        self.expected("`fn` after the step pattern")
+        return Err(())
+      }
+      let step_attr = Step { pattern: pattern, span: span }
+      return self.parse_fn(min(fn_lo, lo), fn_pub || is_pub, Some(step_attr), true)
+    }
+    Struct => {
+      return self.parse_struct(lo, is_pub)
+    }
+    Enum => {
+      return self.parse_enum(lo, is_pub)
+    }
+    Interface => {
+      return self.parse_interface(lo, is_pub)
+    }
+    Type => {
+      self.advance()
+      let name = self.expect_ident("a type name")?
+      let generics = self.parse_generic_params_opt()?
+      let _ = self.expect(Kind.Eq)?
+      var ty = self.parse_type()?
+      if self.at(Kind.Where) {
+        self.advance()
+        let pred = self.expr_no_struct()?
+        let span = self.span_from(self.ast.types[ty].span.lo)
+        ty = self.mk_type(TypeKind.Refined(ty, pred), span)
+      }
+      let id = self.push_item(ItemKind.TypeAlias(generics, ty), name, lo, is_pub)
+      self.end_item()?
+      return Ok(id)
+    }
+    Const => {
+      self.advance()
+      let name = self.expect_ident("a constant name")?
+      let _ = self.expect(Kind.Colon)?
+      let ty = self.parse_type()?
+      let _ = self.expect(Kind.Eq)?
+      let value = self.parse_expr()?
+      let id = self.push_item(ItemKind.Const(ty, value), name, lo, is_pub)
+      self.end_item()?
+      return Ok(id)
+    }
+    Unit => {
+      self.advance()
+      let name = self.expect_ident("a unit name")?
+      let id = self.push_item(ItemKind.Unit, name, lo, is_pub)
+      self.end_item()?
+      return Ok(id)
+    }
+    Test => {
+      self.advance()
+      let (label, span) = self.string_lit()?
+      var params: List<Param> = []
+      if self.at(Kind.LParen) {
+        params = self.parse_params(false)?.1
+      }
+      var pre: List<Int> = []
+      if self.skip_semis_before(Kind.Requires) {
+        self.advance()
+        pre = self.parse_clause_exprs()?
+      }
+      let _ = self.skip_semis_before(Kind.LBrace)
+      let body = self.parse_block()?
+      let name = Name { text: label, span: span }
+      return Ok(self.push_item(ItemKind.Test(label, params, pre, body), name, lo, is_pub))
+    }
+    _ => {
+      let t = self.tok()
+      let msg = "expected an item, found " + self.found(t)
+      self.errors.push(Diag { code: "E0108", lo: t.lo, hi: t.hi, msg: msg })
+      return Err(())
+    }
+  }
+}
+
+fn Parser.parse_generic_params_opt(&mut self) -> Result<List<GenericParam>, ()> {
+  var params: List<GenericParam> = []
+  if !self.at(Kind.Lt) {
+    return Ok(params)
+  }
+  self.advance()
+  for {
+    if self.close_angle() {
+      break
+    }
+    let name = self.expect_ident("a type parameter")?
+    var bounds: List<Int> = []
+    if self.eat(Kind.Colon) {
+      for {
+        bounds.push(self.parse_type()?)
+        if !self.eat(Kind.Plus) {
+          break
+        }
+      }
+    }
+    params.push(GenericParam { name: name, bounds: bounds })
+    if self.eat(Kind.Comma) {
+      continue
+    }
+    if self.close_angle() {
+      break
+    }
+    self.expected("`,` or `>`")
+    return Err(())
+  }
+  return Ok(params)
+}
+
+/// Consume a `>`, splitting `>>`, `>=` or `>>=` if needed. Returns false if not at one.
+fn Parser.close_angle(&mut self) -> Bool {
+  let t = self.tok()
+  if t.kind == Kind.Gt {
+    self.advance()
+    return true
+  }
+  if t.kind != Kind.Shr && t.kind != Kind.Ge && t.kind != Kind.ShrEq {
+    return false
+  }
+  var kind = Kind.Ge
+  if t.kind == Kind.Shr {
+    kind = Kind.Gt
+  } else if t.kind == Kind.Ge {
+    kind = Kind.Eq
+  }
+  // These tokens are at least two bytes wide.
+  let lo = if t.lo < t.hi { t.lo + 1 } else { t.hi }
+  self.toks[self.pos] = Token { kind: kind, lo: lo, hi: t.hi }
+  self.prev_hi = t.lo + 1
+  return true
+}
+
+fn Parser.parse_fn(
+  &mut self,
+  lo: Int,
+  is_pub: Bool,
+  step_attr: Option<Step>,
+  need_body: Bool,
+) -> Result<Int, ()> {
+  let _ = self.expect(Kind.Fn)?
+  let first = self.expect_ident("a function name")?
+  let first_generics = self.parse_generic_params_opt()?
+  var recv: Option<Receiver> = None
+  var name = first
+  var generics = first_generics
+  if self.at(Kind.Dot) {
+    self.advance()
+    name = self.expect_ident("a method name")?
+    generics = self.parse_generic_params_opt()?
+    recv = Some(Receiver { ty: first, generics: first_generics })
+  }
+  let (self_param, params) = self.parse_params(true)?
+  var ret: Option<Int> = None
+  // `-> T where pred` refines the result: the same as `ensures pred`.
+  var ret_preds: List<Int> = []
+  if self.eat(Kind.Arrow) {
+    ret = Some(self.parse_type()?)
+    if self.eat(Kind.Where) {
+      ret_preds.push(self.expr_no_struct()?)
+    }
+  }
+  let sig_span = self.span_from(lo)
+  let cl = self.parse_clauses(ret_preds)?
+  var body: Option<Int> = None
+  if self.skip_semis_before(Kind.LBrace) {
+    body = Some(self.parse_block()?)
+  } else if need_body {
+    self.expected("`{` to start the function body")
+    return Err(())
+  }
+  let decl = FnDecl {
+    recv: recv
+    self_param: self_param
+    generics: generics
+    params: params
+    ret: ret
+    pre: cl.pre
+    post: cl.post
+    effect_names: cl.effect_names
+    effects_span: cl.effects_span
+    body: body
+    step_attr: step_attr
+    sig_span: sig_span
+  }
+  return Ok(self.push_item(ItemKind.Fn(decl), name, lo, is_pub))
+}
+
+fn Parser.parse_clause_exprs(&mut self) -> Result<List<Int>, ()> {
+  var es: List<Int> = []
+  for {
+    es.push(self.expr_no_struct()?)
+    if !self.eat(Kind.Comma) {
+      break
+    }
+  }
+  return Ok(es)
+}
+
+fn Parser.parse_clauses(&mut self, ret_preds: List<Int>) -> Result<Clauses, ()> {
+  var req: List<Int> = []
+  var ens = ret_preds
+  var effect_names: Option<List<Name>> = None
+  var effects_span = Span { lo: 0, hi: 0 }
+  for self.skip_semis_before_any([Kind.Requires, Kind.Ensures, Kind.Effects]) {
+    let t = self.bump()
+    if t.kind == Kind.Effects {
+      let set = self.parse_effect_set(t.lo)?
+      if effect_names.is_some() {
+        self.error_at(set.span, "duplicate `effects` clause")
+      }
+      effect_names = Some(set.names)
+      effects_span = set.span
+    } else {
+      for {
+        let e = self.expr_no_struct()?
+        if t.kind == Kind.Requires {
+          req.push(e)
+        } else {
+          ens.push(e)
+        }
+        if !self.eat(Kind.Comma) {
+          break
+        }
+      }
+    }
+  }
+  return Ok(Clauses { pre: req, post: ens, effect_names: effect_names, effects_span: effects_span })
+}
+
+/// After the `effects` keyword: `{io, fs}`.
+fn Parser.parse_effect_set(&mut self, lo: Int) -> Result<EffectSet, ()> {
+  let _ = self.expect(Kind.LBrace)?
+  var names: List<Name> = []
+  for {
+    self.skip_semis()
+    if self.eat(Kind.RBrace) {
+      break
+    }
+    names.push(self.expect_ident("an effect name")?)
+    self.skip_semis()
+    if self.eat(Kind.Comma) {
+      continue
+    }
+    self.skip_semis()
+    if self.eat(Kind.RBrace) {
+      break
+    }
+    self.expected("`,` or `}`")
+    return Err(())
+  }
+  return Ok(EffectSet { names: names, span: self.span_from(lo) })
+}
+
+/// `(self, a: T, b: &mut U where pred)`. Closure parameters (`allow_self` false) may omit
+/// their types.
+fn Parser.parse_params(
+  &mut self,
+  allow_self: Bool,
+) -> Result<(Option<SelfParam>, List<Param>), ()> {
+  let _ = self.expect(Kind.LParen)?
+  var self_param: Option<SelfParam> = None
+  var params: List<Param> = []
+  var first = true
+  for {
+    if self.eat(Kind.RParen) {
+      break
+    }
+    let lo = self.tok().lo
+    if first && allow_self {
+      if self.tok_is_ident("self") {
+        let t = self.bump()
+        self_param = Some(SelfParam { mutable: false, span: token_span(t) })
+      } else if self.at(Kind.Amp) && self.ident_at(1, "mut") && self.ident_at(2, "self") {
+        self.advance()
+        self.advance()
+        self.advance()
+        self_param = Some(SelfParam { mutable: true, span: self.span_from(lo) })
+      }
+    }
+    if self_param.is_none() || !first {
+      let name = self.expect_ident("a parameter name")?
+      var ty: Option<Int> = None
+      var mut_ref = false
+      var refine: Option<Int> = None
+      if self.eat(Kind.Colon) {
+        if self.at(Kind.Amp) && self.ident_at(1, "mut") {
+          self.advance()
+          self.advance()
+          mut_ref = true
+        }
+        ty = Some(self.parse_type()?)
+        if self.eat(Kind.Where) {
+          refine = Some(self.expr_no_struct()?)
+        }
+      } else if allow_self {
+        self.expected("`:` and a type")
+        return Err(())
+      }
+      params.push(
+        Param { name: name, ty: ty, mut_ref: mut_ref, refine: refine, span: self.span_from(lo) },
+      )
+    }
+    first = false
+    if self.eat(Kind.Comma) {
+      continue
+    }
+    if self.eat(Kind.RParen) {
+      break
+    }
+    self.expected("`,` or `)`")
+    return Err(())
+  }
+  return Ok((self_param, params))
+}
+
+fn Parser.parse_struct(&mut self, lo: Int, is_pub: Bool) -> Result<Int, ()> {
+  self.advance()
+  let name = self.expect_ident("a struct name")?
+  let generics = self.parse_generic_params_opt()?
+  let _ = self.expect(Kind.LBrace)?
+  var fields: List<FieldDecl> = []
+  var invs: List<Int> = []
+  for {
+    self.skip_semis()
+    if self.eat(Kind.RBrace) {
+      break
+    }
+    if self.at(Kind.Invariant) {
+      self.advance()
+      for {
+        invs.push(self.expr_no_struct()?)
+        if !self.eat(Kind.Comma) {
+          break
+        }
+      }
+    } else {
+      fields.push(self.parse_field_decl(true)?)
+    }
+    if self.eat(Kind.Comma) || self.at(Kind.Semi) {
+      continue
+    }
+    if self.eat(Kind.RBrace) {
+      break
+    }
+    self.expected("a line break or `}`")
+    return Err(())
+  }
+  let id = self.push_item(ItemKind.Struct(generics, fields, invs), name, lo, is_pub)
+  self.end_item()?
+  return Ok(id)
+}
+
+fn Parser.parse_field_decl(&mut self, allow_pub: Bool) -> Result<FieldDecl, ()> {
+  let lo = self.tok().lo
+  let is_pub = allow_pub && self.eat(Kind.Pub)
+  let name = self.expect_ident("a field name")?
+  let _ = self.expect(Kind.Colon)?
+  let ty = self.parse_type()?
+  var refine: Option<Int> = None
+  if self.eat(Kind.Where) {
+    refine = Some(self.expr_no_struct()?)
+  }
+  return Ok(
+    FieldDecl { name: name, ty: ty, is_pub: is_pub, refine: refine, span: self.span_from(lo) },
+  )
+}
+
+fn Parser.parse_enum(&mut self, lo: Int, is_pub: Bool) -> Result<Int, ()> {
+  self.advance()
+  let name = self.expect_ident("an enum name")?
+  let generics = self.parse_generic_params_opt()?
+  let _ = self.expect(Kind.LBrace)?
+  var variants: List<VariantDecl> = []
+  for {
+    self.skip_semis()
+    if self.eat(Kind.RBrace) {
+      break
+    }
+    let vlo = self.tok().lo
+    let vname = self.expect_ident("a variant name")?
+    var fields: List<FieldDecl> = []
+    var has_parens = false
+    if self.eat(Kind.LParen) {
+      has_parens = true
+      for {
+        if self.eat(Kind.RParen) {
+          break
+        }
+        let flo = self.tok().lo
+        if self.at(Kind.Ident) && self.peek_at(1) == Kind.Colon {
+          fields.push(self.parse_field_decl(false)?)
+        } else {
+          let ty = self.parse_type()?
+          let span = self.span_from(flo)
+          let field_name = Name { text: "_" + fields.len().str(), span: span }
+          fields.push(
+            FieldDecl { name: field_name, ty: ty, is_pub: false, refine: None, span: span },
+          )
+        }
+        if self.eat(Kind.Comma) {
+          continue
+        }
+        if self.eat(Kind.RParen) {
+          break
+        }
+        self.expected("`,` or `)`")
+        return Err(())
+      }
+    }
+    variants.push(
+      VariantDecl {
+        name: vname
+        fields: fields
+        has_parens: has_parens
+        span: self.span_from(vlo)
+      },
+    )
+    if self.eat(Kind.Comma) || self.at(Kind.Semi) {
+      continue
+    }
+    if self.eat(Kind.RBrace) {
+      break
+    }
+    self.expected("a line break or `}`")
+    return Err(())
+  }
+  let id = self.push_item(ItemKind.Enum(generics, variants), name, lo, is_pub)
+  self.end_item()?
+  return Ok(id)
+}
+
+fn Parser.parse_interface(&mut self, lo: Int, is_pub: Bool) -> Result<Int, ()> {
+  self.advance()
+  let name = self.expect_ident("an interface name")?
+  let generics = self.parse_generic_params_opt()?
+  let _ = self.expect(Kind.LBrace)?
+  var methods: List<Int> = []
+  for {
+    self.skip_semis()
+    if self.eat(Kind.RBrace) {
+      break
+    }
+    let mlo = self.tok().lo
+    methods.push(self.parse_fn(mlo, true, None, false)?)
+  }
+  let id = self.push_item(ItemKind.Interface(generics, methods), name, lo, is_pub)
+  self.end_item()?
+  return Ok(id)
+}
+
+// ---------- types ----------
+
+fn Parser.parse_type(&mut self) -> Result<Int, ()> {
+  let lo = self.tok().lo
+  match self.peek() {
+    LParen => {
+      self.advance()
+      var elems: List<Int> = []
+      var trailing_comma = false
+      for {
+        if self.eat(Kind.RParen) {
+          break
+        }
+        elems.push(self.parse_type()?)
+        trailing_comma = false
+        if self.eat(Kind.Comma) {
+          trailing_comma = true
+          continue
+        }
+        let _ = self.expect(Kind.RParen)?
+        break
+      }
+      if elems.len() == 1 && !trailing_comma {
+        // A parenthesized type.
+        return Ok(elems[0])
+      }
+      return Ok(self.mk_type(TypeKind.Tuple(elems), self.span_from(lo)))
+    }
+    Fn => {
+      self.advance()
+      let _ = self.expect(Kind.LParen)?
+      var params: List<Int> = []
+      for {
+        if self.eat(Kind.RParen) {
+          break
+        }
+        params.push(self.parse_type()?)
+        if self.eat(Kind.Comma) {
+          continue
+        }
+        let _ = self.expect(Kind.RParen)?
+        break
+      }
+      var ret: Option<Int> = None
+      if self.eat(Kind.Arrow) {
+        ret = Some(self.parse_type()?)
+      }
+      var effect_names: Option<List<Name>> = None
+      if self.at(Kind.Effects) {
+        let t = self.bump()
+        effect_names = Some(self.parse_effect_set(t.lo)?.names)
+      }
+      return Ok(self.mk_type(TypeKind.Fn(params, ret, effect_names), self.span_from(lo)))
+    }
+    Ident => {
+      let first = self.expect_ident("a type")?
+      var pkg: Option<Name> = None
+      var name = first
+      if self.at(Kind.Dot) && self.peek_at(1) == Kind.Ident {
+        self.advance()
+        name = self.expect_ident("a type name")?
+        pkg = Some(first)
+      }
+      var args: List<Int> = []
+      var units: Option<List<UnitFactor>> = None
+      if self.at(Kind.Lt) {
+        self.advance()
+        if pkg.is_none() && is_numeric_type_name(name.text) {
+          units = Some(self.parse_unit_expr()?)
+        } else {
+          args = self.parse_type_args_after_lt()?
+        }
+      }
+      return Ok(self.mk_type(TypeKind.Named(pkg, name, args, units), self.span_from(lo)))
+    }
+    Amp => {
+      let t = self.tok()
+      self.errors.push(
+        Diag {
+          code: "E0314"
+          lo: t.lo
+          hi: t.hi
+          msg: "`&mut` is only allowed on function parameters"
+        },
+      )
+      self.advance()
+      if self.tok_is_ident("mut") {
+        self.advance()
+      }
+      return self.parse_type()
+    }
+    _ => {
+      self.expected("a type")
+      return Err(())
+    }
+  }
+}
+
+fn Parser.parse_type_args_after_lt(&mut self) -> Result<List<Int>, ()> {
+  var args: List<Int> = []
+  for {
+    if self.close_angle() {
+      break
+    }
+    args.push(self.parse_type()?)
+    if self.eat(Kind.Comma) {
+      continue
+    }
+    if self.close_angle() {
+      break
+    }
+    self.expected("`,` or `>`")
+    return Err(())
+  }
+  return Ok(args)
+}
+
+/// After `Float<`: `m`, `m/s^2`, `kg*m`, `1/s`, then `>`.
+fn Parser.parse_unit_expr(&mut self) -> Result<List<UnitFactor>, ()> {
+  var factors: List<UnitFactor> = []
+  var sign = 1
+  var first = true
+  for invariant sign == 1 || sign == -1 {
+    if self.close_angle() {
+      break
+    }
+    if !first {
+      if self.eat(Kind.Star) {
+        sign = 1
+      } else if self.eat(Kind.Slash) {
+        sign = -1
+      } else {
+        self.expected("`*`, `/` or `>` in a unit")
+        return Err(())
+      }
+    }
+    if first && self.at(Kind.Int) && self.text(self.tok()) == "1" {
+      self.advance()
+      first = false
+      continue
+    }
+    first = false
+    let name = self.expect_ident("a unit name")?
+    var exp = 1
+    if self.eat(Kind.Caret) {
+      let neg = self.eat(Kind.Minus)
+      let t = self.expect(Kind.Int)?
+      let v = small_decimal(self.text(t), 127, 1)
+      exp = if neg { -v } else { v }
+    }
+    factors.push(UnitFactor { name: name, exp: exp * sign })
+  }
+  return Ok(factors)
+}
+
+// ---------- statements ----------
+
+fn Parser.parse_block(&mut self) -> Result<Int, ()> {
+  let lo = self.tok().lo
+  let _ = self.expect(Kind.LBrace)?
+  let saved = self.no_struct
+  self.no_struct = false
+  var stmts: List<Int> = []
+  for {
+    self.skip_semis()
+    if self.at(Kind.RBrace) || self.at(Kind.Eof) {
+      break
+    }
+    let before = self.pos
+    match self.parse_stmt() {
+      Ok(s) => {
+        stmts.push(s)
+        if !(self.at(Kind.Semi) || self.at(Kind.RBrace)) {
+          self.expected("end of line")
+          self.recover_stmt()
+        }
+      }
+      Err(_) => {
+        if self.pos == before {
+          self.advance()
+        }
+        self.recover_stmt()
+      }
+    }
+  }
+  self.no_struct = saved
+  let _ = self.expect(Kind.RBrace)?
+  return Ok(self.mk_expr(ExprKind.Block(stmts), self.span_from(lo)))
+}
+
+fn Parser.assign_op(self) -> Option<Option<BinOp>> {
+  return match self.peek() {
+    Eq => Some(None)
+    PlusEq => Some(Some(BinOp.Add))
+    MinusEq => Some(Some(BinOp.Sub))
+    StarEq => Some(Some(BinOp.Mul))
+    SlashEq => Some(Some(BinOp.Div))
+    PercentEq => Some(Some(BinOp.Rem))
+    AmpEq => Some(Some(BinOp.BitAnd))
+    PipeEq => Some(Some(BinOp.BitOr))
+    CaretEq => Some(Some(BinOp.BitXor))
+    ShlEq => Some(Some(BinOp.Shl))
+    ShrEq => Some(Some(BinOp.Shr))
+    _ => None
+  }
+}
+
+fn Parser.parse_stmt(&mut self) -> Result<Int, ()> {
+  let lo = self.tok().lo
+  match self.peek() {
+    Let | Var => {
+      let mutable = self.bump().kind == Kind.Var
+      let pat = self.parse_pat()?
+      var ty: Option<Int> = None
+      if self.eat(Kind.Colon) {
+        ty = Some(self.parse_type()?)
+      }
+      if !self.at(Kind.Eq) {
+        self.expected("`=` and an initial value (Jig has no default values)")
+        return Err(())
+      }
+      self.advance()
+      let init = self.parse_expr()?
+      return Ok(self.mk_stmt(StmtKind.Let(pat, ty, init, mutable), self.span_from(lo)))
+    }
+    Return => {
+      self.advance()
+      var value: Option<Int> = None
+      if !(self.at(Kind.Semi) || self.at(Kind.RBrace)) {
+        value = Some(self.parse_expr()?)
+      }
+      return Ok(self.mk_stmt(StmtKind.Return(value), self.span_from(lo)))
+    }
+    Break => {
+      self.advance()
+      return Ok(self.mk_stmt(StmtKind.Break, self.span_from(lo)))
+    }
+    Continue => {
+      self.advance()
+      return Ok(self.mk_stmt(StmtKind.Continue, self.span_from(lo)))
+    }
+    For => {
+      return self.parse_for()
+    }
+    _ => {
+      let e = self.parse_expr()?
+      match self.assign_op() {
+        Some(op) => {
+          self.advance()
+          let value = self.parse_expr()?
+          return Ok(self.mk_stmt(StmtKind.Assign(e, op, value), self.span_from(lo)))
+        }
+        None => {
+          return Ok(self.mk_stmt(StmtKind.Expr(e), self.span_from(lo)))
+        }
+      }
+    }
+  }
+}
+
+fn Parser.parse_arm(&mut self) -> Result<Arm, ()> {
+  let lo = self.tok().lo
+  let pat = self.parse_pat()?
+  var guard: Option<Int> = None
+  if self.eat(Kind.If) {
+    guard = Some(self.expr_no_struct()?)
+  }
+  let _ = self.expect(Kind.FatArrow)?
+  let body = self.parse_arm_body()?
+  return Ok(Arm { pat: pat, guard: guard, body: body, span: self.span_from(lo) })
+}
+
+/// A match arm body: an expression, or an assignment (`Open => open += 1`), which is
+/// shorthand for a block holding it.
+fn Parser.parse_arm_body(&mut self) -> Result<Int, ()> {
+  let lo = self.tok().lo
+  let e = self.parse_expr()?
+  match self.assign_op() {
+    Some(op) => {
+      self.advance()
+      let value = self.parse_expr()?
+      let s = self.mk_stmt(StmtKind.Assign(e, op, value), self.span_from(lo))
+      return Ok(self.mk_expr(ExprKind.Block([s]), self.span_from(lo)))
+    }
+    None => {
+      return Ok(e)
+    }
+  }
+}
+
+fn Parser.is_for_in(self) -> Bool {
+  let k = self.peek()
+  if k == Kind.Ident {
+    return self.peek_at(1) == Kind.In
+  }
+  if k != Kind.LParen {
+    return false
+  }
+  var depth = 0
+  var i = self.pos
+  for i < self.toks.len() {
+    let ki = self.toks[i].kind
+    if ki == Kind.LParen {
+      depth += 1
+    } else if ki == Kind.RParen {
+      depth -= 1
+      if depth == 0 {
+        return match self.toks.get(i + 1) {
+          Some(t) => t.kind == Kind.In
+          None => false
+        }
+      }
+    } else if ki == Kind.LBrace || ki == Kind.Semi || ki == Kind.Eof {
+      return false
+    }
+    i += 1
+  }
+  return false
+}
+
+fn Parser.parse_for(&mut self) -> Result<Int, ()> {
+  let lo = self.tok().lo
+  self.advance()
+  var head = ForHead.Forever
+  if self.at(Kind.LBrace) || self.at(Kind.Invariant) {
+    // `for { ... }`
+  } else if self.is_for_in() {
+    let pat = self.parse_pat()?
+    let _ = self.expect(Kind.In)?
+    let saved = self.no_struct
+    self.no_struct = true
+    let r = self.parse_range_or_expr()
+    self.no_struct = saved
+    head = ForHead.In(pat, r?)
+  } else {
+    head = ForHead.While(self.expr_no_struct()?)
+  }
+  var invariants: List<Int> = []
+  if self.skip_semis_before(Kind.Invariant) {
+    self.advance()
+    invariants = self.parse_clause_exprs()?
+  }
+  let _ = self.skip_semis_before(Kind.LBrace)
+  let body = self.parse_block()?
+  return Ok(self.mk_stmt(StmtKind.For(head, invariants, body), self.span_from(lo)))
+}
+
+/// `a..b`, `..b`, `a..` (before `]`), or a plain expression.
+fn Parser.parse_range_or_expr(&mut self) -> Result<Int, ()> {
+  let lo = self.tok().lo
+  if self.eat(Kind.DotDot) {
+    let hi = self.parse_expr()?
+    return Ok(self.mk_expr(ExprKind.Range(None, Some(hi)), self.span_from(lo)))
+  }
+  let e = self.parse_expr()?
+  if self.eat(Kind.DotDot) {
+    // `xs[a..]` slices to the end.
+    if self.at(Kind.RBracket) {
+      return Ok(self.mk_expr(ExprKind.Range(Some(e), None), self.span_from(lo)))
+    }
+    let hi = self.parse_expr()?
+    return Ok(self.mk_expr(ExprKind.Range(Some(e), Some(hi)), self.span_from(lo)))
+  }
+  return Ok(e)
+}
+
+// ---------- patterns ----------
+
+fn Parser.parse_pat(&mut self) -> Result<Int, ()> {
+  let lo = self.tok().lo
+  let first = self.parse_pat_primary()?
+  if !self.at(Kind.Pipe) {
+    return Ok(first)
+  }
+  var alts = [first]
+  for self.eat(Kind.Pipe) {
+    alts.push(self.parse_pat_primary()?)
+  }
+  return Ok(self.mk_pat(PatKind.Or(alts), self.span_from(lo)))
+}
+
+fn Parser.parse_pat_primary(&mut self) -> Result<Int, ()> {
+  let lo = self.tok().lo
+  match self.peek() {
+    Ident => {
+      let t = self.bump()
+      let text = self.text(t)
+      if text == "_" {
+        return Ok(self.mk_pat(PatKind.Wild, token_span(t)))
+      }
+      if !is_type_like(text) {
+        return Ok(self.mk_pat(PatKind.Bind(text), token_span(t)))
+      }
+      if self.at(Kind.Dot) && self.peek_at(1) == Kind.Ident {
+        self.error_at(
+          token_span(t),
+          "patterns name variants without the enum: write `Variant(...)`, not `Enum.Variant(...)`",
+        )
+        self.advance()
+        let n = self.expect_ident("a variant")?
+        return self.finish_variant_pat(lo, n)
+      }
+      return self.finish_variant_pat(lo, Name { text: text, span: token_span(t) })
+    }
+    Int | Float | Str | Char | True | False => {
+      let e = self.parse_primary()?
+      return Ok(self.mk_pat(PatKind.Lit(e), self.span_from(lo)))
+    }
+    Minus => {
+      let mt = self.bump()
+      if !self.at(Kind.Int) && !self.at(Kind.Float) {
+        self.expected("a number after `-`")
+        return Err(())
+      }
+      let inner = self.parse_primary()?
+      let span = self.span_from(mt.lo)
+      let e = self.mk_expr(ExprKind.Unary(UnOp.Neg, inner), span)
+      return Ok(self.mk_pat(PatKind.Lit(e), span))
+    }
+    LParen => {
+      self.advance()
+      var elems: List<Int> = []
+      var trailing = false
+      for {
+        if self.eat(Kind.RParen) {
+          break
+        }
+        elems.push(self.parse_pat()?)
+        trailing = false
+        if self.eat(Kind.Comma) {
+          trailing = true
+          continue
+        }
+        let _ = self.expect(Kind.RParen)?
+        break
+      }
+      if elems.len() == 1 && !trailing {
+        return Ok(elems[0])
+      }
+      return Ok(self.mk_pat(PatKind.Tuple(elems), self.span_from(lo)))
+    }
+    _ => {
+      self.expected("a pattern")
+      return Err(())
+    }
+  }
+}
+
+fn Parser.finish_variant_pat(&mut self, lo: Int, name: Name) -> Result<Int, ()> {
+  var args: List<Int> = []
+  var has_parens = false
+  if self.eat(Kind.LParen) {
+    has_parens = true
+    for {
+      if self.eat(Kind.RParen) {
+        break
+      }
+      args.push(self.parse_pat()?)
+      if self.eat(Kind.Comma) {
+        continue
+      }
+      let _ = self.expect(Kind.RParen)?
+      break
+    }
+  }
+  return Ok(self.mk_pat(PatKind.Variant(name, args, has_parens), self.span_from(lo)))
+}
+
+// ---------- expressions ----------
+
+fn Parser.parse_expr(&mut self) -> Result<Int, ()> {
+  return self.parse_binary(1)
+}
+
+fn Parser.cur_binop(self) -> Option<BinOp> {
+  return match self.peek() {
+    Star => Some(BinOp.Mul)
+    Slash => Some(BinOp.Div)
+    Percent => Some(BinOp.Rem)
+    Shl => Some(BinOp.Shl)
+    Shr => Some(BinOp.Shr)
+    Amp => Some(BinOp.BitAnd)
+    Plus => Some(BinOp.Add)
+    Minus => Some(BinOp.Sub)
+    Pipe => Some(BinOp.BitOr)
+    Caret => Some(BinOp.BitXor)
+    EqEq => Some(BinOp.Eq)
+    Ne => Some(BinOp.Ne)
+    Lt => Some(BinOp.Lt)
+    Le => Some(BinOp.Le)
+    Gt => Some(BinOp.Gt)
+    Ge => Some(BinOp.Ge)
+    AmpAmp => Some(BinOp.And)
+    PipePipe => Some(BinOp.Or)
+    _ => None
+  }
+}
+
+fn Parser.parse_binary(&mut self, min_prec: Int) -> Result<Int, ()> {
+  let lo = self.tok().lo
+  var lhs = self.parse_cast()?
+  for {
+    let op = match self.cur_binop() {
+      Some(o) => o
+      None => {
+        break
+      }
+    }
+    let prec = op.precedence()
+    if prec < min_prec {
+      break
+    }
+    self.advance()
+    // An operand is expected: a line break here does not end the statement.
+    for self.at(Kind.Semi) && self.tok().lo == self.tok().hi {
+      self.advance()
+    }
+    let rhs = self.parse_binary(prec + 1)?
+    lhs = self.mk_expr(ExprKind.Binary(op, lhs, rhs), self.span_from(lo))
+  }
+  return Ok(lhs)
+}
+
+fn Parser.parse_cast(&mut self) -> Result<Int, ()> {
+  let lo = self.tok().lo
+  var e = self.parse_unary()?
+  for self.at(Kind.As) {
+    self.advance()
+    let ty = self.parse_type()?
+    e = self.mk_expr(ExprKind.Cast(e, ty), self.span_from(lo))
+  }
+  return Ok(e)
+}
+
+fn Parser.parse_unary(&mut self) -> Result<Int, ()> {
+  let lo = self.tok().lo
+  let op = match self.peek() {
+    Minus => Some(UnOp.Neg)
+    Bang => Some(UnOp.Not)
+    Tilde => Some(UnOp.BitNot)
+    _ => None
+  }
+  match op {
+    Some(o) => {
+      self.advance()
+      let e = self.parse_unary()?
+      return Ok(self.mk_expr(ExprKind.Unary(o, e), self.span_from(lo)))
+    }
+    None => {
+      let e = self.parse_primary()?
+      return self.parse_postfix(e, lo)
+    }
+  }
+}
+
+fn Parser.is_name(self, e: Int) -> Bool {
+  return match self.ast.exprs[e].kind {
+    Name(_) => true
+    _ => false
+  }
+}
+
+/// A name or a field access: what explicit type arguments may follow.
+fn Parser.is_path(self, e: Int) -> Bool {
+  return match self.ast.exprs[e].kind {
+    Name(_) | Field(_, _) => true
+    _ => false
+  }
+}
+
+/// Is the expression a path that can name a type (for struct literals)?
+fn Parser.expr_as_type_path(self, e: Int) -> Bool {
+  return match self.ast.exprs[e].kind {
+    Name(s) => is_type_like(s)
+    Field(base, name) => self.is_name(base) && is_type_like(name.text)
+    TypeArgs(base, _) => self.is_path(base)
+    _ => false
+  }
+}
+
+/// The type a path expression names; `expr_as_type_path(e)` holds.
+fn Parser.expr_to_type(&mut self, e: Int) -> Int {
+  let x = self.ast.exprs[e]
+  match x.kind {
+    Name(s) => {
+      let n = Name { text: s, span: x.span }
+      return self.mk_type(TypeKind.Named(None, n, [], None), x.span)
+    }
+    Field(base, name) => {
+      let b = self.ast.exprs[base]
+      let pkg = match b.kind {
+        Name(p) => Some(Name { text: p, span: b.span })
+        _ => None
+      }
+      return self.mk_type(TypeKind.Named(pkg, name, [], None), x.span)
+    }
+    TypeArgs(base, args) => {
+      let t = self.expr_to_type(base)
+      match self.ast.types[t].kind {
+        Named(pkg, name, _, _) => self.ast.types[t] = TypeExpr { kind: TypeKind.Named(pkg, name, args, None), span: x.span }
+        _ => {}
+      }
+      return t
+    }
+    _ => panic("not a type path")
+  }
+}
+
+/// C#-style disambiguation: `<` starts type arguments if a balanced `<...>` made only of
+/// type tokens is followed by one of `( . { ) , ] }`, a line end or the end of the file.
+fn Parser.looks_like_type_args(self) -> Bool {
+  var i = self.pos
+  var depth = 0
+  var parens = 0
+  for i < self.toks.len() {
+    let k = self.toks[i].kind
+    if k == Kind.Lt {
+      depth += 1
+    } else if k == Kind.Gt {
+      depth -= 1
+    } else if k == Kind.Shr {
+      depth -= 2
+    } else if k == Kind.LParen {
+      parens += 1
+    } else if k == Kind.RParen {
+      parens -= 1
+      if parens < 0 {
+        return false
+      }
+    } else if !in_type_args(k) {
+      return false
+    }
+    i += 1
+    if depth == 0 {
+      break
+    }
+    if depth < 0 {
+      return false
+    }
+  }
+  if depth != 0 || parens != 0 {
+    return false
+  }
+  return match self.toks.get(i) {
+    Some(t) => match t.kind {
+      LParen | Dot | LBrace | RParen | Comma | RBracket | Semi | RBrace | Eof => true
+      _ => false
+    }
+    None => false
+  }
+}
+
+/// Tokens that can appear inside type arguments, other than brackets.
+fn in_type_args(k: Kind) -> Bool {
+  return match k {
+    Ident | Comma | Dot | Fn | Arrow | Slash | Caret | Star | Int => true
+    _ => false
+  }
+}
+
+fn Parser.parse_postfix(&mut self, start: Int, lo: Int) -> Result<Int, ()> {
+  var e = start
+  for {
+    let k = self.peek()
+    if k == Kind.LParen {
+      let args = self.parse_call_args()?
+      e = self.mk_expr(ExprKind.Call(e, args), self.span_from(lo))
+    } else if k == Kind.LBracket {
+      self.advance()
+      let saved = self.no_struct
+      self.no_struct = false
+      let r = self.parse_range_or_expr()
+      self.no_struct = saved
+      let index = r?
+      let _ = self.expect(Kind.RBracket)?
+      e = self.mk_expr(ExprKind.Index(e, index), self.span_from(lo))
+    } else if k == Kind.Dot {
+      self.advance()
+      // A line break may separate a chained call from its receiver.
+      if self.at(Kind.Ident) {
+        let name = self.expect_ident("a field or method name")?
+        e = self.mk_expr(ExprKind.Field(e, name), self.span_from(lo))
+      } else if self.at(Kind.Int) {
+        let t = self.bump()
+        let index = small_decimal(self.text(t), 4294967295, 0)
+        e = self.mk_expr(ExprKind.TupleField(e, index, token_span(t)), self.span_from(lo))
+      } else {
+        self.expected("a field or method name")
+        return Err(())
+      }
+    } else if k == Kind.Question {
+      self.advance()
+      e = self.mk_expr(ExprKind.Try(e), self.span_from(lo))
+    } else if k == Kind.Lt && self.is_path(e) && self.looks_like_type_args() {
+      self.advance()
+      let args = self.parse_type_args_after_lt()?
+      e = self.mk_expr(ExprKind.TypeArgs(e, args), self.span_from(lo))
+    } else if k == Kind.LBrace && !self.no_struct && self.expr_as_type_path(e) {
+      let ty = self.expr_to_type(e)
+      let fields = self.parse_struct_lit_fields()?
+      e = self.mk_expr(ExprKind.StructLit(ty, fields), self.span_from(lo))
+    } else {
+      return Ok(e)
+    }
+  }
+}
+
+fn Parser.parse_struct_lit_fields(&mut self) -> Result<List<FieldInit>, ()> {
+  let _ = self.expect(Kind.LBrace)?
+  let saved = self.no_struct
+  self.no_struct = false
+  let r = self.struct_lit_fields()
+  self.no_struct = saved
+  return r
+}
+
+fn Parser.struct_lit_fields(&mut self) -> Result<List<FieldInit>, ()> {
+  var fields: List<FieldInit> = []
+  for {
+    self.skip_semis()
+    if self.eat(Kind.RBrace) {
+      break
+    }
+    let name = self.expect_ident("a field name")?
+    if !self.at(Kind.Colon) {
+      self.expected("`:` and a value (write `field: value`)")
+      return Err(())
+    }
+    self.advance()
+    let value = self.parse_expr()?
+    fields.push(FieldInit { name: name, value: value })
+    if self.eat(Kind.Comma) || self.at(Kind.Semi) {
+      continue
+    }
+    self.skip_semis()
+    if self.eat(Kind.RBrace) {
+      break
+    }
+    self.expected("`,` or `}`")
+    return Err(())
+  }
+  return Ok(fields)
+}
+
+fn Parser.parse_call_args(&mut self) -> Result<List<Int>, ()> {
+  let _ = self.expect(Kind.LParen)?
+  let saved = self.no_struct
+  self.no_struct = false
+  let r = self.call_args()
+  self.no_struct = saved
+  return r
+}
+
+fn Parser.call_args(&mut self) -> Result<List<Int>, ()> {
+  var args: List<Int> = []
+  for {
+    if self.eat(Kind.RParen) {
+      break
+    }
+    let lo = self.tok().lo
+    if self.at(Kind.Amp) && self.ident_at(1, "mut") {
+      self.advance()
+      self.advance()
+      let place = self.parse_expr()?
+      args.push(self.mk_expr(ExprKind.MutArg(place), self.span_from(lo)))
+    } else {
+      args.push(self.parse_expr()?)
+    }
+    if self.eat(Kind.Comma) {
+      continue
+    }
+    if self.eat(Kind.RParen) {
+      break
+    }
+    self.expected("`,` or `)`")
+    return Err(())
+  }
+  return Ok(args)
+}
+
+/// `(a)`, `(a, b)` or `()`, after the `(`.
+fn Parser.paren_or_tuple(&mut self, lo: Int) -> Result<Int, ()> {
+  var elems: List<Int> = []
+  var trailing = false
+  for {
+    if self.eat(Kind.RParen) {
+      break
+    }
+    elems.push(self.parse_expr()?)
+    trailing = false
+    if self.eat(Kind.Comma) {
+      trailing = true
+      continue
+    }
+    let _ = self.expect(Kind.RParen)?
+    break
+  }
+  if elems.len() == 1 && !trailing {
+    return Ok(self.mk_expr(ExprKind.Paren(elems[0]), self.span_from(lo)))
+  }
+  return Ok(self.mk_expr(ExprKind.Tuple(elems), self.span_from(lo)))
+}
+
+/// `[a, b]`, after the `[`.
+fn Parser.list_lit(&mut self, lo: Int) -> Result<Int, ()> {
+  var elems: List<Int> = []
+  for {
+    if self.eat(Kind.RBracket) {
+      break
+    }
+    elems.push(self.parse_expr()?)
+    if self.eat(Kind.Comma) {
+      continue
+    }
+    let _ = self.expect(Kind.RBracket)?
+    break
+  }
+  return Ok(self.mk_expr(ExprKind.List(elems), self.span_from(lo)))
+}
+
+fn Parser.parse_primary(&mut self) -> Result<Int, ()> {
+  let t = self.tok()
+  let lo = t.lo
+  match t.kind {
+    Int => {
+      self.advance()
+      match int_value(self.text(t).replace("_", "")) {
+        Some(v) => {
+          return Ok(self.mk_expr(ExprKind.Int(v), token_span(t)))
+        }
+        None => {
+          self.errors.push(
+            Diag { code: "E0104", lo: t.lo, hi: t.hi, msg: "integer literal is too large" },
+          )
+          return Ok(self.mk_expr(ExprKind.Int(0), token_span(t)))
+        }
+      }
+    }
+    Float => {
+      self.advance()
+      return Ok(self.mk_expr(ExprKind.Float, token_span(t)))
+    }
+    Str => {
+      self.advance()
+      let s = unescape(literal_body(self.text(t), "\""))
+      return Ok(self.mk_expr(ExprKind.Str(s), token_span(t)))
+    }
+    Char => {
+      self.advance()
+      let cs = unescape(literal_body(self.text(t), "'")).chars()
+      let c = if cs.is_empty() { 0 } else { cs[0] as Int }
+      return Ok(self.mk_expr(ExprKind.Char(c), token_span(t)))
+    }
+    True | False => {
+      self.advance()
+      return Ok(self.mk_expr(ExprKind.Bool(t.kind == Kind.True), token_span(t)))
+    }
+    Ident => {
+      let text = self.text(t)
+      if (text == "forall" || text == "exists") &&
+        self.peek_at(1) == Kind.Ident &&
+        self.peek_at(2) == Kind.In {
+        return self.parse_quant()
+      }
+      self.advance()
+      return Ok(self.mk_expr(ExprKind.Name(text), token_span(t)))
+    }
+    LParen => {
+      self.advance()
+      let saved = self.no_struct
+      self.no_struct = false
+      let r = self.paren_or_tuple(lo)
+      self.no_struct = saved
+      return r
+    }
+    LBracket => {
+      self.advance()
+      let saved = self.no_struct
+      self.no_struct = false
+      let r = self.list_lit(lo)
+      self.no_struct = saved
+      return r
+    }
+    Fn => {
+      self.advance()
+      let (_, params) = self.parse_params(false)?
+      var ret: Option<Int> = None
+      if self.eat(Kind.Arrow) {
+        ret = Some(self.parse_type()?)
+      }
+      let body = self.parse_block()?
+      return Ok(self.mk_expr(ExprKind.Closure(params, ret, body), self.span_from(lo)))
+    }
+    If => {
+      return self.parse_if()
+    }
+    Match => {
+      return self.parse_match()
+    }
+    // `return`, `break` and `continue` in expression position (a match arm, a closure
+    // body): a block holding that one statement, which diverges.
+    Return | Break | Continue => {
+      let s = self.parse_stmt()?
+      return Ok(self.mk_expr(ExprKind.Block([s]), self.span_from(lo)))
+    }
+    LBrace => {
+      return self.parse_block()
+    }
+    Amp => {
+      self.errors.push(
+        Diag { code: "E0314", lo: t.lo, hi: t.hi, msg: "`&mut` is only allowed in call arguments" },
+      )
+      self.advance()
+      if self.tok_is_ident("mut") {
+        self.advance()
+      }
+      let inner = self.parse_unary()?
+      return Ok(self.mk_expr(ExprKind.MutArg(inner), self.span_from(lo)))
+    }
+    _ => {
+      self.expected("an expression")
+      return Err(())
+    }
+  }
+}
+
+fn Parser.parse_quant(&mut self) -> Result<Int, ()> {
+  let lo = self.tok().lo
+  let kw = self.bump()
+  let is_forall = self.text(kw) == "forall"
+  let binder = self.expect_ident("a variable")?
+  let _ = self.expect(Kind.In)?
+  let range_lo = self.parse_binary(1)?
+  let _ = self.expect(Kind.DotDot)?
+  let range_hi = self.parse_binary(1)?
+  let _ = self.expect(Kind.Colon)?
+  let body = self.parse_expr()?
+  return Ok(
+    self.mk_expr(ExprKind.Quant(is_forall, binder, range_lo, range_hi, body), self.span_from(lo)),
+  )
+}
+
+fn Parser.parse_if(&mut self) -> Result<Int, ()> {
+  let lo = self.tok().lo
+  let _ = self.expect(Kind.If)?
+  let cond = self.expr_no_struct()?
+  let then = self.parse_block()?
+  var els: Option<Int> = None
+  if self.skip_semis_before(Kind.Else) {
+    self.advance()
+    if self.at(Kind.If) {
+      els = Some(self.parse_if()?)
+    } else {
+      els = Some(self.parse_block()?)
+    }
+  }
+  return Ok(self.mk_expr(ExprKind.If(cond, then, els), self.span_from(lo)))
+}
+
+fn Parser.parse_match(&mut self) -> Result<Int, ()> {
+  let lo = self.tok().lo
+  let _ = self.expect(Kind.Match)?
+  let scrut = self.expr_no_struct()?
+  let _ = self.expect(Kind.LBrace)?
+  let saved = self.no_struct
+  self.no_struct = false
+  let r = self.match_arms()
+  self.no_struct = saved
+  let arms = r?
+  return Ok(self.mk_expr(ExprKind.Match(scrut, arms), self.span_from(lo)))
+}
+
+fn Parser.match_arms(&mut self) -> Result<List<Arm>, ()> {
+  var arms: List<Arm> = []
+  for {
+    self.skip_semis()
+    if self.eat(Kind.RBrace) {
+      break
+    }
+    match self.parse_arm() {
+      Ok(arm) => arms.push(arm)
+      Err(_) => {
+        // Skip to the next arm so one bad arm is one error.
+        if !self.skip_to_arm_end() {
+          return Err(())
+        }
+        continue
+      }
+    }
+    if self.eat(Kind.Comma) || self.at(Kind.Semi) {
+      continue
+    }
+    if self.eat(Kind.RBrace) {
+      break
+    }
+    self.expected("a line break or `}` after the match arm")
+    if !self.skip_to_arm_end() {
+      return Err(())
+    }
+  }
+  return Ok(arms)
+}

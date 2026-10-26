@@ -163,9 +163,10 @@ core passes.
 - [ ] C interop behind the `ffi` effect (SMT solver and LLVM called through the C ABI).
 - [ ] Package manager.
 - [ ] Self-hosted compiler: lexer, parser, checker, MIR, backends, ported pass by pass;
-      arena-and-index design carries over directly. `selfhost/` (`jigc`): the lexer is done,
-      every contract proved, and matches the bootstrap lexer on every repository file and
-      300 mutations (`compiler/tests/selfhost.rs`).
+      arena-and-index design carries over directly. `selfhost/` (`jigc`): the lexer and
+      parser are done, every contract proved, and their token and AST dumps match the
+      bootstrap compiler's on every repository file and 400 mutations, most of them with
+      syntax errors, so error recovery is compared too (`compiler/tests/selfhost.rs`).
 - [ ] Agent benchmark vs. Rust and TypeScript; opt-in trace corpus.
 - [ ] Bootstrap path decided (see open questions).
 

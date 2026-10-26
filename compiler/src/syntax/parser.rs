@@ -281,7 +281,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let t = self.expect(T::Str)?;
                 let raw = self.text(t);
-                let path = lexer::unescape(&raw[1..raw.len().saturating_sub(1).max(1)]);
+                let path = lexer::unescape(literal_body(raw, '"'));
                 let last = path.rsplit('/').next().unwrap_or(&path).to_string();
                 let name = Name { sym: self.interner.intern(&last), span: t.span() };
                 let path_sym = self.interner.intern(&path);
@@ -298,7 +298,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let t = self.expect(T::Str)?;
                 let raw = self.text(t);
-                let pat = lexer::unescape(&raw[1..raw.len().saturating_sub(1).max(1)]);
+                let pat = lexer::unescape(literal_body(raw, '"'));
                 let pat_sym = self.interner.intern(&pat);
                 self.skip_semis();
                 let fn_lo = self.tok().lo;
@@ -350,7 +350,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let t = self.expect(T::Str)?;
                 let raw = self.text(t);
-                let label = lexer::unescape(&raw[1..raw.len().saturating_sub(1).max(1)]);
+                let label = lexer::unescape(literal_body(raw, '"'));
                 let label = self.interner.intern(&label);
                 let params = if self.at(T::LParen) { self.parse_params(false)?.1 } else { List::EMPTY };
                 let mut requires = List::EMPTY;
@@ -1603,16 +1603,14 @@ impl<'a> Parser<'a> {
             T::Str => {
                 self.bump();
                 let raw = self.text(t);
-                let body = if raw.len() >= 2 && raw.ends_with('"') { &raw[1..raw.len() - 1] } else { &raw[1..] };
-                let s = lexer::unescape(body);
+                let s = lexer::unescape(literal_body(raw, '"'));
                 let s = self.interner.intern(&s);
                 Ok(self.mk_expr(ExprKind::Str(s), t.span()))
             }
             T::Char => {
                 self.bump();
                 let raw = self.text(t);
-                let body = if raw.len() >= 2 && raw.ends_with('\'') { &raw[1..raw.len() - 1] } else { &raw[1..] };
-                let c = lexer::unescape(body).chars().next().map(|c| c as u32).unwrap_or(0);
+                let c = lexer::unescape(literal_body(raw, '\'')).chars().next().map(|c| c as u32).unwrap_or(0);
                 Ok(self.mk_expr(ExprKind::Char(c), t.span()))
             }
             T::True | T::False => {
@@ -1799,6 +1797,16 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// A string or character literal's text without its quotes (an unterminated one has no
+/// closing quote).
+fn literal_body(raw: &str, quote: char) -> &str {
+    if raw.len() >= 2 && raw.ends_with(quote) {
+        &raw[1..raw.len() - 1]
+    } else {
+        &raw[1..]
+    }
+}
+
 pub fn is_numeric_type_name(s: Symbol) -> bool {
     s == sym::INT || s == sym::FLOAT || s == sym::I32 || s == sym::U8 || s == sym::U32 || s == sym::U64
 }
@@ -1873,6 +1881,21 @@ mod tests {
         let (ast, diags) = parse_src("fn f() {\n  let x = \n  let y = 2\n}\nfn g() {}\n");
         assert_eq!(diags.len(), 1, "{:?}", diags.iter().map(|d| &d.message).collect::<Vec<_>>());
         assert_eq!(ast.top_items().count(), 2);
+    }
+
+    #[test]
+    fn unterminated_strings_keep_their_text() {
+        // The text after the opening quote, up to the line end: not cut inside a character.
+        for (src, want) in [("import \"é\n", "é"), ("import \"ab\n", "ab"), ("test \"t€", "t€")] {
+            let (ast, diags) = parse_src(src);
+            assert!(diags.iter().any(|d| d.code == codes::E0102), "{src:?}");
+            let got = match ast.items.iter().next().map(|i| i.kind) {
+                Some(ItemKind::Import { path, .. }) => path.as_str().to_string(),
+                Some(ItemKind::Test { label, .. }) => label.as_str().to_string(),
+                _ => String::new(),
+            };
+            assert!(ast.items.is_empty() || got == want, "{src:?}: {got:?}");
+        }
     }
 
     #[test]

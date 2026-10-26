@@ -289,7 +289,8 @@ fn parse_port(s: Str) -> Result<Int, Str> {
 
 `jig prove` checks each function against its own contract and its callees' contracts, never
 their bodies, and also proves the absence of traps (overflow, division by zero, bounds,
-`unwrap`, reachable `panic`). The one thing read off a callee's body is what it can write:
+`unwrap`, reachable `panic`); it knows a list or string holds at most 2^62 items, so `i + 1`
+cannot overflow for an index `i`. The one thing read off a callee's body is what it can write:
 after `f(&mut x)` or `x.m()` with `&mut self`, fields `f` never assigns keep their values.
 Results are cached per function: changing a body re-proves only that function and, if what
 it can write changed, its callers. A failed contract comes with a

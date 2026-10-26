@@ -11,13 +11,19 @@ bootstrap compiler on every `.jig` file in the repository plus a few hundred mut
 | Pass | Bootstrap | Port | Check |
 | --- | --- | --- | --- |
 | Lexer | `compiler/src/syntax/lexer.rs` | `syntax/lexer.jig` | `jigc tokens FILE` = `jig debug tokens FILE` |
-| Parser | `compiler/src/syntax/parser.rs` | not yet | |
+| Parser | `compiler/src/syntax/parser.rs` | `syntax/ast.jig`, `syntax/parser.jig` | `jigc ast FILE` = `jig debug ast FILE` |
 | Formatter, checker, MIR, back end | | not yet | |
 
+The AST dump (`syntax/dump.jig`) prints every node with its span, one top-level item per
+line, then the errors, so a difference anywhere in the tree or in error recovery shows up.
+Most of the mutated files have syntax errors.
+
 Every contract in `jigc` proves (`jig prove selfhost`): token spans are ordered, the cursor
-only moves forward, and the lexer's state stays consistent.
+only moves forward, the lexer's state stays consistent, and the parser's literal decoding
+stays in range.
 
 ```
 jig run selfhost -- tokens examples/hello/main.jig
+jig run selfhost -- ast examples/hello/main.jig
 jig test selfhost
 ```

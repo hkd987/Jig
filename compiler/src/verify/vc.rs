@@ -18,6 +18,11 @@ use crate::sema::ty::*;
 use crate::syntax::ast::{self, Ast, BinOp, ExprId, ExprKind, ForHead, PatId, PatKind, StmtId, StmtKind, UnOp};
 use crate::util::{sym, FxHashMap, FxHashSet, IndexVec, Symbol};
 
+/// The most elements a list (or bytes a string) can hold: every element takes at least a
+/// byte, and no 64-bit system gives a program more than 2^62 bytes of address space. It lets
+/// the prover show that `i + 1` cannot overflow when `i` is an index.
+const MAX_LEN: i128 = 1 << 62;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ObKind {
     /// A callee's `requires` or parameter refinement, at a call site.
@@ -502,7 +507,7 @@ impl<'a> Gen<'a> {
             Base::Tag(n) => Some(range_fact(&l.t, 0, *n as i128 - 1)),
             Base::Str => {
                 let len = self.str_len(&l.t);
-                Some(format!("(>= {len} 0)"))
+                Some(range_fact(&len, 0, MAX_LEN))
             }
             _ => None,
         }
@@ -520,7 +525,7 @@ impl<'a> Gen<'a> {
         }
         if let Sv::List { len, .. } = v {
             if len.depth == 0 {
-                out.push(range_fact(&len.t, 0, i64::MAX as i128));
+                out.push(range_fact(&len.t, 0, MAX_LEN));
             }
         }
         out

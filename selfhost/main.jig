@@ -3,44 +3,19 @@ import "std/io"
 import "std/os"
 import "syntax"
 
-// jigc: the Jig compiler, written in Jig. So far: `jigc tokens FILE` prints the tokens,
-// comments, blank lines and errors of a file, in the same format as `jig debug tokens`.
-
-fn dump_tokens(src: Str) -> Str {
-  let lx = syntax.lex(src, 0)
-  var out = ""
-  for t in lx.tokens {
-    out = out + "token " + t.kind.str() + " " + t.lo.str() + " " + t.hi.str() + "\n"
-  }
-  for c in lx.comments {
-    out = out +
-      "comment " +
-      c.lo.str() +
-      " " +
-      c.hi.str() +
-      " " +
-      c.doc.str() +
-      " " +
-      c.trailing.str() +
-      "\n"
-  }
-  for b in lx.blank_lines {
-    out = out + "blank " + b.str() + "\n"
-  }
-  for e in lx.errors {
-    out = out + "error " + e.code + " " + e.lo.str() + " " + e.hi.str() + " " + e.msg + "\n"
-  }
-  return out
-}
+// jigc: the Jig compiler, written in Jig. So far it lexes and parses: `jigc tokens FILE` and
+// `jigc ast FILE` print the same text as `jig debug tokens FILE` and `jig debug ast FILE`.
 
 fn main() effects {io, fs, env} {
   let args = os.args()
-  if args.len() < 3 || args[1] != "tokens" {
-    io.eprintln("usage: jigc tokens FILE")
+  if args.len() < 3 || (args[1] != "tokens" && args[1] != "ast") {
+    io.eprintln("usage: jigc tokens|ast FILE")
     os.exit(2)
   }
   match fs.read(args[2]) {
-    Ok(src) => io.print(dump_tokens(src))
+    Ok(src) => io.print(
+      if args[1] == "tokens" { syntax.dump_tokens(src) } else { syntax.dump_ast(src) },
+    )
     Err(e) => {
       io.eprintln(e)
       os.exit(1)

@@ -1,0 +1,88 @@
+// The bootstrap parser's unit tests, in Jig.
+
+fn parse_ok(src: Str) -> Ast {
+  let p = parse(src, 0)
+  assert(p.errors.is_empty())
+  return p.ast
+}
+
+fn count_exprs(ast: Ast, pred: fn(ExprKind) -> Bool) -> Int {
+  return ast.exprs.filter(fn(e) { pred(e.kind) }).len()
+}
+
+fn is_type_args(k: ExprKind) -> Bool {
+  return match k {
+    TypeArgs(_, _) => true
+    _ => false
+  }
+}
+
+fn is_struct_lit(k: ExprKind) -> Bool {
+  return match k {
+    StructLit(_, _) => true
+    _ => false
+  }
+}
+
+test "`<` starts type arguments only before a type-like tail" {
+  let ast = parse_ok(
+    "fn f() {\n  let a = x < y\n  let b = List<Int>.new()\n  let c = g(a < b, c > d)\n  if i < n {\n  }\n}\n",
+  )
+  assert(count_exprs(ast, is_type_args) == 1)
+}
+
+test "no struct literal in an `if` head" {
+  let ast = parse_ok("fn f() {\n  if x == Point {\n  }\n}\n")
+  assert(count_exprs(ast, is_struct_lit) == 0)
+}
+
+test "struct literals and nested generics" {
+  let ast = parse_ok(
+    "fn f() -> Map<Str, List<Int>> {\n  let p = Point { x: 1, y: 2 }\n  let q = geom.Point {\n    x: 1\n    y: 2\n  }\n  return Map.new()\n}\n",
+  )
+  assert(count_exprs(ast, is_struct_lit) == 2)
+}
+
+test "short type names start struct literals" {
+  let ast = parse_ok("fn f() -> S1 {\n  return S1 { a: MAX }\n}\n")
+  assert(count_exprs(ast, is_struct_lit) == 1)
+}
+
+test "one mistake is one error, and parsing goes on" {
+  let p = parse("fn f() {\n  let x = \n  let y = 2\n}\nfn g() {}\n", 0)
+  assert(p.errors.len() == 1 && p.errors[0].code == "E0105")
+  assert(p.ast.top.len() == 2)
+}
+
+test "`else` on the next line and chained calls across lines" {
+  let _ = parse_ok(
+    "fn f() {\n  if a {\n  }\n  else {\n  }\n  let n = xs\n    .map(fn(x) { x * 2 })\n    .len()\n}\n",
+  )
+}
+
+test "the dump of hello world" {
+  let src = "import \"std/io\"\n\nfn main() effects {io} {\n  io.println(\"hello, world\")\n}\n"
+  assert(
+    dump_ast(src) ==
+      "(import io@7:15 @0:15 priv \"std/io\" @7:15)\n" +
+        "(fn main@20:24 @17:72 priv _ _ [] [] _ [] [] [io@36:38] @27:39 (block [(expr (call (field (name io @44:46) println@47:54 @44:54) [(str \"hello, world\" @55:69)] @44:70) @44:70)] @40:72) _ @17:26)\n",
+  )
+}
+
+test "integer literals: radixes, underscores and overflow" {
+  assert(int_value("1_000".replace("_", "")) == Some(1000 as U64))
+  assert(int_value("0xff") == Some(255 as U64))
+  assert(int_value("0b101") == Some(5 as U64))
+  assert(int_value("0o17") == Some(15 as U64))
+  assert(int_value("18446744073709551615").is_some())
+  assert(int_value("18446744073709551616").is_none())
+  assert(int_value("0x").is_none())
+  assert(int_value("0xZZ").is_none())
+}
+
+test "escapes" {
+  assert(unescape("a\\nb\\t\\\\") == "a\nb\t\\")
+  assert(unescape("\\u{e9}\\u{+41}") == "éA")
+  assert(unescape("\\u{D800}x") == "x")
+  assert(unescape("\\q") == "q")
+}

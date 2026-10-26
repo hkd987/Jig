@@ -20,8 +20,6 @@ FAILED struct invariant in `bad_list_span` at tests/prove/semantics/main.jig:133
   hint: Show the new value satisfies the predicate: check it first, or require it of the inputs it is computed from.
 may trap overflow in `ok_span` at tests/prove/semantics/main.jig:144:10: `s.hi - s.lo` does not overflow Int
   counterexample: s.lo = -9223372036854775808, s.hi = 0
-may trap overflow in `ok_strings` at tests/prove/semantics/main.jig:184:29: `s.len() + 1` does not overflow Int
-  counterexample: s.len() = 9223372036854775807
 FAILED assertion in `bad_strings` at tests/prove/semantics/main.jig:189:10: s == t
   counterexample: s.len() = 0, t.len() = 0
   confirmed: running it with s = "", t = "5" fails this check
@@ -57,4 +55,4 @@ may trap overflow in `main` at tests/prove/semantics/main.jig:277:14: `ok_divisi
 may trap overflow in `main` at tests/prove/semantics/main.jig:277:14: `ok_division() + ok_strings("q") + bad_strings("a", "b") + ok_frame() + bad_frame_field() + bad_fr…` does not overflow Int
 may trap overflow in `main` at tests/prove/semantics/main.jig:284:15: `total + more` does not overflow Int
 may trap overflow in `main` at tests/prove/semantics/main.jig:284:15: `total + more + rest` does not overflow Int
-proved 40 of 51 contract obligations and 30 of 51 safety obligations in 30 functions (0 from cache)
+proved 40 of 51 contract obligations and 31 of 51 safety obligations in 30 functions (0 from cache)

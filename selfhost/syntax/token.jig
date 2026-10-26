@@ -1,6 +1,6 @@
 // Token kinds, the same set and order as the bootstrap compiler's `syntax/token.rs`.
 
-pub enum Kind {
+enum Kind {
   Ident
   Int
   Float
@@ -87,10 +87,10 @@ pub enum Kind {
 }
 
 /// A token: its kind and byte span (global offsets).
-pub struct Token {
-  pub kind: Kind
-  pub lo: Int
-  pub hi: Int
+struct Token {
+  kind: Kind
+  lo: Int
+  hi: Int
   invariant lo <= hi
 }
 
@@ -135,5 +135,91 @@ fn Kind.ends_statement(self) -> Bool {
     Ident | Int | Float | Str | Char | True | False | Return | Break | Continue => true
     RParen | RBracket | RBrace | Gt | Shr | Question => true
     _ => false
+  }
+}
+
+/// How errors name this kind of token.
+fn Kind.describe(self) -> Str {
+  return match self {
+    Ident => "identifier"
+    Int => "integer literal"
+    Float => "float literal"
+    Str => "string literal"
+    Char => "character literal"
+    As => "`as`"
+    Break => "`break`"
+    Const => "`const`"
+    Continue => "`continue`"
+    Effects => "`effects`"
+    Else => "`else`"
+    Ensures => "`ensures`"
+    Enum => "`enum`"
+    False => "`false`"
+    Fn => "`fn`"
+    For => "`for`"
+    If => "`if`"
+    Import => "`import`"
+    In => "`in`"
+    Interface => "`interface`"
+    Invariant => "`invariant`"
+    Let => "`let`"
+    Match => "`match`"
+    Pub => "`pub`"
+    Requires => "`requires`"
+    Return => "`return`"
+    Step => "`step`"
+    Struct => "`struct`"
+    Test => "`test`"
+    True => "`true`"
+    Type => "`type`"
+    Unit => "`unit`"
+    Var => "`var`"
+    Where => "`where`"
+    LParen => "`(`"
+    RParen => "`)`"
+    LBrace => "`{`"
+    RBrace => "`}`"
+    LBracket => "`[`"
+    RBracket => "`]`"
+    Comma => "`,`"
+    Dot => "`.`"
+    DotDot => "`..`"
+    Colon => "`:`"
+    Semi => "end of line"
+    Arrow => "`->`"
+    FatArrow => "`=>`"
+    Question => "`?`"
+    Amp => "`&`"
+    AmpAmp => "`&&`"
+    Pipe => "`|`"
+    PipePipe => "`||`"
+    Caret => "`^`"
+    Tilde => "`~`"
+    Bang => "`!`"
+    Eq => "`=`"
+    EqEq => "`==`"
+    Ne => "`!=`"
+    Lt => "`<`"
+    Le => "`<=`"
+    Gt => "`>`"
+    Ge => "`>=`"
+    Shl => "`<<`"
+    Shr => "`>>`"
+    Plus => "`+`"
+    Minus => "`-`"
+    Star => "`*`"
+    Slash => "`/`"
+    Percent => "`%`"
+    PlusEq => "`+=`"
+    MinusEq => "`-=`"
+    StarEq => "`*=`"
+    SlashEq => "`/=`"
+    PercentEq => "`%=`"
+    AmpEq => "`&=`"
+    PipeEq => "`|=`"
+    CaretEq => "`^=`"
+    ShlEq => "`<<=`"
+    ShrEq => "`>>=`"
+    Eof => "end of file"
   }
 }

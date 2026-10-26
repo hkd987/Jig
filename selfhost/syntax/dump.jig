@@ -1,0 +1,574 @@
+// Text dumps of the lexer's and parser's output, the same text as `jig debug tokens` and
+// `jig debug ast`. The self-hosting tests compare them byte for byte.
+
+/// Every token, comment, blank line and error of `src`.
+pub fn dump_tokens(src: Str) -> Str {
+  let lx = lex(src, 0)
+  var out = ""
+  for t in lx.tokens {
+    out = out + ("token " + t.kind.str() + " " + t.lo.str() + " " + t.hi.str() + "\n")
+  }
+  for c in lx.comments {
+    out = out +
+      ("comment " +
+        c.lo.str() +
+        " " +
+        c.hi.str() +
+        " " +
+        c.doc.str() +
+        " " +
+        c.trailing.str() +
+        "\n")
+  }
+  for b in lx.blank_lines {
+    out = out + ("blank " + b.str() + "\n")
+  }
+  for e in lx.errors {
+    out = out + ("error " + e.code + " " + e.lo.str() + " " + e.hi.str() + " " + e.msg + "\n")
+  }
+  return out
+}
+
+/// The parse of `src` as S-expressions, one top-level item per line, then the errors. Every
+/// node prints its span (`@lo:hi`); `_` is an absent option.
+pub fn dump_ast(src: Str) -> Str {
+  let parsed = parse(src, 0)
+  let top = parsed.ast.top
+  var d = Dump { ast: parsed.ast, src: src, out: "" }
+  for id in top {
+    d.item(id)
+    d.w("\n")
+  }
+  for e in parsed.errors {
+    d.w("error " + e.code + " " + e.lo.str() + " " + e.hi.str() + " " + e.msg + "\n")
+  }
+  return d.out
+}
+
+struct Dump {
+  ast: Ast
+  src: Str
+  out: Str
+}
+
+/// Lowercase hexadecimal digits of `c`'s code point.
+fn hex_text(c: Char) -> Str {
+  let digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
+  var v = c as Int
+  if v <= 0 {
+    return "0"
+  }
+  var out = ""
+  for v > 0 {
+    out = digits[v % 16] + out
+    v = v / 16
+  }
+  return out
+}
+
+/// Strings print in quotes; printable ASCII stays, everything else is `\u{hex}`.
+fn quote(s: Str) -> Str {
+  var out = "\""
+  for c in s.chars() {
+    if c >= ' ' && c <= '~' && c != '"' && c != '\\' {
+      out = out + c.str()
+    } else {
+      out = out + ("\\u{" + hex_text(c) + "}")
+    }
+  }
+  return out + "\""
+}
+
+fn fmt_span(s: Span) -> Str {
+  return "@" + s.lo.str() + ":" + s.hi.str()
+}
+
+fn fmt_name(n: Name) -> Str {
+  return n.text + fmt_span(n.span)
+}
+
+fn Dump.w(&mut self, s: Str) {
+  self.out = self.out + s
+}
+
+/// The separator before element `i` of a list.
+fn Dump.sep(&mut self, i: Int) {
+  if i > 0 {
+    self.w(" ")
+  }
+}
+
+fn Dump.exprs(&mut self, xs: List<Int>) {
+  self.w("[")
+  for i in 0..xs.len() {
+    self.sep(i)
+    self.expr(xs[i])
+  }
+  self.w("]")
+}
+
+fn Dump.types(&mut self, xs: List<Int>) {
+  self.w("[")
+  for i in 0..xs.len() {
+    self.sep(i)
+    self.ty(xs[i])
+  }
+  self.w("]")
+}
+
+fn Dump.pats(&mut self, xs: List<Int>) {
+  self.w("[")
+  for i in 0..xs.len() {
+    self.sep(i)
+    self.pat(xs[i])
+  }
+  self.w("]")
+}
+
+fn Dump.names(&mut self, xs: List<Name>) {
+  self.w("[")
+  for i in 0..xs.len() {
+    self.sep(i)
+    self.w(fmt_name(xs[i]))
+  }
+  self.w("]")
+}
+
+fn Dump.opt_expr(&mut self, x: Option<Int>) {
+  match x {
+    Some(e) => self.expr(e)
+    None => self.w("_")
+  }
+}
+
+fn Dump.opt_ty(&mut self, x: Option<Int>) {
+  match x {
+    Some(t) => self.ty(t)
+    None => self.w("_")
+  }
+}
+
+fn Dump.opt_names(&mut self, x: Option<List<Name>>) {
+  match x {
+    Some(l) => self.names(l)
+    None => self.w("_")
+  }
+}
+
+fn Dump.generics(&mut self, xs: List<GenericParam>) {
+  self.w("[")
+  for i in 0..xs.len() {
+    self.sep(i)
+    let g = xs[i]
+    self.w("(gp " + fmt_name(g.name) + " ")
+    self.types(g.bounds)
+    self.w(")")
+  }
+  self.w("]")
+}
+
+fn Dump.params(&mut self, xs: List<Param>) {
+  self.w("[")
+  for i in 0..xs.len() {
+    self.sep(i)
+    let p = xs[i]
+    self.w("(param " + fmt_name(p.name) + " ")
+    self.opt_ty(p.ty)
+    self.w(if p.mut_ref { " mut " } else { " val " })
+    self.opt_expr(p.refine)
+    self.w(" " + fmt_span(p.span) + ")")
+  }
+  self.w("]")
+}
+
+fn Dump.fields(&mut self, xs: List<FieldDecl>) {
+  self.w("[")
+  for i in 0..xs.len() {
+    self.sep(i)
+    let f = xs[i]
+    self.w("(field " + fmt_name(f.name) + " ")
+    self.ty(f.ty)
+    self.w(if f.is_pub { " pub " } else { " priv " })
+    self.opt_expr(f.refine)
+    self.w(" " + fmt_span(f.span) + ")")
+  }
+  self.w("]")
+}
+
+fn Dump.item(&mut self, id: Int) {
+  let it = self.ast.items[id]
+  let vis = if it.is_pub { "pub" } else { "priv" }
+  let head = fmt_name(it.name) + " " + fmt_span(it.span) + " " + vis
+  match it.kind {
+    Import(path, path_span) => self.w(
+      "(import " + head + " " + quote(path) + " " + fmt_span(path_span) + ")",
+    )
+    Fn(d) => {
+      self.w("(fn " + head + " ")
+      match d.recv {
+        Some(r) => {
+          self.w("(recv " + fmt_name(r.ty) + " ")
+          self.generics(r.generics)
+          self.w(")")
+        }
+        None => self.w("_")
+      }
+      self.w(" ")
+      match d.self_param {
+        Some(s) => self.w(
+          "(self " + (if s.mutable { "mut" } else { "val" }) + " " + fmt_span(s.span) + ")",
+        )
+        None => self.w("_")
+      }
+      self.w(" ")
+      self.generics(d.generics)
+      self.w(" ")
+      self.params(d.params)
+      self.w(" ")
+      self.opt_ty(d.ret)
+      self.w(" ")
+      self.exprs(d.pre)
+      self.w(" ")
+      self.exprs(d.post)
+      self.w(" ")
+      self.opt_names(d.effect_names)
+      self.w(" " + fmt_span(d.effects_span) + " ")
+      self.opt_expr(d.body)
+      self.w(" ")
+      match d.step_attr {
+        Some(s) => self.w("(step " + quote(s.pattern) + " " + fmt_span(s.span) + ")")
+        None => self.w("_")
+      }
+      self.w(" " + fmt_span(d.sig_span) + ")")
+    }
+    Struct(generics, fields, invariants) => {
+      self.w("(struct " + head + " ")
+      self.generics(generics)
+      self.w(" ")
+      self.fields(fields)
+      self.w(" ")
+      self.exprs(invariants)
+      self.w(")")
+    }
+    Enum(generics, variants) => {
+      self.w("(enum " + head + " ")
+      self.generics(generics)
+      self.w(" [")
+      for i in 0..variants.len() {
+        self.sep(i)
+        let v = variants[i]
+        self.w("(variant " + fmt_name(v.name) + " ")
+        self.fields(v.fields)
+        self.w((if v.has_parens { " parens " } else { " bare " }) + fmt_span(v.span) + ")")
+      }
+      self.w("])")
+    }
+    Interface(generics, methods) => {
+      self.w("(interface " + head + " ")
+      self.generics(generics)
+      self.w(" [")
+      for i in 0..methods.len() {
+        self.sep(i)
+        self.item(methods[i])
+      }
+      self.w("])")
+    }
+    TypeAlias(generics, ty) => {
+      self.w("(type " + head + " ")
+      self.generics(generics)
+      self.w(" ")
+      self.ty(ty)
+      self.w(")")
+    }
+    Const(ty, value) => {
+      self.w("(const " + head + " ")
+      self.ty(ty)
+      self.w(" ")
+      self.expr(value)
+      self.w(")")
+    }
+    Unit => self.w("(unit " + head + ")")
+    Test(label, params, pre, body) => {
+      self.w("(test " + head + " " + quote(label) + " ")
+      self.params(params)
+      self.w(" ")
+      self.exprs(pre)
+      self.w(" ")
+      self.expr(body)
+      self.w(")")
+    }
+  }
+}
+
+fn Dump.ty(&mut self, id: Int) {
+  let t = self.ast.types[id]
+  match t.kind {
+    Named(pkg, n, args, units) => {
+      self.w("(named ")
+      match pkg {
+        Some(k) => self.w(fmt_name(k))
+        None => self.w("_")
+      }
+      self.w(" " + fmt_name(n) + " ")
+      self.types(args)
+      self.w(" ")
+      match units {
+        Some(fs) => {
+          self.w("[")
+          for i in 0..fs.len() {
+            self.sep(i)
+            self.w("(uf " + fmt_name(fs[i].name) + " " + fs[i].exp.str() + ")")
+          }
+          self.w("]")
+        }
+        None => self.w("_")
+      }
+    }
+    Tuple(elems) => {
+      self.w("(tuple-type ")
+      self.types(elems)
+    }
+    Fn(params, ret, effect_names) => {
+      self.w("(fn-type ")
+      self.types(params)
+      self.w(" ")
+      self.opt_ty(ret)
+      self.w(" ")
+      self.opt_names(effect_names)
+    }
+    Refined(base, pred) => {
+      self.w("(refined ")
+      self.ty(base)
+      self.w(" ")
+      self.expr(pred)
+    }
+  }
+  self.w(" " + fmt_span(t.span) + ")")
+}
+
+fn Dump.pat(&mut self, id: Int) {
+  let p = self.ast.pats[id]
+  match p.kind {
+    Wild => self.w("(wild")
+    Bind(s) => self.w("(bind " + s)
+    Lit(e) => {
+      self.w("(lit ")
+      self.expr(e)
+    }
+    Variant(n, args, has_parens) => {
+      self.w("(variant-pat " + fmt_name(n) + " ")
+      self.pats(args)
+      self.w(if has_parens { " parens" } else { " bare" })
+    }
+    Tuple(elems) => {
+      self.w("(tuple-pat ")
+      self.pats(elems)
+    }
+    Or(alts) => {
+      self.w("(or ")
+      self.pats(alts)
+    }
+  }
+  self.w(" " + fmt_span(p.span) + ")")
+}
+
+fn Dump.stmt(&mut self, id: Int) {
+  let s = self.ast.stmts[id]
+  match s.kind {
+    Let(pat, ty, init, mutable) => {
+      self.w(if mutable { "(var " } else { "(let " })
+      self.pat(pat)
+      self.w(" ")
+      self.opt_ty(ty)
+      self.w(" ")
+      self.expr(init)
+    }
+    Assign(target, op, value) => {
+      self.w("(assign ")
+      self.expr(target)
+      let text = match op {
+        Some(o) => o.text()
+        None => ""
+      }
+      self.w(" " + text + "= ")
+      self.expr(value)
+    }
+    Expr(e) => {
+      self.w("(expr ")
+      self.expr(e)
+    }
+    Return(value) => {
+      self.w("(return ")
+      self.opt_expr(value)
+    }
+    Break => self.w("(break")
+    Continue => self.w("(continue")
+    For(head, invariants, body) => {
+      self.w("(for ")
+      match head {
+        Forever => self.w("(forever)")
+        While(c) => {
+          self.w("(while ")
+          self.expr(c)
+          self.w(")")
+        }
+        In(pat, iter) => {
+          self.w("(in ")
+          self.pat(pat)
+          self.w(" ")
+          self.expr(iter)
+          self.w(")")
+        }
+      }
+      self.w(" ")
+      self.exprs(invariants)
+      self.w(" ")
+      self.expr(body)
+    }
+  }
+  self.w(" " + fmt_span(s.span) + ")")
+}
+
+fn Dump.expr(&mut self, id: Int) {
+  let e = self.ast.exprs[id]
+  match e.kind {
+    Int(v) => self.w("(int " + v.str())
+    Float => self.w("(float " + quote(self.src[e.span.lo..e.span.hi]))
+    Bool(b) => self.w("(bool " + b.str())
+    Str(s) => self.w("(str " + quote(s))
+    Char(c) => self.w("(char " + c.str())
+    Name(s) => self.w("(name " + s)
+    Paren(x) => {
+      self.w("(paren ")
+      self.expr(x)
+    }
+    Tuple(elems) => {
+      self.w("(tuple ")
+      self.exprs(elems)
+    }
+    List(elems) => {
+      self.w("(list ")
+      self.exprs(elems)
+    }
+    Field(base, n) => {
+      self.w("(field ")
+      self.expr(base)
+      self.w(" " + fmt_name(n))
+    }
+    TupleField(base, index, index_span) => {
+      self.w("(tuple-field ")
+      self.expr(base)
+      self.w(" " + index.str() + " " + fmt_span(index_span))
+    }
+    Call(callee, args) => {
+      self.w("(call ")
+      self.expr(callee)
+      self.w(" ")
+      self.exprs(args)
+    }
+    MutArg(x) => {
+      self.w("(mut-arg ")
+      self.expr(x)
+    }
+    Index(base, index) => {
+      self.w("(index ")
+      self.expr(base)
+      self.w(" ")
+      self.expr(index)
+    }
+    Range(lo, hi) => {
+      self.w("(range ")
+      self.opt_expr(lo)
+      self.w(" ")
+      self.opt_expr(hi)
+    }
+    Unary(op, x) => {
+      self.w("(unary " + op.text() + " ")
+      self.expr(x)
+    }
+    Binary(op, lhs, rhs) => {
+      self.w("(binary " + op.text() + " ")
+      self.expr(lhs)
+      self.w(" ")
+      self.expr(rhs)
+    }
+    Cast(x, ty) => {
+      self.w("(cast ")
+      self.expr(x)
+      self.w(" ")
+      self.ty(ty)
+    }
+    Try(x) => {
+      self.w("(try ")
+      self.expr(x)
+    }
+    If(cond, then, els) => {
+      self.w("(if ")
+      self.expr(cond)
+      self.w(" ")
+      self.expr(then)
+      self.w(" ")
+      self.opt_expr(els)
+    }
+    Match(scrut, arms) => {
+      self.w("(match ")
+      self.expr(scrut)
+      self.w(" [")
+      for i in 0..arms.len() {
+        self.sep(i)
+        let a = arms[i]
+        self.w("(arm ")
+        self.pat(a.pat)
+        self.w(" ")
+        self.opt_expr(a.guard)
+        self.w(" ")
+        self.expr(a.body)
+        self.w(" " + fmt_span(a.span) + ")")
+      }
+      self.w("]")
+    }
+    Block(stmts) => {
+      self.w("(block [")
+      for i in 0..stmts.len() {
+        self.sep(i)
+        self.stmt(stmts[i])
+      }
+      self.w("]")
+    }
+    StructLit(ty, fields) => {
+      self.w("(struct-lit ")
+      self.ty(ty)
+      self.w(" [")
+      for i in 0..fields.len() {
+        self.sep(i)
+        self.w("(init " + fmt_name(fields[i].name) + " ")
+        self.expr(fields[i].value)
+        self.w(")")
+      }
+      self.w("]")
+    }
+    Closure(params, ret, body) => {
+      self.w("(closure ")
+      self.params(params)
+      self.w(" ")
+      self.opt_ty(ret)
+      self.w(" ")
+      self.expr(body)
+    }
+    TypeArgs(base, args) => {
+      self.w("(type-args ")
+      self.expr(base)
+      self.w(" ")
+      self.types(args)
+    }
+    Quant(is_forall, binder, lo, hi, body) => {
+      self.w("(" + (if is_forall { "forall" } else { "exists" }) + " " + fmt_name(binder) + " ")
+      self.expr(lo)
+      self.w(" ")
+      self.expr(hi)
+      self.w(" ")
+      self.expr(body)
+    }
+  }
+  self.w(" " + fmt_span(e.span) + ")")
+}

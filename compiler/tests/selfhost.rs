@@ -1,7 +1,8 @@
 //! The self-hosted compiler (`selfhost/`, written in Jig) must agree with the bootstrap
-//! compiler. Its lexer runs natively over every `.jig` file in the repository and over
-//! mutated copies (stray quotes, escapes, Unicode, unbalanced brackets); the token dumps must
-//! match `jig debug tokens` byte for byte.
+//! compiler. Its lexer and parser run natively over every `.jig` file in the repository and
+//! over mutated copies (stray quotes, escapes, Unicode, unbalanced brackets, keywords and
+//! operators in odd places, deleted spans); the token and AST dumps must match
+//! `jig debug tokens` and `jig debug ast` byte for byte.
 
 use jig::codegen::build::{build, BuildOpts};
 use jig::sema::load::Sources;
@@ -45,7 +46,7 @@ impl Rng {
 }
 
 #[test]
-fn lexer_matches_bootstrap() {
+fn jigc_matches_bootstrap() {
     if !have_cc() {
         eprintln!("skipping: no C compiler");
         return;
@@ -111,9 +112,58 @@ fn lexer_matches_bootstrap() {
         "\r\n",
         " ",
         "return\n",
+        "fn ",
+        "fn f() {\n",
+        "struct ",
+        "enum E {\n",
+        "match x {\n",
+        " => ",
+        "if ",
+        "else ",
+        "for ",
+        " in ",
+        "let ",
+        "var ",
+        "pub ",
+        "import ",
+        "test \"t\" ",
+        "step \"s\" ",
+        "requires ",
+        "ensures ",
+        "effects {",
+        "invariant ",
+        " where ",
+        "type ",
+        "const ",
+        "unit ",
+        "<",
+        ">",
+        ">>",
+        ">=",
+        "->",
+        "&mut ",
+        "&",
+        "|",
+        "_",
+        "?",
+        " as ",
+        ":",
+        ",",
+        "=",
+        "+=",
+        "-",
+        "!",
+        "Point { x: 1 }",
+        "List<Int>.new()",
+        "forall i in 0..n: ",
+        "x.0",
+        ".1",
+        "99999999999999999999",
+        "0xZZ",
+        "Float<m/s^2>",
     ];
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
-    for k in 0..300 {
+    for k in 0..400 {
         let (_, base) = &cases[rng.below(files.len())];
         let mut s = base.clone();
         for _ in 0..1 + rng.below(8) {
@@ -121,7 +171,16 @@ fn lexer_matches_bootstrap() {
             while !s.is_char_boundary(i) {
                 i -= 1;
             }
-            s.insert_str(i, pieces[rng.below(pieces.len())]);
+            if rng.below(4) == 0 {
+                // Delete a short span.
+                let mut j = (i + 1 + rng.below(24)).min(s.len());
+                while !s.is_char_boundary(j) {
+                    j += 1;
+                }
+                s.replace_range(i..j, "");
+            } else {
+                s.insert_str(i, pieces[rng.below(pieces.len())]);
+            }
         }
         cases.push((format!("mutation {k}"), s));
     }
@@ -129,12 +188,14 @@ fn lexer_matches_bootstrap() {
     for (i, (name, src)) in cases.iter().enumerate() {
         let path = work.join(format!("case{i}.jig"));
         std::fs::write(&path, src).unwrap();
-        let expected = jig::tools::debug::tokens(src);
-        let out = Command::new(&exe).arg("tokens").arg(&path).output().unwrap();
-        let actual = String::from_utf8_lossy(&out.stdout);
-        if actual != expected {
-            let first = expected.lines().zip(actual.lines()).find(|(a, b)| a != b);
-            failures.push(format!("{name} ({}): first difference {first:?}", path.display()));
+        for (cmd, expected) in [("tokens", jig::tools::debug::tokens(src)), ("ast", jig::tools::debug_ast::ast(src))] {
+            let out = Command::new(&exe).arg(cmd).arg(&path).output().unwrap();
+            let actual = String::from_utf8_lossy(&out.stdout);
+            if actual != expected {
+                let first = expected.lines().zip(actual.lines()).find(|(a, b)| a != b);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                failures.push(format!("{cmd} {name} ({}): first difference {first:?} {stderr}", path.display()));
+            }
         }
     }
     assert!(failures.is_empty(), "{} of {} cases differ:\n{}", failures.len(), cases.len(), failures.join("\n"));

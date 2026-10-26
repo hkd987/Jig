@@ -4,27 +4,27 @@
 // with a leading `.`, `&&` or `||`.
 
 /// A comment's span; `doc` for `///`, `trailing` if code precedes it on its line.
-pub struct Comment {
-  pub lo: Int
-  pub hi: Int
-  pub doc: Bool
-  pub trailing: Bool
+struct Comment {
+  lo: Int
+  hi: Int
+  doc: Bool
+  trailing: Bool
 }
 
-/// A lexical error: its diagnostic code, span and message.
-pub struct LexError {
-  pub code: Str
-  pub lo: Int
-  pub hi: Int
-  pub msg: Str
+/// An error: its diagnostic code, span and message.
+struct Diag {
+  code: Str
+  lo: Int
+  hi: Int
+  msg: Str
 }
 
-pub struct Lexed {
-  pub tokens: List<Token>
-  pub comments: List<Comment>
+struct Lexed {
+  tokens: List<Token>
+  comments: List<Comment>
   /// Offsets of line starts that follow a blank line.
-  pub blank_lines: List<Int>
-  pub errors: List<LexError>
+  blank_lines: List<Int>
+  errors: List<Diag>
 }
 
 struct Lexer {
@@ -35,7 +35,7 @@ struct Lexer {
   tokens: List<Token>
   comments: List<Comment>
   blank_lines: List<Int>
-  errors: List<LexError>
+  errors: List<Diag>
   /// Open delimiters: `(`, `[` or `{`.
   stack: List<Char>
   line_has_code: Bool
@@ -43,7 +43,7 @@ struct Lexer {
 }
 
 /// Lex `src`, whose first byte is at global offset `base`.
-pub fn lex(src: Str, base: Int) -> Lexed {
+fn lex(src: Str, base: Int) -> Lexed {
   var lx = Lexer {
     s: src
     n: src.len()
@@ -140,7 +140,7 @@ fn Lexer.push_semi(&mut self, at: Int) {
 }
 
 fn Lexer.err(&mut self, code: Str, lo: Int, hi: Int, msg: Str) {
-  self.errors.push(LexError { code: code, lo: self.base + lo, hi: self.base + hi, msg: msg })
+  self.errors.push(Diag { code: code, lo: self.base + lo, hi: self.base + hi, msg: msg })
 }
 
 fn Lexer.newlines_significant(self) -> Bool {
