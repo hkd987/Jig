@@ -448,6 +448,7 @@ its position; `Str.to_int` and `to_float` ignore surrounding spaces and accept a
 | `jig check [--json]` | parse, types, effects, lints, dead code; milliseconds |
 | `jig prove [filter] [--json] [--verbose] [--std]` | SMT proofs per function, cached in `.jig/proofs` (`--std`: the standard library's) |
 | `jig test [--json] [filter]` | unit tests, property tests, scenarios |
+| `jig get` | download the modules `jig.mod` requires |
 | `jig build [--release] [-o out]` | native binary (debug: checks on; release: `clang -O2`, contracts off) |
 | `jig run [--native] [-- args]` | run `main` (interpreter, or a native debug build) |
 | `jig fmt [--check]` | canonical formatting; no options |

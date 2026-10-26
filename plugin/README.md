@@ -15,6 +15,10 @@ The official agent plugin for the Jig language.
   `/jig:review` writes the report a reviewer reads instead of the code.
 - **MCP tools** (`jig mcp`): `check`, `test`, `prove`, `trace`, `run`, `fmt`, `explain`,
   `search` (by type signature) and `reference`.
+- **Opt-in trace corpus:** after `jig traces on`, the hooks record each edit (the file and the
+  errors it got) and each verified commit in `~/.jig/traces`, for a corpus to train models
+  on Jig. Nothing is sent anywhere; `jig traces export FILE` writes what you choose to share,
+  and `jig traces off` stops.
 
 ## Install
 

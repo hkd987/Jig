@@ -16,6 +16,7 @@ commands:
   trace [fn <name> | scenario <name> | uncovered] [--json]  which scenarios exercise which code
   fmt [--check]           format .jig files in place
   get                     download the modules jig.mod requires, recording their commits in jig.sum
+  traces on|off|status|export FILE  opt-in collection of edits and verified programs (local only)
   explain <code>          explain a diagnostic code
   search <signature>      find functions by type, e.g. 'List<T> -> Option<T>'
   reference               print the language reference
@@ -425,6 +426,7 @@ pub fn main() -> i32 {
         Some("trace") => cmd_trace(rest),
         Some("test") => cmd_test(rest),
         Some("fmt") => cmd_fmt(rest),
+        Some("traces") => crate::tools::traces::command(rest),
         Some("get") => {
             let o = parse_opts(rest);
             let start = std::fs::canonicalize(&o.path).unwrap_or(o.path.clone());

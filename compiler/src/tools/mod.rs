@@ -7,3 +7,4 @@ pub mod mcp;
 pub mod project;
 pub mod search;
 pub mod trace;
+pub mod traces;

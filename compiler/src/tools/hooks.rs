@@ -37,6 +37,16 @@ pub fn post_edit() -> i32 {
     };
     let report = super::project::check_project(&path);
     let errors: Vec<_> = report.diags.iter().filter(|d| d.is_error).collect();
+    let tdir = super::traces::dir();
+    if super::traces::enabled_in(&tdir) {
+        let root = crate::sema::load::find_project_root(&crate::sema::load::Sources::Disk, &path)
+            .unwrap_or_else(|| path.parent().map(PathBuf::from).unwrap_or_default());
+        let errs: Vec<(String, String)> = errors
+            .iter()
+            .map(|d| (d.code.clone(), d.json.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string()))
+            .collect();
+        super::traces::record_edit(&tdir, &root, &path, &errs);
+    }
     if errors.is_empty() {
         return 0;
     }
@@ -157,6 +167,13 @@ pub fn pre_commit() -> i32 {
             "these files are not formatted; run `jig fmt` and commit again:\n{}",
             unformatted.join("\n")
         ));
+    }
+    // A verified state, for the opt-in trace corpus.
+    let tdir = super::traces::dir();
+    if super::traces::enabled_in(&tdir) {
+        let mut sources = Vec::new();
+        crate::cli::collect_jig_files(&cwd, &mut sources);
+        super::traces::record_verified(&tdir, &cwd, &sources);
     }
     0
 }
