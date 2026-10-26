@@ -1,0 +1,25 @@
+pub fn breaks() {
+  break //~ E0316
+}
+
+pub fn if_value(c: Bool) -> Int {
+  let x = if c { 1 } //~ E0301
+  return x
+}
+
+pub fn branches(c: Bool) -> Int {
+  let x = if c { 1 } else { "two" } //~ E0301
+  return x
+}
+
+pub fn returns_unit() -> Int {
+  return //~ E0308
+}
+
+pub fn let_unit() {
+  let x = nothing_fn() //~ E0301
+  let _ = x
+}
+
+pub fn nothing_fn() {
+}

@@ -1,0 +1,6 @@
+// Files and directories.
+
+pub fn read(path: Str) -> Result<Str, Str> effects {fs}
+pub fn write(path: Str, contents: Str) -> Result<(), Str> effects {fs}
+pub fn exists(path: Str) -> Bool effects {fs}
+pub fn list(dir: Str) -> Result<List<Str>, Str> effects {fs}

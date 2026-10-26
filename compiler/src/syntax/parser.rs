@@ -301,7 +301,8 @@ impl<'a> Parser<'a> {
                 Ok(id)
             }
             T::Fn => {
-                let id = self.parse_fn(lo, is_pub, None, true)?;
+                // Bodiless functions are intrinsics; sema allows them only in `std`.
+                let id = self.parse_fn(lo, is_pub, None, false)?;
                 Ok(id)
             }
             T::Step => {

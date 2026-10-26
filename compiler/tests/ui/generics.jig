@@ -1,0 +1,42 @@
+pub interface Named {
+  fn name(self) -> Str
+}
+
+pub struct Dog {
+  pub n: Str
+}
+
+pub struct Rock {
+  pub w: Int
+}
+
+pub fn Dog.name(self) -> Str {
+  return self.n
+}
+
+pub fn greet<T: Named>(x: T) -> Str {
+  return "hi " + x.name()
+}
+
+pub fn use_greet() -> Str {
+  let d = greet(Dog { n: "rex" })
+  let r = greet(Rock { w: 1 }) //~ E0312
+  return d + r
+}
+
+pub fn no_bound<T>(a: T, b: T) -> Bool {
+  return a < b //~ E0312
+}
+
+pub fn float_sort() {
+  var xs = [1.5, 0.5]
+  xs.sort() //~ E0312
+}
+
+pub fn missing_method<T>(x: T) -> Str {
+  return x.name() //~ E0207
+}
+
+pub fn wrong_arity() -> Option<Int, Int> { //~ E0313
+  return None
+}

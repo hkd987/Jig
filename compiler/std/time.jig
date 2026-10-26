@@ -1,0 +1,6 @@
+// Wall-clock and monotonic time.
+
+/// Milliseconds since the Unix epoch.
+pub fn now_ms() -> Int effects {clock}
+/// Monotonic nanoseconds, for measuring durations.
+pub fn now_ns() -> Int effects {clock}

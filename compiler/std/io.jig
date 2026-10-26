@@ -1,0 +1,7 @@
+// Console input and output.
+
+pub fn print(s: Str) effects {io}
+pub fn println(s: Str) effects {io}
+pub fn eprintln(s: Str) effects {io}
+pub fn read_line() -> Option<Str> effects {io}
+pub fn read_all() -> Str effects {io}

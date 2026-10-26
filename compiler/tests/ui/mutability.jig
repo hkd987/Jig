@@ -1,0 +1,55 @@
+pub struct Acct {
+  pub bal: Int
+}
+
+pub fn deposit(a: &mut Acct, n: Int) {
+  a.bal += n
+}
+
+pub fn rules(n: Int) -> Int {
+  let x = 1
+  x = 2 //~ E0307
+  n += 1 //~ E0307
+  var a = Acct { bal: 0 }
+  deposit(a, 1) //~ E0314
+  deposit(&mut a, &mut x) //~ E0314
+  let b = Acct { bal: 0 }
+  deposit(&mut b, 1) //~ E0307
+  return x + a.bal + b.bal
+}
+
+pub fn swap_bal(a: &mut Acct, b: &mut Acct) {
+  let t = a.bal
+  a.bal = b.bal
+  b.bal = t
+}
+
+pub fn aliasing() -> Int {
+  var a = Acct { bal: 1 }
+  swap_bal(&mut a, &mut a) //~ E0315
+  return a.bal
+}
+
+pub fn closures() -> Int {
+  var count = 0
+  let f = fn(x: Int) -> Int {
+    count += x //~ E0307
+    x
+  }
+  count = f(1)
+  return count
+}
+
+pub fn Acct.read(&mut self) -> Int { //~ E0510
+  return self.bal
+}
+
+pub fn needless(a: &mut Acct) -> Int { //~ E0510
+  return a.bal
+}
+
+pub fn strings(s: Str) -> Str {
+  var t = s
+  t[0] = 'a' //~ E0307
+  return t
+}

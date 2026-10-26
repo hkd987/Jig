@@ -1,0 +1,52 @@
+pub struct P {
+  pub x: Int
+}
+
+pub fn mismatches(f: Float) -> Int {
+  let a: Int = "hello" //~ E0301
+  let b: Float = 1 //~ E0301
+  let c = f + 1 //~ E0301
+  let d: U8 = 300 //~ E0104
+  let e = P { x: 1, y: 2 } //~ E0206
+  let g = P {} //~ E0304
+  let h: Str = 5 //~ E0301
+  return a + b as Int + c as Int + d as Int + e.x + g.x + h.len()
+}
+
+pub fn calls() -> Int {
+  let x = mismatches(1.0, 2.0) //~ E0302
+  let y = mismatches("s") //~ E0301
+  let z = nothing() //~ E0201
+  return x + y + z
+}
+
+pub fn ops(s: Str, n: Int) -> Bool {
+  let a = s + n //~ E0306
+  let b = s - s //~ E0306
+  let c = n && true //~ E0301
+  return a == b && c
+}
+
+pub fn no_return(n: Int) -> Int {
+  if n > 0 {
+    return 1
+  }
+} //~ E0308
+
+pub fn casts(s: Str) -> Int {
+  return s as Int //~ E0310
+}
+
+pub fn infer() -> Int {
+  let xs = [] //~ E0305
+  return xs.len()
+}
+
+pub fn index(m: Map<Str, Int>) -> Int {
+  return m["a"] //~ E0311
+}
+
+pub fn try_op(x: Option<Int>) -> Result<Int, Str> {
+  let v = x? //~ E0309
+  return Ok(v)
+}

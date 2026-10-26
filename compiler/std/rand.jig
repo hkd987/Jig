@@ -1,0 +1,9 @@
+// Randomness.
+
+/// A uniformly random integer in `lo..hi`.
+pub fn int(lo: Int, hi: Int) -> Int
+  requires lo < hi
+  effects {rand}
+
+/// A uniformly random float in `[0, 1)`.
+pub fn float() -> Float effects {rand}

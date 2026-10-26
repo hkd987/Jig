@@ -1,0 +1,334 @@
+// The prelude: names every package can use without an import.
+// Functions without a body are compiler intrinsics.
+
+pub enum Option<T> {
+  Some(value: T)
+  None
+}
+
+pub enum Result<T, E> {
+  Ok(value: T)
+  Err(error: E)
+}
+
+/// Aborts the program with `msg`.
+pub fn panic(msg: Str) -> Never
+
+/// Aborts the program if `cond` is false. Also a proof obligation.
+pub fn assert(cond: Bool)
+
+pub fn min<T: Ord>(a: T, b: T) -> T {
+  if b < a {
+    return b
+  }
+  return a
+}
+
+pub fn max<T: Ord>(a: T, b: T) -> T {
+  if b > a {
+    return b
+  }
+  return a
+}
+
+// ---- Option ----
+
+pub fn Option<T>.is_some(self) -> Bool {
+  return match self {
+    Some(_) => true
+    None => false
+  }
+}
+
+pub fn Option<T>.is_none(self) -> Bool {
+  return match self {
+    Some(_) => false
+    None => true
+  }
+}
+
+pub fn Option<T>.unwrap(self) -> T
+  requires self.is_some()
+{
+  return match self {
+    Some(v) => v
+    None => panic("called unwrap() on None")
+  }
+}
+
+pub fn Option<T>.unwrap_or(self, default: T) -> T {
+  return match self {
+    Some(v) => v
+    None => default
+  }
+}
+
+pub fn Option<T>.ok_or<E>(self, err: E) -> Result<T, E> {
+  return match self {
+    Some(v) => Ok(v)
+    None => Err(err)
+  }
+}
+
+pub fn Option<T>.map<U>(self, f: fn(T) -> U) -> Option<U> {
+  return match self {
+    Some(v) => Some(f(v))
+    None => None
+  }
+}
+
+// ---- Result ----
+
+pub fn Result<T, E>.is_ok(self) -> Bool {
+  return match self {
+    Ok(_) => true
+    Err(_) => false
+  }
+}
+
+pub fn Result<T, E>.is_err(self) -> Bool {
+  return match self {
+    Ok(_) => false
+    Err(_) => true
+  }
+}
+
+pub fn Result<T, E>.unwrap(self) -> T
+  requires self.is_ok()
+{
+  return match self {
+    Ok(v) => v
+    Err(_) => panic("called unwrap() on Err")
+  }
+}
+
+pub fn Result<T, E>.unwrap_or(self, default: T) -> T {
+  return match self {
+    Ok(v) => v
+    Err(_) => default
+  }
+}
+
+pub fn Result<T, E>.ok(self) -> Option<T> {
+  return match self {
+    Ok(v) => Some(v)
+    Err(_) => None
+  }
+}
+
+pub fn Result<T, E>.map<U>(self, f: fn(T) -> U) -> Result<U, E> {
+  return match self {
+    Ok(v) => Ok(f(v))
+    Err(e) => Err(e)
+  }
+}
+
+pub fn Result<T, E>.map_err<F>(self, f: fn(E) -> F) -> Result<T, F> {
+  return match self {
+    Ok(v) => Ok(v)
+    Err(e) => Err(f(e))
+  }
+}
+
+// ---- integers ----
+
+pub fn Int.abs(self) -> Int
+pub fn Int.min(self, other: Int) -> Int
+pub fn Int.max(self, other: Int) -> Int
+pub fn Int.pow(self, exp: Int) -> Int
+pub fn Int.wrapping_add(self, other: Int) -> Int
+pub fn Int.wrapping_sub(self, other: Int) -> Int
+pub fn Int.wrapping_mul(self, other: Int) -> Int
+pub fn I32.abs(self) -> I32
+pub fn I32.min(self, other: I32) -> I32
+pub fn I32.max(self, other: I32) -> I32
+pub fn I32.wrapping_add(self, other: I32) -> I32
+pub fn I32.wrapping_sub(self, other: I32) -> I32
+pub fn I32.wrapping_mul(self, other: I32) -> I32
+pub fn U8.min(self, other: U8) -> U8
+pub fn U8.max(self, other: U8) -> U8
+pub fn U8.wrapping_add(self, other: U8) -> U8
+pub fn U8.wrapping_sub(self, other: U8) -> U8
+pub fn U8.wrapping_mul(self, other: U8) -> U8
+pub fn U32.min(self, other: U32) -> U32
+pub fn U32.max(self, other: U32) -> U32
+pub fn U32.wrapping_add(self, other: U32) -> U32
+pub fn U32.wrapping_sub(self, other: U32) -> U32
+pub fn U32.wrapping_mul(self, other: U32) -> U32
+pub fn U64.min(self, other: U64) -> U64
+pub fn U64.max(self, other: U64) -> U64
+pub fn U64.wrapping_add(self, other: U64) -> U64
+pub fn U64.wrapping_sub(self, other: U64) -> U64
+pub fn U64.wrapping_mul(self, other: U64) -> U64
+
+// ---- Float ----
+
+pub fn Float.abs(self) -> Float
+pub fn Float.sqrt(self) -> Float
+pub fn Float.floor(self) -> Float
+pub fn Float.ceil(self) -> Float
+pub fn Float.round(self) -> Float
+pub fn Float.min(self, other: Float) -> Float
+pub fn Float.max(self, other: Float) -> Float
+pub fn Float.is_nan(self) -> Bool
+
+// ---- Char ----
+
+pub fn Char.is_digit(self) -> Bool
+pub fn Char.is_alpha(self) -> Bool
+pub fn Char.is_alnum(self) -> Bool
+pub fn Char.is_space(self) -> Bool
+pub fn Char.is_upper(self) -> Bool
+pub fn Char.is_lower(self) -> Bool
+pub fn Char.to_upper(self) -> Char
+pub fn Char.to_lower(self) -> Char
+
+// ---- Str ----
+
+pub fn Str.len(self) -> Int
+pub fn Str.is_empty(self) -> Bool
+pub fn Str.contains(self, part: Str) -> Bool
+pub fn Str.starts_with(self, prefix: Str) -> Bool
+pub fn Str.ends_with(self, suffix: Str) -> Bool
+pub fn Str.find(self, part: Str) -> Option<Int>
+pub fn Str.split(self, sep: Str) -> List<Str>
+pub fn Str.lines(self) -> List<Str>
+pub fn Str.trim(self) -> Str
+pub fn Str.replace(self, from: Str, to: Str) -> Str
+pub fn Str.repeat(self, n: Int) -> Str
+pub fn Str.to_upper(self) -> Str
+pub fn Str.to_lower(self) -> Str
+pub fn Str.to_int(self) -> Option<Int>
+pub fn Str.to_float(self) -> Option<Float>
+pub fn Str.bytes(self) -> List<U8>
+pub fn Str.chars(self) -> List<Char>
+pub fn Str.from_chars(chars: List<Char>) -> Str
+pub fn Str.from_bytes(bytes: List<U8>) -> Option<Str>
+
+// ---- List ----
+
+pub fn List<T>.new() -> List<T>
+pub fn List<T>.len(self) -> Int
+pub fn List<T>.is_empty(self) -> Bool
+pub fn List<T>.push(&mut self, item: T)
+pub fn List<T>.pop(&mut self) -> Option<T>
+pub fn List<T>.get(self, index: Int) -> Option<T>
+pub fn List<T>.insert(&mut self, index: Int, item: T)
+pub fn List<T>.remove(&mut self, index: Int) -> T
+pub fn List<T>.clear(&mut self)
+pub fn List<T>.extend(&mut self, other: List<T>)
+pub fn List<T>.reverse(&mut self)
+pub fn List<T>.swap(&mut self, i: Int, j: Int)
+pub fn List<T>.truncate(&mut self, len: Int)
+pub fn List<T: Ord>.sort(&mut self)
+
+pub fn List<T>.first(self) -> Option<T> {
+  return self.get(0)
+}
+
+pub fn List<T>.last(self) -> Option<T> {
+  return self.get(self.len() - 1)
+}
+
+pub fn List<T: Eq>.contains(self, item: T) -> Bool {
+  for x in self {
+    if x == item {
+      return true
+    }
+  }
+  return false
+}
+
+pub fn List<T: Eq>.index_of(self, item: T) -> Option<Int> {
+  var i = 0
+  for x in self {
+    if x == item {
+      return Some(i)
+    }
+    i += 1
+  }
+  return None
+}
+
+/// Sorts by a strict "less than" comparison, stably.
+pub fn List<T>.sort_by(&mut self, less: fn(T, T) -> Bool)
+
+pub fn List<T>.map<U>(self, f: fn(T) -> U) -> List<U> {
+  var out: List<U> = []
+  for x in self {
+    out.push(f(x))
+  }
+  return out
+}
+
+pub fn List<T>.filter(self, keep: fn(T) -> Bool) -> List<T> {
+  var out: List<T> = []
+  for x in self {
+    if keep(x) {
+      out.push(x)
+    }
+  }
+  return out
+}
+
+pub fn List<T>.fold<A>(self, init: A, f: fn(A, T) -> A) -> A {
+  var acc = init
+  for x in self {
+    acc = f(acc, x)
+  }
+  return acc
+}
+
+pub fn List<T>.any(self, pred: fn(T) -> Bool) -> Bool {
+  for x in self {
+    if pred(x) {
+      return true
+    }
+  }
+  return false
+}
+
+pub fn List<T>.all(self, pred: fn(T) -> Bool) -> Bool {
+  for x in self {
+    if !pred(x) {
+      return false
+    }
+  }
+  return true
+}
+
+pub fn List<T: Show>.join(self, sep: Str) -> Str {
+  var out = ""
+  var first = true
+  for x in self {
+    if !first {
+      out = out + sep
+    }
+    out = out + x.str()
+    first = false
+  }
+  return out
+}
+
+// ---- Map ----
+
+pub fn Map<K: Hash, V>.new() -> Map<K, V>
+pub fn Map<K: Hash, V>.len(self) -> Int
+pub fn Map<K: Hash, V>.is_empty(self) -> Bool
+pub fn Map<K: Hash, V>.get(self, key: K) -> Option<V>
+pub fn Map<K: Hash, V>.insert(&mut self, key: K, value: V)
+pub fn Map<K: Hash, V>.remove(&mut self, key: K) -> Option<V>
+pub fn Map<K: Hash, V>.contains(self, key: K) -> Bool
+pub fn Map<K: Hash, V>.keys(self) -> List<K>
+pub fn Map<K: Hash, V>.values(self) -> List<V>
+pub fn Map<K: Hash, V>.entries(self) -> List<(K, V)>
+
+// ---- Set ----
+
+pub fn Set<T: Hash>.new() -> Set<T>
+pub fn Set<T: Hash>.len(self) -> Int
+pub fn Set<T: Hash>.is_empty(self) -> Bool
+pub fn Set<T: Hash>.insert(&mut self, item: T)
+pub fn Set<T: Hash>.remove(&mut self, item: T) -> Bool
+pub fn Set<T: Hash>.contains(self, item: T) -> Bool
+pub fn Set<T: Hash>.items(self) -> List<T>

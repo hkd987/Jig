@@ -1,0 +1,26 @@
+unit m
+unit s
+
+pub fn speed(d: Float<m>, t: Float<s>) -> Float<m/s> {
+  return d / t
+}
+
+pub fn bad_add(d: Float<m>, t: Float<s>) -> Float<m> {
+  return d + t //~ E0317
+}
+
+pub fn literals(d: Float<m>) -> Float<m> {
+  return d * 2.0 + 1.0
+}
+
+pub fn wrong_return(d: Float<m>, t: Float<s>) -> Float<m> {
+  return d * t //~ E0301
+}
+
+pub fn strip(d: Float<m>) -> Float {
+  return d as Float
+}
+
+pub fn unknown_unit(x: Float<kg>) -> Float { //~ E0201
+  return x as Float
+}

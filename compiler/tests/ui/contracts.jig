@@ -1,0 +1,19 @@
+pub fn f(x: Int) -> Int
+  requires old(x) > 0 //~ E0320
+  ensures result > x
+{
+  return x + 1
+}
+
+pub fn g(x: Int)
+  ensures result > 0 //~ E0320
+{
+  let _ = x
+}
+
+pub fn mutates(xs: &mut List<Int>) -> Int
+  requires xs.pop().is_some() //~ E0321
+{
+  xs.push(1)
+  return xs.len()
+}

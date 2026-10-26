@@ -1,0 +1,13 @@
+// Pure math functions.
+
+pub const PI: Float = 3.141592653589793
+pub const E: Float = 2.718281828459045
+
+pub fn sin(x: Float) -> Float
+pub fn cos(x: Float) -> Float
+pub fn tan(x: Float) -> Float
+pub fn atan2(y: Float, x: Float) -> Float
+pub fn exp(x: Float) -> Float
+pub fn ln(x: Float) -> Float
+pub fn log10(x: Float) -> Float
+pub fn pow(x: Float, y: Float) -> Float

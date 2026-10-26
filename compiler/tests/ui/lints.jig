@@ -1,0 +1,48 @@
+pub fn unused(a: Int, b: Int) -> Int { //~ E0501
+  let c = 1 //~ E0501
+  var d = 2 //~ E0503
+  return a + d
+}
+
+pub fn Shadowing(x: Int) -> Int { //~ E0504
+  let BadName = 1 //~ E0504
+  let y = x
+  for i in 0..3 {
+    let y = i //~ E0505
+    if y > 1 {
+      return y + BadName
+    }
+  }
+  return y
+}
+
+pub struct bad_struct { //~ E0504
+  pub field: Int
+}
+
+pub fn unreachable_code() -> Int {
+  return 1
+  let x = 2 //~ E0506
+  return x
+}
+
+pub fn results(xs: List<Int>) {
+  xs.len() //~ E0507
+  let _ = xs.len()
+}
+
+pub fn self_compare(x: Int) -> Bool {
+  return x == x //~ E0508
+}
+
+pub fn constant(x: Int) -> Int {
+  if true { //~ E0509
+    return x
+  }
+  return 0
+}
+
+pub fn semicolon() -> Int {
+  let x = 1; //~ E0107
+  return x
+}

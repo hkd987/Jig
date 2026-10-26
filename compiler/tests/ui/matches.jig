@@ -1,0 +1,57 @@
+pub enum Shape {
+  Circle(r: Float)
+  Rect(w: Float, h: Float)
+  Empty
+}
+
+pub fn missing(s: Shape) -> Int {
+  return match s { //~ E0451
+    Circle(_) => 1
+    Empty => 2
+  }
+}
+
+pub fn unreachable(s: Shape) -> Int {
+  return match s {
+    Circle(_) => 1
+    _ => 2
+    Empty => 3 //~ E0452
+  }
+}
+
+pub fn bools(a: Bool, b: Bool) -> Int {
+  return match (a, b) { //~ E0451
+    (true, true) => 1
+    (false, _) => 2
+  }
+}
+
+pub fn ints(n: Int) -> Int {
+  return match n { //~ E0451
+    0 => 1
+    1 => 2
+  }
+}
+
+pub fn options(x: Option<Int>) -> Int {
+  return match x {
+    Some(n) if n > 0 => n
+    Some(_) => 0
+    None => -1
+  }
+}
+
+pub fn guarded_only(x: Option<Int>) -> Int {
+  return match x { //~ E0451
+    Some(n) if n > 0 => n
+    None => -1
+  }
+}
+
+pub fn bad_patterns(s: Shape) -> Int {
+  return match s {
+    Circle => 1 //~ E0323
+    Square(_) => 2 //~ E0208
+    _ => 3
+  }
+}

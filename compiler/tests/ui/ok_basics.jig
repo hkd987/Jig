@@ -1,0 +1,207 @@
+// A clean library exercising most of the language. No errors expected.
+import "std/math"
+
+pub struct Point {
+  pub x: Int
+  pub y: Int
+}
+
+pub enum Shape {
+  Circle(r: Float)
+  Rect(w: Float, h: Float)
+  Empty
+}
+
+pub enum Tree<T> {
+  Leaf
+  Node(left: Tree<T>, value: T, right: Tree<T>)
+}
+
+pub interface Area {
+  fn area(self) -> Float
+}
+
+pub fn Shape.area(self) -> Float {
+  return match self {
+    Circle(r) => math.PI * r * r
+    Rect(w, h) => w * h
+    Empty => 0.0
+  }
+}
+
+pub fn Point.norm2(self) -> Int {
+  return self.x * self.x + self.y * self.y
+}
+
+pub fn Point.shift(&mut self, dx: Int) {
+  self.x += dx
+}
+
+pub fn Point.origin() -> Point {
+  return Point { x: 0, y: 0 }
+}
+
+pub fn Tree<T>.size(self) -> Int {
+  return match self {
+    Leaf => 0
+    Node(l, _, r) => l.size() + 1 + r.size()
+  }
+}
+
+pub fn total<T: Area>(xs: List<T>) -> Float {
+  var sum = 0.0
+  for x in xs {
+    sum += x.area()
+  }
+  return sum
+}
+
+pub fn largest<T: Ord>(xs: List<T>) -> Option<T> {
+  var best: Option<T> = None
+  for x in xs {
+    best = match best {
+      None => Some(x)
+      Some(b) => if x > b { Some(x) } else { Some(b) }
+    }
+  }
+  return best
+}
+
+pub fn parse_port(s: Str) -> Result<Int, Str> {
+  let n = s.to_int().ok_or("not a number")?
+  if n < 1 || n > 65535 {
+    return Err("out of range: " + n.str())
+  }
+  return Ok(n)
+}
+
+pub fn counts(words: List<Str>) -> Map<Str, Int> {
+  var m: Map<Str, Int> = Map.new()
+  for w in words {
+    let n = m.get(w).unwrap_or(0)
+    m.insert(w, n + 1)
+  }
+  return m
+}
+
+pub fn evens(n: Int) -> List<Int> {
+  var out = []
+  for i in 0..n {
+    if i % 2 == 0 {
+      out.push(i)
+    }
+  }
+  return out
+}
+
+pub fn doubled(xs: List<Int>) -> List<Int> {
+  return xs.map(fn(x) { x * 2 }).filter(fn(x) { x > 2 })
+}
+
+pub fn sum_pairs(m: Map<Str, Int>) -> Int {
+  var total = 0
+  for (k, v) in m {
+    total += v + k.len()
+  }
+  return total
+}
+
+pub fn divmod(a: Int, b: Int) -> (Int, Int)
+  requires b != 0
+{
+  return (a / b, a % b)
+}
+
+pub fn use_tuple() -> Int {
+  let (q, r) = divmod(17, 5)
+  let t = (q, r, "x")
+  return t.0 + t.1 + t.2.len()
+}
+
+pub fn bump(n: &mut Int) {
+  n += 1
+}
+
+pub fn use_bump() -> Int {
+  var c = 0
+  bump(&mut c)
+  var p = Point.origin()
+  p.shift(3)
+  return c + p.norm2()
+}
+
+pub fn classify(c: Char) -> Str {
+  return match c {
+    'a' | 'e' | 'i' | 'o' | 'u' => "vowel"
+    _ => if c.is_alpha() { "consonant" } else { "other" }
+  }
+}
+
+pub fn bits(x: Int) -> Int {
+  return (x & 0xff) | (x >> 8) ^ ~x << 2
+}
+
+pub fn casts(x: Int, f: Float) -> Float {
+  let small = x as U8
+  return (small as Int + f as Int) as Float + f
+}
+
+pub fn sum_to(n: Int) -> Int
+  requires n >= 0
+  ensures result == n * (n - 1) / 2
+{
+  var total = 0
+  for i in 0..n invariant total == i * (i - 1) / 2 {
+    total += i
+  }
+  return total
+}
+
+pub fn all_positive(xs: List<Int>) -> Bool
+  ensures result == forall i in 0..xs.len(): xs[i] > 0
+{
+  for x in xs {
+    if x <= 0 {
+      return false
+    }
+  }
+  return true
+}
+
+pub fn loop_forever_until(n: Int) -> Int {
+  var i = 0
+  for {
+    i += 1
+    if i >= n {
+      return i
+    }
+  }
+}
+
+pub fn first_word(s: Str) -> Str {
+  let parts = s.split(" ")
+  return match parts.first() {
+    Some(w) => w
+    None => ""
+  }
+}
+
+pub fn shapes() -> Float {
+  let xs = [Shape.Circle(1.0), Shape.Rect(2.0, 3.0), Shape.Empty]
+  return total(xs)
+}
+
+pub fn tree() -> Int {
+  let t = Tree.Node(Tree.Leaf, 5, Tree.Node(Tree.Leaf, 6, Tree.Leaf))
+  return t.size()
+}
+
+pub fn show_all(xs: List<Point>) -> Str {
+  return xs.map(fn(p) { p.x.str() }).join(", ") + largest([1, 2]).unwrap_or(0).str()
+}
+
+test "points" {
+  var p = Point { x: 3, y: 4 }
+  p.shift(1)
+  assert(p.norm2() == 32)
+}
