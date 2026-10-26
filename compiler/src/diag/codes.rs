@@ -64,8 +64,9 @@ codes! {
          `step` declarations may appear at the top level of a file.";
     E0109 = 109, "missing-body", "function has no body",
         "Every function outside an interface needs a `{ ... }` body after its signature and \
-         contract clauses (`requires`, `ensures`, `effects`). Only interface methods and the \
-         standard library's builtins are declared without one.";
+         contract clauses (`requires`, `ensures`, `effects`). Only interface methods, the \
+         standard library's builtins and C functions (declared with `effects {ffi}`) are \
+         declared without one.";
 
     // ---- E02: names and packages ----
     E0201 = 201, "unresolved-name", "cannot find name",
@@ -190,6 +191,13 @@ codes! {
     E0330 = 330, "never-returns", "unreachable expression type",
         "This expression can never produce a value (for example `panic(...)` or `return`) in a \
          position that needs one.";
+    E0331 = 331, "bad-ffi", "invalid C function",
+        "A function declared without a body and with the `ffi` effect calls the C function of \
+         the same name. Its parameters and result must be `Int`, `I32`, `U8`, `U32`, `U64`, \
+         `Float`, `Bool` or `Str` (passed as a NUL-terminated `const char *`; a returned one is \
+         copied), it cannot be generic or a method or take `&mut`, and it takes at most 6 \
+         integer and 8 `Float` arguments. Libraries are linked with `link NAME` lines in \
+         `jig.mod`.";
 
     // ---- E04: effects ----
     E0401 = 401, "undeclared-effect", "effect not declared",

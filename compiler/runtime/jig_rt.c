@@ -446,6 +446,10 @@ jig_str *jig_str_concat(const jig_str *a, const jig_str *b) {
     return s;
 }
 
+jig_str *jig_str_from_cstr(const char *s) {
+    return s ? jig_str_new(s, (int64_t)strlen(s)) : NULL;
+}
+
 jig_str *jig_str_concat_n(int64_t n, const jig_str *const *xs) {
     int64_t len = 0;
     for (int64_t i = 0; i < n; i++) len += jig_str_len(xs[i]);

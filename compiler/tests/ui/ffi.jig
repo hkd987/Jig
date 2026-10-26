@@ -1,0 +1,35 @@
+import "std/io"
+
+// C functions: declared without a body, with the `ffi` effect.
+
+fn labs(x: Int) -> Int effects {ffi}
+
+fn missing(x: Int) -> Int //~ E0109
+
+fn bad_list(xs: List<Int>) -> Int effects {ffi} //~ E0331
+
+fn bad_ret() -> List<Int> effects {ffi} //~ E0331
+
+fn bad_mut(x: &mut Int) effects {ffi} //~ E0331
+
+fn bad_generic<T>(x: T) -> Int effects {ffi} //~ E0331
+
+fn too_many(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int) effects {ffi} //~ E0331
+
+fn pure_caller() -> Int {
+  return labs(-1) //~ E0401
+}
+
+fn main() effects {io, ffi} {
+  io.println(
+    labs(-3).str() +
+      missing(1).str() +
+      bad_list([]).str() +
+      bad_ret().len().str() +
+      pure_caller().str(),
+  )
+  var n = 1
+  bad_mut(&mut n)
+  io.println(bad_generic(1).str())
+  too_many(1, 2, 3, 4, 5, 6, 7)
+}

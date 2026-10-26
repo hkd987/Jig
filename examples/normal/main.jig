@@ -1,0 +1,32 @@
+import "std/io"
+
+// The normal distribution's cumulative probability, from the C library's error function.
+
+/// The error function, from libm (linked in `jig.mod`).
+fn erf(x: Float) -> Float
+  ensures result >= -1.0 && result <= 1.0
+  effects {ffi}
+
+/// The probability that a standard normal value is at most `z`.
+fn cdf(z: Float) -> Float effects {ffi} {
+  return 0.5 * (1.0 + erf(z / 1.4142135623730951))
+}
+
+/// `x` rounded to four decimal places, as text.
+fn fixed4(x: Float) -> Str {
+  let n = (x * 10000.0).round() as Int
+  let digits = (n % 10000).str()
+  return (n / 10000).str() + "." + "0".repeat(4 - digits.len()) + digits
+}
+
+fn main() effects {io, ffi} {
+  for z in [-2.0, -1.0, 0.0, 1.0, 1.96, 3.0] {
+    io.println("P(Z <= " + z.str() + ") = " + fixed4(cdf(z)))
+  }
+}
+
+test "the median is zero and the tails are symmetric" {
+  assert(fixed4(cdf(0.0)) == "0.5000")
+  assert(fixed4(cdf(1.96)) == "0.9750")
+  assert(fixed4(cdf(-1.0) + cdf(1.0)) == "1.0000")
+}

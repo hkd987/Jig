@@ -531,7 +531,7 @@ impl<'l, 'a> Interp<'l, 'a> {
                 }
                 Ok(Value::Closure(Rc::new((*f, env))))
             }
-            Rvalue::Call(callee, args, _ret) => {
+            Rvalue::Call(callee, args, ret) => {
                 let mut vals = Vec::with_capacity(args.len());
                 let mut mut_places: Vec<&Place> = Vec::new();
                 for a in args {
@@ -546,6 +546,7 @@ impl<'l, 'a> Interp<'l, 'a> {
                 let (ret, outs) = match callee {
                     Callee::Fn(f) => self.call(*f, vals)?,
                     Callee::Intrinsic(i) => self.intrinsic(i, vals, span)?,
+                    Callee::Ffi(name) => (self.ffi(*name, vals, *ret, span)?, Vec::new()),
                     Callee::Value(op) => match self.operand(op, locals, span)? {
                         Value::Fn(f) => self.call(f, vals)?,
                         Value::Closure(c) => {
@@ -562,6 +563,51 @@ impl<'l, 'a> Interp<'l, 'a> {
                 Ok(ret)
             }
         }
+    }
+
+    /// Call the C function `name` (see `mir::ffi`).
+    fn ffi(&mut self, name: Symbol, args: Vec<Value>, ret: Ty, span: Span) -> R<Value> {
+        use super::ffi::{CArg, CRet, CValue};
+        let Some(addr) = super::ffi::symbol(name.as_str(), self.lw.links) else {
+            return Err(
+                self.panic(format!("no C function `{name}` in this process or the libraries `jig.mod` links"), span)
+            );
+        };
+        let cargs: Vec<CArg> = args
+            .iter()
+            .map(|v| match v {
+                Value::Int(i) => CArg::Int(*i),
+                Value::UInt(u) => CArg::Int(*u as i64),
+                Value::Bool(b) => CArg::Int(*b as i64),
+                Value::Float(f) => CArg::Float(*f),
+                Value::Str(s) => CArg::Str(super::ffi::c_string(s)),
+                _ => CArg::Int(0),
+            })
+            .collect();
+        let kind = self.lw.tys.kind(ret).clone();
+        let cret = match kind {
+            TyKind::Float(_) => CRet::Float,
+            TyKind::Str => CRet::Str,
+            TyKind::Tuple(ref ts) if ts.is_empty() => CRet::Void,
+            _ => CRet::Int,
+        };
+        // SAFETY: the checker allowed only scalar and string parameters and results, few enough
+        // to pass in registers; the declaration states the C function's signature.
+        let r = unsafe { super::ffi::call(addr, &cargs, cret) };
+        Ok(match (r, kind) {
+            (CValue::Float(f), _) => Value::Float(f),
+            (CValue::Str(s), _) => Value::Str(Rc::from(s.as_str())),
+            (CValue::Void, _) => Value::Unit,
+            (CValue::Int(r), TyKind::Bool) => Value::Bool(r as u8 != 0),
+            (CValue::Int(r), TyKind::Int(k, _)) => match k {
+                IntTy::I32 => Value::Int(r as i32 as i64),
+                IntTy::U8 => Value::Int(r as u8 as i64),
+                IntTy::U32 => Value::Int(r as u32 as i64),
+                IntTy::U64 => Value::UInt(r as u64),
+                IntTy::I64 => Value::Int(r),
+            },
+            (CValue::Int(_), _) => Value::Unit,
+        })
     }
 
     fn int_kind(&self, ty: Ty) -> Option<IntTy> {

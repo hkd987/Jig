@@ -24,6 +24,8 @@ pub struct Program {
     pub project_root: Option<PathBuf>,
     /// Scenarios from `.feature` files, bound to their step functions.
     pub scenarios: Vec<crate::feature::bind::ScenarioDef>,
+    /// C libraries to link (`link NAME` lines in `jig.mod`).
+    pub links: Vec<String>,
 }
 
 pub struct Package {
@@ -148,6 +150,9 @@ pub struct FnDef {
     pub effects: EffectSet,
     pub is_pub: bool,
     pub has_body: bool,
+    /// A C function: declared without a body, outside the standard library, with the `ffi`
+    /// effect. Calls go to the C symbol of the same name.
+    pub ffi: bool,
     /// For interface method signatures.
     pub iface: Option<IfaceId>,
     pub step: Option<(Symbol, Span)>,

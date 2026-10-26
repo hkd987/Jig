@@ -251,7 +251,7 @@ pub fn unique_lists(mf: &MFn, tys: &TyCtx) -> FxHashSet<Local> {
                             whole(f, &mut bad);
                             None
                         }
-                        Callee::Fn(_) => None,
+                        Callee::Fn(_) | Callee::Ffi(_) => None,
                     };
                     for a in args {
                         match (a, intr) {

@@ -6,6 +6,7 @@
 //! the caller's place when the call returns (copy-in/copy-out, equivalent to by-reference
 //! under the exclusivity rule).
 
+pub mod ffi;
 pub mod interp;
 pub mod intrinsics;
 pub mod lower;
@@ -111,6 +112,8 @@ pub enum AggKind {
 pub enum Callee {
     Fn(MFnId),
     Intrinsic(Intrinsic),
+    /// The C function of this name (the body of a function declared with `effects {ffi}`).
+    Ffi(Symbol),
     /// A function value (closure or function item) held in an operand.
     Value(Operand),
 }

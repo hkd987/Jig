@@ -208,6 +208,7 @@ pub fn build(prog: &mut Program, opts: &BuildOpts) -> Result<PathBuf, String> {
         .arg(&opts.build_dir)
         .args(&objs)
         .args(&rt)
+        .args(prog.links.iter().map(|l| format!("-l{l}")))
         .arg("-lm")
         .arg("-o")
         .arg(&opts.out))?;

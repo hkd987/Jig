@@ -291,6 +291,7 @@ fn new_fn(
         effects: EffectSet::PURE,
         is_pub: item.is_pub || iface.is_some(),
         has_body: f.body.is_some(),
+        ffi: false,
         iface,
         step: f.step,
         span: item.span,
@@ -916,8 +917,60 @@ impl Collector<'_> {
             Some(list) => self.resolve_effects(pid, list),
             None => EffectSet::PURE,
         };
+        let ffi_effect = EffectSet::from_name("ffi").unwrap_or(EffectSet::PURE);
         if !self.defs.fns[fid].has_body && !self.pkgs[pid].is_std && !is_iface {
-            self.err(codes::E0109, item.name.span, format!("function `{}` has no body", item.name.sym));
+            if self.defs.fns[fid].effects.contains(ffi_effect) {
+                self.defs.fns[fid].ffi = true;
+                self.check_ffi_signature(fid);
+            } else {
+                self.err(codes::E0109, item.name.span, format!("function `{}` has no body", item.name.sym));
+            }
+        }
+    }
+
+    /// A C function's signature: scalars and `Str` only, few enough arguments to pass in
+    /// registers, no generics, methods or `&mut`.
+    fn check_ffi_signature(&mut self, fid: FnId) {
+        let fd = &self.defs.fns[fid];
+        let span = fd.name_span;
+        let name = fd.name;
+        let mut problems: Vec<String> = Vec::new();
+        if !fd.generics.is_empty() {
+            problems.push("it is generic".into());
+        }
+        if fd.recv.is_some() || fd.self_mode.is_some() {
+            problems.push("it is a method".into());
+        }
+        let (mut ints, mut floats) = (0, 0);
+        let params: Vec<(Symbol, Ty, Mode)> = fd.params.iter().map(|p| (p.name, p.ty, p.mode)).collect();
+        let ret = fd.ret;
+        for (pname, t, mode) in params {
+            if mode == Mode::MutRef {
+                problems.push(format!("`{pname}` is `&mut`"));
+            }
+            match self.tys.kind(t) {
+                TyKind::Float(_) => floats += 1,
+                TyKind::Int(..) | TyKind::Bool | TyKind::Str => ints += 1,
+                _ => problems.push(format!("`{pname}` has type `{}`", self.tys.display(t))),
+            }
+        }
+        if !matches!(self.tys.kind(ret), TyKind::Int(..) | TyKind::Float(_) | TyKind::Bool | TyKind::Str)
+            && !self.tys.is_unit(ret)
+        {
+            problems.push(format!("it returns `{}`", self.tys.display(ret)));
+        }
+        if ints > 6 || floats > 8 {
+            problems.push("it takes more than 6 integer or 8 `Float` arguments".into());
+        }
+        if !problems.is_empty() {
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0331,
+                    span,
+                    format!("`{name}` cannot be a C function: {}", problems.join(", ")),
+                )
+                .note("C functions take and return `Int`, `I32`, `U8`, `U32`, `U64`, `Float`, `Bool` and `Str`, or return nothing"),
+            );
         }
     }
 

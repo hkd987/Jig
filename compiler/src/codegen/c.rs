@@ -37,6 +37,8 @@ pub struct CGen<'l, 'a> {
     str_lits: FxHashMap<Symbol, String>,
     /// Variant names of enums without payloads, for `.str()` without formatting.
     enum_names: FxHashMap<AdtId, String>,
+    /// C functions declared so far.
+    ffi_decls: FxHashSet<Symbol>,
     locs: FxHashMap<crate::diag::Span, String>,
     queued: FxHashSet<MFnId>,
     queue: Vec<MFnId>,
@@ -101,6 +103,7 @@ pub fn generate(lw: &mut Lowerer) -> Result<CProgram, String> {
         loc_flushed: 0,
         str_lits: FxHashMap::default(),
         enum_names: FxHashMap::default(),
+        ffi_decls: FxHashSet::default(),
         locs: FxHashMap::default(),
         queued: FxHashSet::default(),
         queue: Vec::new(),
@@ -1749,6 +1752,58 @@ impl<'l, 'a> CGen<'l, 'a> {
                 self.release_held(cx, call, ret, &held)
             }
             Callee::Intrinsic(i) => self.intrinsic(mf, cx, i, args, ret, span),
+            Callee::Ffi(name) => self.ffi_call(mf, cx, *name, args, ret, span),
+        }
+    }
+
+    /// A C type for a C function's parameter or result.
+    fn ffi_cty(&self, t: Ty) -> &'static str {
+        match self.lw.tys.kind(t) {
+            TyKind::Int(IntTy::I32, _) => "int32_t",
+            TyKind::Int(IntTy::U8, _) => "uint8_t",
+            TyKind::Int(IntTy::U32, _) => "uint32_t",
+            TyKind::Int(IntTy::U64, _) => "uint64_t",
+            TyKind::Int(..) => "int64_t",
+            TyKind::Float(_) => "double",
+            TyKind::Bool => "bool",
+            TyKind::Str => "const char *",
+            _ => "void",
+        }
+    }
+
+    /// A call to the C function `name`, declared under another C name bound to its symbol so
+    /// it cannot clash with a system header's declaration.
+    fn ffi_call(
+        &mut self,
+        mf: &MFn,
+        cx: &mut FnCx,
+        name: Symbol,
+        args: &[Arg],
+        ret: Ty,
+        span: crate::diag::Span,
+    ) -> String {
+        let mut vals = Vec::new();
+        let mut ctys = Vec::new();
+        for a in args {
+            let Arg::Value(op) = a else { continue };
+            let t = self.operand_ty(mf, op);
+            let e = self.operand(mf, cx, op, span);
+            ctys.push(self.ffi_cty(t));
+            vals.push(if matches!(self.lw.tys.kind(t), TyKind::Str) { format!("jig_str_data({e})") } else { e });
+        }
+        let rc = self.ffi_cty(ret);
+        if self.ffi_decls.insert(name) {
+            let ps = if ctys.is_empty() { "void".to_string() } else { ctys.join(", ") };
+            let _ = writeln!(self.decls, "extern {rc} jig_ffi_{name}({ps}) __asm__(JIG_ASM_NAME(\"{name}\"));");
+        }
+        let call = format!("jig_ffi_{name}({})", vals.join(", "));
+        match self.lw.tys.kind(ret) {
+            TyKind::Str => format!("jig_str_from_cstr({call})"),
+            TyKind::Int(..) | TyKind::Float(_) | TyKind::Bool => call,
+            _ => {
+                let _ = writeln!(cx.out, "    {call};");
+                "((jig_unit)0)".into()
+            }
         }
     }
 

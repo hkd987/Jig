@@ -135,6 +135,8 @@ pub fn load_program(sources: &Sources, dir: &Path) -> Program {
         }
     }
     ld.report_cycles(&[Some(prelude), root]);
+    let links =
+        project_root.as_ref().map(|r| read_links(sources, &r.join("jig.mod"), &mut ld.diags)).unwrap_or_default();
     let root = root.unwrap_or(prelude);
     let n = ld.pkgs.len();
     let mut tys = TyCtx::new();
@@ -156,7 +158,33 @@ pub fn load_program(sources: &Sources, dir: &Path) -> Program {
         root,
         project_root,
         scenarios: Vec::new(),
+        links,
     }
+}
+
+/// The `link NAME` lines of `jig.mod`: C libraries for `ffi` functions.
+fn read_links(sources: &Sources, path: &Path, diags: &mut Diags) -> Vec<String> {
+    let Some(text) = sources.read(path) else { return Vec::new() };
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut words = line.split_whitespace();
+        if words.next() != Some("link") {
+            continue;
+        }
+        match (words.next(), words.next()) {
+            (Some(name), None)
+                if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') =>
+            {
+                out.push(name.to_string())
+            }
+            _ => diags.push(Diagnostic::error(
+                codes::E0203,
+                Span::DUMMY,
+                format!("`{}` in {}: write `link NAME` for the C library `libNAME`", line.trim(), path.display()),
+            )),
+        }
+    }
+    out
 }
 
 /// Parse one package's files into its AST.

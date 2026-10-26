@@ -1,0 +1,39 @@
+import "std/io"
+
+// C functions from libc and libm.
+fn abs(x: I32) -> I32 effects {ffi}
+fn labs(x: Int) -> Int effects {ffi}
+fn strlen(s: Str) -> U64 effects {ffi}
+fn atoi(s: Str) -> I32 effects {ffi}
+fn cos(x: Float) -> Float effects {ffi}
+fn pow(x: Float, y: Float) -> Float effects {ffi}
+fn ldexp(x: Float, e: I32) -> Float effects {ffi}
+fn getenv(name: Str) -> Str effects {ffi}
+fn isdigit(c: I32) -> I32 effects {ffi}
+
+/// A C function with a contract: checked when it returns.
+fn toupper(c: I32) -> I32
+  requires c >= 0 && c < 256
+  ensures result >= 0
+  effects {ffi}
+
+fn main() effects {io, ffi} {
+  io.println(abs(-5 as I32).str() + " " + labs(-9000000000).str() + " " + strlen("héllo").str())
+  io.println(
+    atoi("  42xyz").str() +
+      " " +
+      cos(0.0).str() +
+      " " +
+      pow(2.0, 10.0).str() +
+      " " +
+      ldexp(1.5, 4 as I32).str(),
+  )
+  io.println(
+    "[" +
+      getenv("JIG_FFI_NO_SUCH_VARIABLE") +
+      "] " +
+      (isdigit('7' as I32) != 0 as I32).str() +
+      " " +
+      toupper('a' as I32).str(),
+  )
+}

@@ -17,12 +17,14 @@ pub struct Lowerer<'a> {
     pub sm: &'a SourceMap,
     pub tys: &'a mut TyCtx,
     pub mir: Mir,
+    /// C libraries `jig.mod` links, for the interpreter's C calls.
+    pub links: &'a [String],
 }
 
 impl<'a> Lowerer<'a> {
     pub fn new(prog: &'a mut Program, opts: LowerOpts) -> Lowerer<'a> {
-        let Program { defs, pkgs, tables, bodies, test_bodies, sm, tys, .. } = prog;
-        Lowerer { defs, pkgs, tables, bodies, test_bodies, sm, tys, mir: Mir::new(opts) }
+        let Program { defs, pkgs, tables, bodies, test_bodies, sm, tys, links, .. } = prog;
+        Lowerer { defs, pkgs, tables, bodies, test_bodies, sm, tys, mir: Mir::new(opts), links }
     }
 
     /// The MIR function for an instance, created on first request (lowered later).
@@ -56,7 +58,7 @@ impl<'a> Lowerer<'a> {
             ret,
             locals: IndexVec::new(),
             blocks: IndexVec::new(),
-            lowered: intrinsic.is_some() || !fd.has_body,
+            lowered: intrinsic.is_some() || (!fd.has_body && !fd.ffi),
             intrinsic,
             span: fd.span,
         });
@@ -238,6 +240,12 @@ impl<'a> Lowerer<'a> {
         }
         if let Some(bexpr) = decl.body {
             b.lower_body_block(bexpr);
+        } else if b.lw.defs.fns[f].ffi {
+            // A C function: call it with the parameters, then check the contract as usual.
+            let args: Vec<Arg> = b.params.iter().map(|(l, _)| Arg::Value(Operand::local(*l))).collect();
+            let ret = b.ret_ty;
+            let name = b.lw.defs.fns[f].name;
+            b.assign(Place::local(Local(0)), Rvalue::Call(Callee::Ffi(name), args, ret));
         }
         b.finish();
     }

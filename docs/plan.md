@@ -169,7 +169,11 @@ core passes.
       do not check std postconditions again. I/O, collections and formatting stay runtime
       intrinsics. Generic functions are proved with their type parameters abstract, and the
       prover models what string searches, slices and splits imply about lengths.
-- [ ] C interop behind the `ffi` effect (SMT solver and LLVM called through the C ABI).
+- [x] C interop behind the `ffi` effect (D26): bodiless functions with `effects {ffi}` call C
+      symbols, with scalar and string signatures, runtime-checked contracts and `link`
+      lines in `jig.mod`; native code and the interpreter both call C (`examples/normal`
+      uses libm's `erf`). The self-hosted compiler will reach the SMT solver and LLVM this
+      way once it needs pointers to their handles.
 - [ ] Package manager.
 - [ ] Self-hosted compiler: lexer, parser, checker, MIR, backends, ported pass by pass;
       arena-and-index design carries over directly. `selfhost/` (`jigc`): the lexer and

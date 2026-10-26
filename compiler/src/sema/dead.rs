@@ -173,7 +173,7 @@ pub fn check_dead_code(prog: &mut Program) {
 
     // Unreachable functions.
     for (fid, fd) in defs.fns.iter_enumerated() {
-        if !is_user(fd.pkg) || fd.iface.is_some() || !fd.has_body || reachable.contains(&fid) {
+        if !is_user(fd.pkg) || fd.iface.is_some() || (!fd.has_body && !fd.ffi) || reachable.contains(&fid) {
             continue;
         }
         if let Some((pattern, pspan)) = fd.step {

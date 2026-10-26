@@ -166,6 +166,12 @@ static inline void jig_str_append(jig_str **sp, const jig_str *t) {
     jig_str_append_slow(sp, t);
 }
 jig_str *jig_str_concat_n(int64_t n, const jig_str *const *xs);
+/* A copy of a C string (`NULL` is the empty string). */
+jig_str *jig_str_from_cstr(const char *s);
+/* The assembler name of the C symbol `n`, for declarations bound to it. */
+#define JIG_ASM_STR2(x) #x
+#define JIG_ASM_STR(x) JIG_ASM_STR2(x)
+#define JIG_ASM_NAME(n) JIG_ASM_STR(__USER_LABEL_PREFIX__) n
 jig_str *jig_str_split_next(const jig_str *s, const jig_str *sep, int64_t *pos);
 bool jig_str_eq(const jig_str *a, const jig_str *b);
 int jig_str_cmp(const jig_str *a, const jig_str *b);

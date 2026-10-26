@@ -1,0 +1,11 @@
+import "std/io"
+
+// A C function is dead code like any other when nothing calls it.
+
+fn labs(x: Int) -> Int effects {ffi}
+
+fn llabs(x: Int) -> Int effects {ffi} //~ E0601
+
+fn main() effects {io, ffi} {
+  io.println(labs(-3).str())
+}
