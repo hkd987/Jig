@@ -36,10 +36,11 @@ pub fn c_compiler(release: bool) -> String {
 }
 
 fn flags(release: bool) -> &'static [&'static str] {
+    // Jig has no errno, so math functions need not set it (sqrt becomes one instruction).
     if release {
-        &["-O2", "-std=gnu11", "-w", "-pthread"]
+        &["-O2", "-fno-math-errno", "-std=gnu11", "-w", "-pthread"]
     } else {
-        &["-O0", "-g", "-std=gnu11", "-w", "-pthread"]
+        &["-O0", "-g", "-fno-math-errno", "-std=gnu11", "-w", "-pthread"]
     }
 }
 
@@ -169,7 +170,8 @@ pub fn build(prog: &mut Program, opts: &BuildOpts) -> Result<PathBuf, String> {
     };
     std::fs::create_dir_all(&opts.build_dir).map_err(|e| format!("cannot create {}: {e}", opts.build_dir.display()))?;
     let cc = c_compiler(opts.release);
-    let rt = runtime_object(&cc, opts)?;
+    // Release builds compile the runtime into the program's one unit, so it inlines too.
+    let rt = if opts.release { None } else { Some(runtime_object(&cc, opts)?) };
     write_if_changed(&opts.build_dir.join("jig_rt.h"), RUNTIME_H)?;
     let stem = opts.out.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "main".into());
     if let Some(dir) = opts.out.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -177,9 +179,10 @@ pub fn build(prog: &mut Program, opts: &BuildOpts) -> Result<PathBuf, String> {
     }
     let mut objs = Vec::new();
     if opts.release {
-        // One unit: the optimizer sees the whole program.
+        // One unit: the optimizer sees the whole program, runtime included.
+        write_if_changed(&opts.build_dir.join("jig_rt.c"), RUNTIME_C)?;
         let src = opts.build_dir.join(format!("{stem}.c"));
-        write_if_changed(&src, &c.unity())?;
+        write_if_changed(&src, &format!("#define _GNU_SOURCE\n{}\n#include \"jig_rt.c\"\n", c.unity()))?;
         objs.push(src);
     } else {
         let n = unit_count(&c);
@@ -197,7 +200,7 @@ pub fn build(prog: &mut Program, opts: &BuildOpts) -> Result<PathBuf, String> {
         .arg("-I")
         .arg(&opts.build_dir)
         .args(&objs)
-        .arg(&rt)
+        .args(&rt)
         .arg("-lm")
         .arg("-o")
         .arg(&opts.out))?;

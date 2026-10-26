@@ -1,0 +1,45 @@
+import "std/io"
+import "std/os"
+
+enum Tree {
+  Leaf
+  Node(left: Tree, right: Tree)
+}
+
+fn make(depth: Int) -> Tree {
+  if depth == 0 {
+    return Tree.Node(Tree.Leaf, Tree.Leaf)
+  }
+  return Tree.Node(make(depth - 1), make(depth - 1))
+}
+
+fn check(t: Tree) -> Int {
+  return match t {
+    Leaf => 0
+    Node(l, r) => 1 + check(l) + check(r)
+  }
+}
+
+fn main() effects {io, env} {
+  let args = os.args()
+  let n = if args.len() > 1 { args[1].to_int().unwrap_or(10) } else { 10 }
+  let max_depth = max(6, n)
+  io.println(
+    "stretch tree of depth " +
+      (max_depth + 1).str() +
+      "\t check: " +
+      check(make(max_depth + 1)).str(),
+  )
+  let long_lived = make(max_depth)
+  var d = 4
+  for d <= max_depth {
+    let iters = 1 << (max_depth - d + 4)
+    var total = 0
+    for _i in 0..iters {
+      total += check(make(d))
+    }
+    io.println(iters.str() + "\t trees of depth " + d.str() + "\t check: " + total.str())
+    d += 2
+  }
+  io.println("long lived tree of depth " + max_depth.str() + "\t check: " + check(long_lived).str())
+}

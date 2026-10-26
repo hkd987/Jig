@@ -100,6 +100,7 @@ impl Report {
     pub fn proven(&self) -> Proven {
         let mut contract: FxHashMap<Span, bool> = FxHashMap::default();
         let mut safety: FxHashMap<Span, bool> = FxHashMap::default();
+        let mut bounds: FxHashMap<Span, bool> = FxHashMap::default();
         for f in &self.fns {
             for o in &f.obligations {
                 let ok = o.elidable && o.status == Status::Proved;
@@ -107,12 +108,13 @@ impl Report {
                     ObKind::Precondition => {}
                     k if k.is_contract() => *contract.entry(o.span).or_insert(true) &= ok,
                     ObKind::Overflow | ObKind::DivZero | ObKind::Shift => *safety.entry(o.span).or_insert(true) &= ok,
+                    ObKind::Bounds => *bounds.entry(o.span).or_insert(true) &= ok,
                     _ => {}
                 }
             }
         }
         let keep = |m: FxHashMap<Span, bool>| m.into_iter().filter(|(_, ok)| *ok).map(|(s, _)| s).collect();
-        Proven { contract: keep(contract), safety: keep(safety) }
+        Proven { contract: keep(contract), safety: keep(safety), bounds: keep(bounds) }
     }
 }
 
@@ -123,11 +125,13 @@ pub struct Proven {
     pub contract: FxHashSet<Span>,
     /// Arithmetic traps (overflow, division by zero, shift range) at these spans.
     pub safety: FxHashSet<Span>,
+    /// List indexing proved in bounds at these spans.
+    pub bounds: FxHashSet<Span>,
 }
 
 impl Proven {
     pub fn is_empty(&self) -> bool {
-        self.contract.is_empty() && self.safety.is_empty()
+        self.contract.is_empty() && self.safety.is_empty() && self.bounds.is_empty()
     }
 }
 

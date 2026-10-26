@@ -88,6 +88,13 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           cat reprove.json >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - name: Jig vs Rust (Phase 3 gate, instruction counts)
+        run: |
+          python3 /tmp/bench/vsrust.py /tmp/jig-head --instructions --out vsrust.json | tee vsrust.txt
+          echo '### Jig vs Rust (instructions)' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat vsrust.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
       - name: Compare (fails on a >2% regression without sign-off)
         run: |
           if [ -f base.json ]; then

@@ -1,5 +1,7 @@
 /* The Jig runtime. See jig_rt.h for conventions. */
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include "jig_rt.h"
 
 #include <dirent.h>
@@ -132,6 +134,7 @@ jig_str *jig_str_new(const char *data, int64_t len) {
     jig_str *s = jig_alloc(sizeof(jig_str) + (size_t)len + 1);
     s->rc = 1;
     s->len = len;
+    s->cap = len;
     memcpy(s->data, data, (size_t)len);
     s->data[len] = 0;
     return s;
@@ -143,10 +146,42 @@ jig_str *jig_str_concat(const jig_str *a, const jig_str *b) {
     jig_str *s = jig_alloc(sizeof(jig_str) + (size_t)(la + lb) + 1);
     s->rc = 1;
     s->len = la + lb;
+    s->cap = la + lb;
     memcpy(s->data, jig_str_data(a), (size_t)la);
     memcpy(s->data + la, jig_str_data(b), (size_t)lb);
     s->data[la + lb] = 0;
     return s;
+}
+
+void jig_str_append(jig_str **sp, const jig_str *t) {
+    int64_t lt = jig_str_len(t);
+    if (lt == 0) return;
+    jig_str *s = *sp;
+    int64_t ls = jig_str_len(s);
+    if (s && s->rc == 1 && s != t) {
+        if (ls + lt > s->cap) {
+            /* Grow geometrically so a loop of appends is linear. */
+            int64_t cap = s->cap * 2 > ls + lt ? s->cap * 2 : ls + lt;
+            s = jig_realloc(s, sizeof(jig_str) + (size_t)cap + 1);
+            s->cap = cap;
+        }
+        memcpy(s->data + ls, t->data, (size_t)lt);
+        s->len = ls + lt;
+        s->data[s->len] = 0;
+        *sp = s;
+        return;
+    }
+    /* Shared, static, empty or appending to itself: a fresh string with room to grow. */
+    int64_t cap = ls + lt < 16 ? 16 : ls + lt;
+    jig_str *n = jig_alloc(sizeof(jig_str) + (size_t)cap + 1);
+    n->rc = 1;
+    n->len = ls + lt;
+    n->cap = cap;
+    memcpy(n->data, jig_str_data(s), (size_t)ls);
+    memcpy(n->data + ls, jig_str_data(t), (size_t)lt);
+    n->data[n->len] = 0;
+    jig_str_release(s);
+    *sp = n;
 }
 
 bool jig_str_eq(const jig_str *a, const jig_str *b) {
@@ -609,7 +644,8 @@ void jig_list_swap(jig_list **lp, int64_t i, int64_t j, const jig_type *t, const
     if (i == j) return;
     jig_list_make_unique(lp, t);
     jig_list *l = *lp;
-    char *tmp = jig_alloc(t->size);
+    char small[64];
+    char *tmp = t->size <= sizeof small ? small : jig_alloc(t->size);
     memcpy(tmp, l->data + (size_t)i * t->size, t->size);
     memcpy(l->data + (size_t)i * t->size, l->data + (size_t)j * t->size, t->size);
     memcpy(l->data + (size_t)j * t->size, tmp, t->size);
@@ -667,6 +703,77 @@ static void sort_impl(jig_list **lp, const sort_ctx *c) {
     merge_sort(l->data, buf, l->len, c);
     free(buf);
 }
+
+void jig_swap_oob(int64_t i, int64_t j, int64_t n, const char *loc) {
+    char msg[128];
+    snprintf(msg, sizeof msg, "swap(%lld, %lld) is out of bounds for length %lld", (long long)i, (long long)j, (long long)n);
+    jig_panic(msg, loc);
+}
+
+/* Introsort on a plain array: quicksort with median-of-three pivots, heapsort when the
+ * recursion gets deep, insertion sort for short runs. Instantiated per scalar type. */
+#define JIG_SORT_IMPL(NAME, T)                                                                  \
+    static void NAME##_sift(T *a, int64_t root, int64_t n) {                                    \
+        for (;;) {                                                                              \
+            int64_t c = 2 * root + 1;                                                           \
+            if (c >= n) return;                                                                 \
+            if (c + 1 < n && a[c] < a[c + 1]) c++;                                              \
+            if (!(a[root] < a[c])) return;                                                      \
+            T t = a[root]; a[root] = a[c]; a[c] = t;                                            \
+            root = c;                                                                           \
+        }                                                                                       \
+    }                                                                                           \
+    static void NAME##_rec(T *a, int64_t n, int depth) {                                        \
+        while (n > 16) {                                                                        \
+            if (depth-- == 0) {                                                                 \
+                for (int64_t i = n / 2 - 1; i >= 0; i--) NAME##_sift(a, i, n);                  \
+                for (int64_t e = n - 1; e > 0; e--) {                                           \
+                    T t = a[0]; a[0] = a[e]; a[e] = t;                                          \
+                    NAME##_sift(a, 0, e);                                                       \
+                }                                                                               \
+                return;                                                                         \
+            }                                                                                   \
+            T x = a[0], y = a[n / 2], z = a[n - 1];                                             \
+            T p = x < y ? (y < z ? y : (x < z ? z : x)) : (x < z ? x : (y < z ? z : y));        \
+            int64_t i = 0, j = n - 1;                                                           \
+            for (;;) {                                                                          \
+                while (a[i] < p) i++;                                                           \
+                while (p < a[j]) j--;                                                           \
+                if (i >= j) break;                                                              \
+                T t = a[i]; a[i] = a[j]; a[j] = t;                                              \
+                i++;                                                                            \
+                j--;                                                                            \
+            }                                                                                   \
+            /* Recurse into the smaller side, loop on the larger. */                           \
+            if (j + 1 < n - j - 1) {                                                            \
+                NAME##_rec(a, j + 1, depth);                                                    \
+                a += j + 1;                                                                     \
+                n -= j + 1;                                                                     \
+            } else {                                                                            \
+                NAME##_rec(a + j + 1, n - j - 1, depth);                                        \
+                n = j + 1;                                                                      \
+            }                                                                                   \
+        }                                                                                       \
+        for (int64_t i = 1; i < n; i++) {                                                       \
+            T v = a[i];                                                                         \
+            int64_t k = i;                                                                      \
+            while (k > 0 && v < a[k - 1]) { a[k] = a[k - 1]; k--; }                             \
+            a[k] = v;                                                                           \
+        }                                                                                       \
+    }                                                                                           \
+    void NAME(jig_list **lp, const jig_type *t) {                                               \
+        int64_t n = jig_list_len(*lp);                                                          \
+        if (n < 2) return;                                                                      \
+        jig_list_make_unique(lp, t);                                                            \
+        int depth = 2;                                                                          \
+        for (int64_t m = n; m > 1; m >>= 1) depth += 2;                                         \
+        NAME##_rec((T *)(*lp)->data, n, depth);                                                 \
+    }
+JIG_SORT_IMPL(jig_list_sort_i64, int64_t)
+JIG_SORT_IMPL(jig_list_sort_i32, int32_t)
+JIG_SORT_IMPL(jig_list_sort_u8, uint8_t)
+JIG_SORT_IMPL(jig_list_sort_u32, uint32_t)
+JIG_SORT_IMPL(jig_list_sort_u64, uint64_t)
 
 void jig_list_sort(jig_list **lp, const jig_type *t) {
     sort_ctx c = {t, NULL, NULL};

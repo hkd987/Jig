@@ -394,7 +394,7 @@ impl<'l, 'a> Interp<'l, 'a> {
                     }
                     &xs[*i as usize]
                 }
-                (PlaceElem::Index(op), Value::List(xs)) => {
+                (PlaceElem::Index(op, _), Value::List(xs)) => {
                     let i = self.index_of(op, locals, span)?;
                     if i < 0 || i as usize >= xs.len() {
                         return Err(self.panic(
@@ -414,7 +414,7 @@ impl<'l, 'a> Interp<'l, 'a> {
         // Evaluate index operands before borrowing mutably.
         let mut idx: Vec<i64> = Vec::new();
         for e in &p.proj {
-            if let PlaceElem::Index(op) = e {
+            if let PlaceElem::Index(op, _) = e {
                 idx.push(self.index_of(op, locals, span)?);
             }
         }
@@ -424,7 +424,7 @@ impl<'l, 'a> Interp<'l, 'a> {
             slot = match (e, slot) {
                 (PlaceElem::Field(i), Value::Tuple(xs)) => &mut Rc::make_mut(xs)[*i as usize],
                 (PlaceElem::VariantField(_, i), Value::Variant(_, xs)) => &mut Rc::make_mut(xs)[*i as usize],
-                (PlaceElem::Index(_), Value::List(xs)) => {
+                (PlaceElem::Index(..), Value::List(xs)) => {
                     let i = idx[k];
                     k += 1;
                     let len = xs.len();
@@ -494,6 +494,11 @@ impl<'l, 'a> Interp<'l, 'a> {
                 let x = self.operand(a, locals, span)?;
                 self.cast(x, *from, *to, span)
             }
+            Rvalue::Inc(a, _) => Ok(match self.operand(a, locals, span)? {
+                Value::Int(i) => Value::Int(i.wrapping_add(1)),
+                Value::UInt(u) => Value::UInt(u.wrapping_add(1)),
+                v => v,
+            }),
             Rvalue::Aggregate(kind, _, ops) => {
                 let mut vals = Vec::with_capacity(ops.len());
                 for o in ops {

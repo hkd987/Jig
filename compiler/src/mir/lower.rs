@@ -2,7 +2,7 @@
 
 use super::intrinsics::{self, Intrinsic, Op};
 use super::*;
-use crate::diag::SourceMap;
+use crate::diag::{SourceMap, Span};
 use crate::sema::defs::*;
 use crate::sema::ty::*;
 use crate::syntax::ast::{self, Ast, ExprId, ExprKind, ForHead, ItemKind, PatId, PatKind, StmtId, StmtKind};
@@ -621,22 +621,25 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                 let p = self.place(target);
                 let checked = p.clone();
                 match op {
+                    None if self.append_chain(target, value, &p) => {}
                     None => self.expr_into(value, p),
                     Some(op) => {
                         let tt = self.ty(target);
                         let v = self.expr(value);
-                        let rv = if matches!(self.lw.tys.kind(tt), TyKind::Str) {
-                            Rvalue::Call(
+                        if matches!(self.lw.tys.kind(tt), TyKind::Str) {
+                            // `s += t` writes straight back, so native code appends in place.
+                            let rv = Rvalue::Call(
                                 Callee::Intrinsic(Intrinsic::new(Op::StrConcat, vec![])),
                                 vec![Arg::Value(Operand::Copy(p.clone())), Arg::Value(v)],
                                 tt,
-                            )
+                            );
+                            self.assign(p, rv);
                         } else {
-                            Rvalue::Binary(op, Operand::Copy(p.clone()), v, tt)
-                        };
-                        let t = self.temp(tt);
-                        self.assign(Place::local(t), rv);
-                        self.assign(p, Rvalue::Use(Operand::Copy(Place::local(t))));
+                            let rv = Rvalue::Binary(op, Operand::Copy(p.clone()), v, tt);
+                            let t = self.temp(tt);
+                            self.assign(Place::local(t), rv);
+                            self.assign(p, Rvalue::Use(Operand::Copy(Place::local(t))));
+                        }
                     }
                 }
                 if self.lw.mir.opts.check_contracts && !checked.proj.is_empty() {
@@ -666,6 +669,55 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
             }
             StmtKind::For { head, invariants, body } => self.lower_for(head, invariants, body),
         }
+    }
+
+    /// `s = s + a + b` on strings: evaluate `a` and `b`, then append each to `s` (which
+    /// native code does in place). Only when the target is a plain local.
+    fn append_chain(&mut self, target: ExprId, value: ExprId, p: &Place) -> bool {
+        let tt = self.ty(target);
+        if !p.proj.is_empty() || !matches!(self.lw.tys.kind(tt), TyKind::Str) {
+            return false;
+        }
+        let Res::Local(tl) = self.tables.expr_res[target.0 as usize] else { return false };
+        // Collect the chain's right operands, leftmost first.
+        let mut parts = Vec::new();
+        let mut e = value;
+        loop {
+            match self.ast.exprs[e].kind {
+                ExprKind::Binary { op: ast::BinOp::Add, lhs, rhs } => {
+                    parts.push(rhs);
+                    e = lhs;
+                }
+                ExprKind::Paren(x) => e = x,
+                ExprKind::Name(_) if self.tables.expr_res[e.0 as usize] == Res::Local(tl) => break,
+                _ => return false,
+            }
+        }
+        if parts.is_empty() {
+            return false;
+        }
+        parts.reverse();
+        let ops: Vec<Operand> = parts
+            .into_iter()
+            .map(|x| {
+                let t = self.ty(x);
+                let l = self.temp(t);
+                self.expr_into(x, Place::local(l));
+                Operand::local(l)
+            })
+            .collect();
+        let st = self.lw.tys.str;
+        for o in ops {
+            self.assign(
+                p.clone(),
+                Rvalue::Call(
+                    Callee::Intrinsic(Intrinsic::new(Op::StrConcat, vec![])),
+                    vec![Arg::Value(Operand::Copy(p.clone())), Arg::Value(o)],
+                    st,
+                ),
+            );
+        }
+        true
     }
 
     fn let_pat(&mut self, pat: PatId, init: ExprId) {
@@ -790,7 +842,9 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                 self.cur = body_bb;
                 match coll {
                     None => self.bind_irrefutable(pat, Place::local(idx)),
-                    Some(coll) => self.bind_irrefutable(pat, Place::local(coll).index(Operand::local(idx))),
+                    Some(coll) => {
+                        self.bind_irrefutable(pat, Place::local(coll).index(Operand::local(idx), Span::DUMMY))
+                    }
                 }
                 let after_bind = self.cur;
                 let next = self.new_block();
@@ -805,7 +859,12 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                         _ => IntTy::I64,
                     },
                 ));
-                self.assign(Place::local(idx), Rvalue::Binary(ast::BinOp::Add, Operand::local(idx), one, it));
+                let k = match self.lw.tys.kind(it) {
+                    TyKind::Int(k, _) => *k,
+                    _ => IntTy::I64,
+                };
+                let _ = one;
+                self.assign(Place::local(idx), Rvalue::Inc(Operand::local(idx), k));
                 self.goto(head_bb);
                 // The body proper starts after the binding.
                 self.cur = body_start;
@@ -878,7 +937,7 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                 if matches!(self.lw.tys.kind(bt), TyKind::List(_)) {
                     let b = self.place(base);
                     let i = self.expr(index);
-                    return b.index(i);
+                    return b.index(i, self.ast.exprs[e].span);
                 }
             }
             ExprKind::Paren(x) => return self.place(x),
@@ -1175,7 +1234,8 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
             _ => {
                 let b = self.place(base);
                 let i = self.expr(index);
-                self.assign(dest, Rvalue::Use(Operand::Copy(b.index(i))));
+                let span = self.cur_span;
+                self.assign(dest, Rvalue::Use(Operand::Copy(b.index(i, span))));
             }
         }
     }
@@ -1437,7 +1497,7 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                     TyKind::Tuple(ts) => ts[*i as usize],
                     _ => return,
                 },
-                PlaceElem::Index(_) => match self.lw.tys.kind(parent) {
+                PlaceElem::Index(..) => match self.lw.tys.kind(parent) {
                     TyKind::List(e) => *e,
                     _ => return,
                 },
@@ -1473,7 +1533,7 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                     self.lw.tys.subst(ft, &args)
                 }
                 (PlaceElem::Field(i), TyKind::Tuple(ts)) => ts[*i as usize],
-                (PlaceElem::Index(_), TyKind::List(e)) => e,
+                (PlaceElem::Index(..), TyKind::List(e)) => e,
                 _ => return self.lw.tys.error,
             };
         }

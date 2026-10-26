@@ -34,8 +34,9 @@ pub enum PlaceElem {
     Field(u32),
     /// Field `i` of enum variant `v` (the value must be that variant).
     VariantField(u32, u32),
-    /// Element of a list (bounds-checked).
-    Index(Operand),
+    /// Element of a list, bounds-checked. The span is the indexing expression's (proofs
+    /// that it is in bounds are keyed by it); `Span::DUMMY` means in bounds by construction.
+    Index(Operand, Span),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -58,9 +59,9 @@ impl Place {
         p.proj.push(PlaceElem::VariantField(v, i));
         p
     }
-    pub fn index(&self, op: Operand) -> Place {
+    pub fn index(&self, op: Operand, span: Span) -> Place {
         let mut p = self.clone();
-        p.proj.push(PlaceElem::Index(op));
+        p.proj.push(PlaceElem::Index(op, span));
         p
     }
 }
@@ -128,6 +129,8 @@ pub enum Rvalue {
     Unary(UnOp, Operand, Ty),
     /// Checked numeric conversion.
     Cast(Operand, Ty, Ty),
+    /// `x + 1` for a loop counter that is below its bound, so it cannot overflow.
+    Inc(Operand, IntTy),
     Aggregate(AggKind, Ty, Vec<Operand>),
     /// The variant index of an enum value.
     Discriminant(Place),

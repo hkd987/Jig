@@ -1,0 +1,70 @@
+import "std/io"
+import "std/os"
+
+fn main() effects {io, env} {
+  let args = os.args()
+  let n = if args.len() > 1 { args[1].to_int().unwrap_or(7) } else { 7 }
+  var perm: List<Int> = []
+  var perm1: List<Int> = []
+  var count: List<Int> = []
+  for i in 0..n {
+    perm.push(0)
+    perm1.push(i)
+    count.push(0)
+  }
+  var max_flips = 0
+  var checksum = 0
+  var perm_count = 0
+  var r = n
+  for {
+    for r != 1 {
+      count[r - 1] = r
+      r -= 1
+    }
+    for i in 0..n {
+      perm[i] = perm1[i]
+    }
+    var flips = 0
+    var k = perm[0]
+    for k != 0 {
+      var i = 0
+      var j = k
+      for i < j {
+        perm.swap(i, j)
+        i += 1
+        j -= 1
+      }
+      flips += 1
+      k = perm[0]
+    }
+    if flips > max_flips {
+      max_flips = flips
+    }
+    if perm_count % 2 == 0 {
+      checksum += flips
+    } else {
+      checksum -= flips
+    }
+    // Next permutation.
+    var done = true
+    for r < n {
+      let p0 = perm1[0]
+      for i in 0..r {
+        perm1[i] = perm1[i + 1]
+      }
+      perm1[r] = p0
+      count[r] -= 1
+      if count[r] > 0 {
+        done = false
+        break
+      }
+      r += 1
+    }
+    if done {
+      break
+    }
+    perm_count += 1
+  }
+  io.println(checksum.str())
+  io.println("Pfannkuchen(" + n.str() + ") = " + max_flips.str())
+}

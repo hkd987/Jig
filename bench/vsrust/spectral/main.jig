@@ -1,0 +1,57 @@
+import "std/io"
+import "std/os"
+
+fn a(i: Int, j: Int) -> Float {
+  return 1.0 / (((i + j) * (i + j + 1) / 2 + i + 1) as Float)
+}
+
+fn mul_av(v: List<Float>, out: &mut List<Float>) {
+  let n = v.len()
+  for i in 0..n {
+    var s = 0.0
+    for j in 0..n {
+      s += a(i, j) * v[j]
+    }
+    out[i] = s
+  }
+}
+
+fn mul_atv(v: List<Float>, out: &mut List<Float>) {
+  let n = v.len()
+  for i in 0..n {
+    var s = 0.0
+    for j in 0..n {
+      s += a(j, i) * v[j]
+    }
+    out[i] = s
+  }
+}
+
+fn mul_atav(v: List<Float>, out: &mut List<Float>, tmp: &mut List<Float>) {
+  mul_av(v, &mut tmp)
+  mul_atv(tmp, &mut out)
+}
+
+fn main() effects {io, env} {
+  let args = os.args()
+  let n = if args.len() > 1 { args[1].to_int().unwrap_or(100) } else { 100 }
+  var u: List<Float> = []
+  var v: List<Float> = []
+  var tmp: List<Float> = []
+  for _i in 0..n {
+    u.push(1.0)
+    v.push(0.0)
+    tmp.push(0.0)
+  }
+  for _k in 0..10 {
+    mul_atav(u, &mut v, &mut tmp)
+    mul_atav(v, &mut u, &mut tmp)
+  }
+  var vbv = 0.0
+  var vv = 0.0
+  for i in 0..n {
+    vbv += u[i] * v[i]
+    vv += v[i] * v[i]
+  }
+  io.println((vbv / vv).sqrt().str())
+}

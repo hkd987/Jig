@@ -137,9 +137,12 @@ const PRELUDE: &str = r#"
 #ifdef JIG_UNITY
 #define JIG_LINK static
 #define JIG_EXTERN static
+/* A hint: overflow traps make small functions look big to the inliner. */
+#define JIG_FN static inline
 #else
 #define JIG_LINK
 #define JIG_EXTERN extern
+#define JIG_FN
 #endif
 #define JIG_ARITH(T, S)                                                                        \
     static inline T jig_add_##S(T a, T b, const char *l) { T r; if (__builtin_add_overflow(a, b, &r)) jig_overflow("+", l); return r; } \
@@ -428,8 +431,8 @@ impl<'l, 'a> CGen<'l, 'a> {
         match kind {
             G_RETAIN | G_RELEASE => {
                 let retain = kind == G_RETAIN;
-                let _ = writeln!(self.glue_decls, "JIG_LINK void {name}(void *vp);");
-                let _ = writeln!(s, "JIG_LINK void {name}(void *vp) {{\n    {c} *p = vp;");
+                let _ = writeln!(self.glue_decls, "JIG_FN void {name}(void *vp);");
+                let _ = writeln!(s, "JIG_FN void {name}(void *vp) {{\n    {c} *p = vp;");
                 match &k {
                     TyKind::Str => {
                         s.push_str(if retain { "    jig_str_retain(*p);\n" } else { "    jig_str_release(*p);\n" })
@@ -512,8 +515,8 @@ impl<'l, 'a> CGen<'l, 'a> {
             G_EQ | G_CMP => {
                 let is_eq = kind == G_EQ;
                 let ret = if is_eq { "bool" } else { "int" };
-                let _ = writeln!(self.glue_decls, "JIG_LINK {ret} {name}(const void *ap, const void *bp);");
-                let _ = writeln!(s, "JIG_LINK {ret} {name}(const void *ap, const void *bp) {{\n    {c} const *a = ap;\n    {c} const *b = bp;");
+                let _ = writeln!(self.glue_decls, "JIG_FN {ret} {name}(const void *ap, const void *bp);");
+                let _ = writeln!(s, "JIG_FN {ret} {name}(const void *ap, const void *bp) {{\n    {c} const *a = ap;\n    {c} const *b = bp;");
                 match &k {
                     TyKind::Int(..) | TyKind::Char | TyKind::Bool | TyKind::Float(_) => {
                         if is_eq {
@@ -605,8 +608,8 @@ impl<'l, 'a> CGen<'l, 'a> {
                 s.push_str("}\n");
             }
             G_HASH => {
-                let _ = writeln!(self.glue_decls, "JIG_LINK uint64_t {name}(const void *ap);");
-                let _ = writeln!(s, "JIG_LINK uint64_t {name}(const void *ap) {{\n    {c} const *a = ap;");
+                let _ = writeln!(self.glue_decls, "JIG_FN uint64_t {name}(const void *ap);");
+                let _ = writeln!(s, "JIG_FN uint64_t {name}(const void *ap) {{\n    {c} const *a = ap;");
                 match &k {
                     TyKind::Int(..) | TyKind::Char | TyKind::Bool => {
                         s.push_str("    return jig_hash_u64((uint64_t)*a);\n")
@@ -646,8 +649,8 @@ impl<'l, 'a> CGen<'l, 'a> {
                 s.push_str("}\n");
             }
             G_SHOW => {
-                let _ = writeln!(self.glue_decls, "JIG_LINK void {name}(jig_buf *b, const void *ap, bool nested);");
-                let _ = writeln!(s, "JIG_LINK void {name}(jig_buf *b, const void *ap, bool nested) {{\n    {c} const *a = ap;\n    (void)nested;");
+                let _ = writeln!(self.glue_decls, "JIG_FN void {name}(jig_buf *b, const void *ap, bool nested);");
+                let _ = writeln!(s, "JIG_FN void {name}(jig_buf *b, const void *ap, bool nested) {{\n    {c} const *a = ap;\n    (void)nested;");
                 self.gen_show_body(t, &k, &mut s);
                 s.push_str("}\n");
             }
@@ -790,7 +793,13 @@ impl<'l, 'a> CGen<'l, 'a> {
         let n = format!("(&S{id})");
         let text = s.as_str();
         let _ = writeln!(self.data_decls, "extern jig_str S{id};");
-        let _ = writeln!(self.data_defs, "JIG_LINK jig_str S{id} = {{-1, {}, {}}};", text.len(), c_string(text));
+        let _ = writeln!(
+            self.data_defs,
+            "JIG_LINK jig_str S{id} = {{-1, {}, {}, {}}};",
+            text.len(),
+            text.len(),
+            c_string(text)
+        );
         self.str_lits.insert(s, n.clone());
         n
     }
@@ -850,7 +859,7 @@ impl<'l, 'a> CGen<'l, 'a> {
         if ps.is_empty() {
             ps.push("void".into());
         }
-        format!("JIG_LINK {rc} f{}({})", f.0, ps.join(", "))
+        format!("JIG_FN {rc} f{}({})", f.0, ps.join(", "))
     }
 
     fn declare_fn(&mut self, f: MFnId) {
@@ -906,7 +915,7 @@ impl<'l, 'a> CGen<'l, 'a> {
             t = match e {
                 PlaceElem::Field(i) => self.field_tys(t)[*i as usize],
                 PlaceElem::VariantField(v, i) => self.variant_tys(t)[*v as usize][*i as usize],
-                PlaceElem::Index(_) => match self.kind(t) {
+                PlaceElem::Index(..) => match self.kind(t) {
                     TyKind::List(e) => e,
                     _ => t,
                 },
@@ -930,7 +939,8 @@ impl<'l, 'a> CGen<'l, 'a> {
                     e = format!("{e}{acc}u.v{v}.f{i}");
                     t = self.variant_tys(t)[*v as usize][*i as usize];
                 }
-                PlaceElem::Index(op) => {
+                PlaceElem::Index(op, ispan) => {
+                    let unchecked = *ispan == crate::diag::Span::DUMMY || self.lw.mir.elide.bounds.contains(ispan);
                     let elem = match self.kind(t) {
                         TyKind::List(x) => x,
                         _ => t,
@@ -939,10 +949,11 @@ impl<'l, 'a> CGen<'l, 'a> {
                     let d = self.desc(elem);
                     let idx = self.operand(mf, cx, op, span);
                     let loc = self.loc(span);
-                    e = if write {
-                        format!("(*({ec} *)jig_list_at_mut(&{e}, {idx}, {d}, {loc}))")
-                    } else {
-                        format!("(*({ec} *)jig_list_at({e}, {idx}, {d}, {loc}))")
+                    e = match (write, unchecked) {
+                        (true, false) => format!("(*({ec} *)jig_list_idx_mut(&{e}, {idx}, sizeof({ec}), {d}, {loc}))"),
+                        (false, false) => format!("(*({ec} *)jig_list_idx({e}, {idx}, sizeof({ec}), {loc}))"),
+                        (true, true) => format!("(*({ec} *)jig_list_ref_mut(&{e}, {idx}, sizeof({ec}), {d}))"),
+                        (false, true) => format!("(*({ec} *)jig_list_ref({e}, {idx}, sizeof({ec})))"),
                     };
                     t = elem;
                 }
@@ -1045,7 +1056,7 @@ impl<'l, 'a> CGen<'l, 'a> {
         if caps.is_empty() {
             let _ = writeln!(
                 s,
-                "JIG_LINK {rc} {name}({}) {{\n    (void)env;\n    return f{}({});\n}}",
+                "JIG_FN {rc} {name}({}) {{\n    (void)env;\n    return f{}({});\n}}",
                 ps.join(", "),
                 f.0,
                 call.join(", ")
@@ -1053,7 +1064,7 @@ impl<'l, 'a> CGen<'l, 'a> {
         } else {
             let _ = writeln!(
                 s,
-                "JIG_LINK {rc} {name}({}) {{\n    struct env{} *e = (struct env{} *)env;\n    return f{}({});\n}}",
+                "JIG_FN {rc} {name}({}) {{\n    struct env{} *e = (struct env{} *)env;\n    return f{}({});\n}}",
                 ps.join(", "),
                 f.0,
                 f.0,
@@ -1061,7 +1072,7 @@ impl<'l, 'a> CGen<'l, 'a> {
                 call.join(", ")
             );
         }
-        let _ = writeln!(self.decls, "JIG_LINK {rc} {name}({});", ps.join(", "));
+        let _ = writeln!(self.decls, "JIG_FN {rc} {name}({});", ps.join(", "));
         self.glue.push_str(&s);
         name
     }
@@ -1078,7 +1089,7 @@ impl<'l, 'a> CGen<'l, 'a> {
         s.push_str("};\n");
         self.typedefs.push_str(&s);
         let mut d = format!(
-            "JIG_LINK void envdrop{}(jig_env *ep) {{\n    struct env{} *e = (struct env{} *)ep;\n",
+            "JIG_FN void envdrop{}(jig_env *ep) {{\n    struct env{} *e = (struct env{} *)ep;\n",
             f.0, f.0, f.0
         );
         for (i, &t) in caps.iter().enumerate() {
@@ -1088,7 +1099,7 @@ impl<'l, 'a> CGen<'l, 'a> {
             }
         }
         d.push_str("    jig_free(e);\n}\n");
-        let _ = writeln!(self.glue_decls, "JIG_LINK void envdrop{}(jig_env *ep);", f.0);
+        let _ = writeln!(self.glue_decls, "JIG_FN void envdrop{}(jig_env *ep);", f.0);
         self.glue.push_str(&d);
     }
 
@@ -1119,6 +1130,19 @@ impl<'l, 'a> CGen<'l, 'a> {
             Stmt::Assign(p, rv) => {
                 let t = self.place_ty(mf, p);
                 let c = self.cty(t);
+                // `s = s + t` appends in place when `s` is not shared.
+                if let Rvalue::Call(Callee::Intrinsic(i), args, _) = rv {
+                    if i.op == Op::StrConcat {
+                        if let [Arg::Value(Operand::Copy(src)), Arg::Value(rhs)] = args.as_slice() {
+                            if src == p && !p.proj.iter().any(|e| matches!(e, PlaceElem::Index(..))) {
+                                let r = self.operand(mf, cx, rhs, span);
+                                let dst = self.place_expr(mf, cx, p, true, span);
+                                let _ = writeln!(cx.out, "    jig_str_append(&{dst}, {r});");
+                                return;
+                            }
+                        }
+                    }
+                }
                 if let Rvalue::Call(_, _, ret) = rv {
                     if self.lw.tys.is_never(*ret) {
                         // Never returns: evaluate for its effect; nothing is stored.
@@ -1250,6 +1274,10 @@ impl<'l, 'a> CGen<'l, 'a> {
             Rvalue::Cast(a, from, to) => {
                 let x = self.operand(mf, cx, a, span);
                 self.cast(&x, *from, *to, span)
+            }
+            Rvalue::Inc(a, k) => {
+                let x = self.operand(mf, cx, a, span);
+                format!("(({})({x} + 1))", int_cty(*k))
             }
             Rvalue::Aggregate(kind, ty, ops) => {
                 let vals: Vec<String> = ops.iter().map(|o| self.owned(mf, cx, o, span)).collect();
@@ -1676,7 +1704,11 @@ impl<'l, 'a> CGen<'l, 'a> {
                     Arg::MutRef(_) => a[last].clone(),
                 };
                 if intr.op == Push {
-                    let _ = writeln!(cx.out, "    {{ {ec} x = {item}; jig_list_push({}, &x, {d}); }}", a[0]);
+                    let _ = writeln!(
+                        cx.out,
+                        "    {{ {ec} x = {item}; jig_list_push_fast({}, &x, sizeof({ec}), {d}); }}",
+                        a[0]
+                    );
                 } else {
                     let _ = writeln!(
                         cx.out,
@@ -1713,9 +1745,14 @@ impl<'l, 'a> CGen<'l, 'a> {
                 let lt = arg_ty(self, 0);
                 let e = self.elem_of(lt);
                 let d = self.desc(e);
-                let f = match intr.op {
-                    Clear => "jig_list_clear",
-                    Reverse => "jig_list_reverse",
+                let f = match (intr.op, self.kind(e)) {
+                    (Clear, _) => "jig_list_clear",
+                    (Reverse, _) => "jig_list_reverse",
+                    (_, TyKind::Int(IntTy::I64, _)) => "jig_list_sort_i64",
+                    (_, TyKind::Int(IntTy::I32, _)) => "jig_list_sort_i32",
+                    (_, TyKind::Int(IntTy::U8, _)) | (_, TyKind::Bool) => "jig_list_sort_u8",
+                    (_, TyKind::Int(IntTy::U32, _)) | (_, TyKind::Char) => "jig_list_sort_u32",
+                    (_, TyKind::Int(IntTy::U64, _)) => "jig_list_sort_u64",
                     _ => "jig_list_sort",
                 };
                 let _ = writeln!(cx.out, "    {f}({}, {d});", a[0]);
@@ -1731,8 +1768,15 @@ impl<'l, 'a> CGen<'l, 'a> {
             Swap => {
                 let lt = arg_ty(self, 0);
                 let e = self.elem_of(lt);
+                let ec = self.cty(e);
                 let d = self.desc(e);
-                let _ = writeln!(cx.out, "    jig_list_swap({}, {}, {}, {d}, {loc});", a[0], a[1], a[2]);
+                let _ = writeln!(
+                    cx.out,
+                    "    {{ jig_list **lp = {}; int64_t si = {}, sj = {}, sn = jig_list_len(*lp);\n      if ((uint64_t)si >= (uint64_t)sn || (uint64_t)sj >= (uint64_t)sn) jig_swap_oob(si, sj, sn, {loc});\n      if (si != sj) {{ if ((*lp)->rc != 1) jig_list_make_unique(lp, {d}); {ec} *sp = ({ec} *)(*lp)->data; {ec} st = sp[si]; sp[si] = sp[sj]; sp[sj] = st; }} }}",
+                    a[0],
+                    a[1],
+                    a[2]
+                );
                 "((jig_unit)0)".into()
             }
             Truncate => {
@@ -1905,8 +1949,8 @@ impl<'l, 'a> CGen<'l, 'a> {
         let ec = self.cty(elem);
         let name = format!("sortby_{}", elem.0);
         if self.sortby_thunks.insert(elem) {
-            let _ = writeln!(self.glue_decls, "JIG_LINK bool {name}(jig_fn *f, const void *a, const void *b);");
-            let _ = writeln!(self.glue, "JIG_LINK bool {name}(jig_fn *f, const void *a, const void *b) {{\n    return ((bool (*)(jig_env *, {ec}, {ec}))f->code)(f->env, *({ec} const *)a, *({ec} const *)b);\n}}");
+            let _ = writeln!(self.glue_decls, "JIG_FN bool {name}(jig_fn *f, const void *a, const void *b);");
+            let _ = writeln!(self.glue, "JIG_FN bool {name}(jig_fn *f, const void *a, const void *b) {{\n    return ((bool (*)(jig_env *, {ec}, {ec}))f->code)(f->env, *({ec} const *)a, *({ec} const *)b);\n}}");
         }
         name
     }

@@ -34,6 +34,8 @@ typedef struct jig_type {
 typedef struct jig_str {
     int64_t rc;
     int64_t len;
+    /* Bytes available in `data` (excluding the terminating NUL), for appends in place. */
+    int64_t cap;
     char data[];
 } jig_str;
 
@@ -74,10 +76,10 @@ typedef struct jig_box {
 void jig_init(int argc, char **argv);
 /* Run the program entry point on a large stack. */
 void jig_run_main(void (*f)(void));
-void jig_exit(int code) __attribute__((noreturn));
-void jig_panic(const char *msg, const char *loc) __attribute__((noreturn));
-void jig_panic_buf(jig_buf *b, const char *loc) __attribute__((noreturn));
-void jig_unreachable(const char *loc) __attribute__((noreturn));
+void jig_exit(int code) __attribute__((noreturn, cold));
+void jig_panic(const char *msg, const char *loc) __attribute__((noreturn, cold));
+void jig_panic_buf(jig_buf *b, const char *loc) __attribute__((noreturn, cold));
+void jig_unreachable(const char *loc) __attribute__((noreturn, cold));
 
 /* ---- memory ---- */
 void *jig_alloc(size_t n);
@@ -100,7 +102,7 @@ jig_str *jig_buf_to_str(jig_buf *b);
 
 /* ---- strings ---- */
 #define JIG_STATIC_STR(name, lit) \
-    static struct { int64_t rc; int64_t len; char data[sizeof(lit)]; } name = {-1, sizeof(lit) - 1, lit}
+    static struct { int64_t rc; int64_t len; int64_t cap; char data[sizeof(lit)]; } name = {-1, sizeof(lit) - 1, sizeof(lit) - 1, lit}
 static inline int64_t jig_str_len(const jig_str *s) { return s ? s->len : 0; }
 static inline const char *jig_str_data(const jig_str *s) { return s ? s->data : ""; }
 static inline void jig_str_retain(jig_str *s) {
@@ -111,6 +113,8 @@ static inline void jig_str_release(jig_str *s) {
 }
 jig_str *jig_str_new(const char *data, int64_t len);
 jig_str *jig_str_concat(const jig_str *a, const jig_str *b);
+/* `*s = *s + t`, growing `*s` in place when it is not shared. */
+void jig_str_append(jig_str **s, const jig_str *t);
 bool jig_str_eq(const jig_str *a, const jig_str *b);
 int jig_str_cmp(const jig_str *a, const jig_str *b);
 uint64_t jig_str_hash(const jig_str *s);
@@ -155,6 +159,13 @@ void jig_list_reverse(jig_list **l, const jig_type *t);
 void jig_list_swap(jig_list **l, int64_t i, int64_t j, const jig_type *t, const char *loc);
 void jig_list_truncate(jig_list **l, int64_t n, const jig_type *t, const char *loc);
 void jig_list_sort(jig_list **l, const jig_type *t);
+/* Sorts specialized for scalar elements (Char sorts as u32, Bool as u8). */
+void jig_list_sort_i64(jig_list **l, const jig_type *t);
+void jig_list_sort_i32(jig_list **l, const jig_type *t);
+void jig_list_sort_u8(jig_list **l, const jig_type *t);
+void jig_list_sort_u32(jig_list **l, const jig_type *t);
+void jig_list_sort_u64(jig_list **l, const jig_type *t);
+void jig_swap_oob(int64_t i, int64_t j, int64_t n, const char *loc) __attribute__((noreturn, cold));
 /* `less(f, a, b)`: a thunk calling the Jig comparator `f`. */
 void jig_list_sort_by(jig_list **l, const jig_type *t, bool (*less)(jig_fn *, const void *, const void *), jig_fn *f);
 jig_list *jig_list_slice(const jig_list *l, int64_t lo, int64_t hi, const jig_type *t, const char *loc);
@@ -179,6 +190,42 @@ void *jig_map_val_at(const jig_map *m, int64_t i, const jig_type *v);
 bool jig_map_eq(const jig_map *a, const jig_map *b, const jig_type *k, const jig_type *v);
 void jig_map_show(jig_buf *b, const jig_map *m, const jig_type *k, const jig_type *v, bool is_set);
 
+/* Element access with the element size known at compile time, inlined at each use. */
+void jig_index_oob(int64_t i, int64_t len, const char *loc) __attribute__((noreturn, cold));
+static inline void *jig_list_idx(const jig_list *l, int64_t i, size_t sz, const char *loc) {
+    int64_t n = l ? l->len : 0;
+    if (__builtin_expect((uint64_t)i >= (uint64_t)n, 0)) jig_index_oob(i, n, loc);
+    return l->data + (size_t)i * sz;
+}
+static inline void *jig_list_idx_mut(jig_list **lp, int64_t i, size_t sz, const jig_type *t, const char *loc) {
+    jig_list *l = *lp;
+    int64_t n = l ? l->len : 0;
+    if (__builtin_expect((uint64_t)i >= (uint64_t)n, 0)) jig_index_oob(i, n, loc);
+    if (__builtin_expect(l->rc != 1, 0)) {
+        jig_list_make_unique(lp, t);
+        l = *lp;
+    }
+    return l->data + (size_t)i * sz;
+}
+
+/* Push without a call when the list is unique and has room. Takes ownership of *elem. */
+static inline void jig_list_push_fast(jig_list **lp, void *elem, size_t sz, const jig_type *t) {
+    jig_list *l = *lp;
+    if (__builtin_expect(l != NULL && l->rc == 1 && l->len < l->cap, 1)) {
+        memcpy(l->data + (size_t)l->len * sz, elem, sz);
+        l->len++;
+        return;
+    }
+    jig_list_push(lp, elem, t);
+}
+
+/* Element access proved in bounds (or in bounds by construction). */
+static inline void *jig_list_ref(const jig_list *l, int64_t i, size_t sz) { return l->data + (size_t)i * sz; }
+static inline void *jig_list_ref_mut(jig_list **lp, int64_t i, size_t sz, const jig_type *t) {
+    if (__builtin_expect((*lp)->rc != 1, 0)) jig_list_make_unique(lp, t);
+    return (*lp)->data + (size_t)i * sz;
+}
+
 /* ---- function values ---- */
 static inline void jig_fn_retain(jig_fn *f) {
     if (f->env) jig_rc_inc(&f->env->rc);
@@ -188,13 +235,13 @@ static inline void jig_fn_release(jig_fn *f) {
 }
 
 /* ---- checked arithmetic ---- */
-void jig_overflow(const char *op, const char *loc) __attribute__((noreturn));
-void jig_div_zero(const char *loc) __attribute__((noreturn));
-void jig_shift_range(int64_t amount, const char *loc) __attribute__((noreturn));
-void jig_cast_range_i(int64_t v, const char *ty, const char *loc) __attribute__((noreturn));
-void jig_cast_range_u(uint64_t v, const char *ty, const char *loc) __attribute__((noreturn));
-void jig_cast_range_f(double v, const char *ty, const char *loc) __attribute__((noreturn));
-void jig_index_oob(int64_t i, int64_t len, const char *loc) __attribute__((noreturn));
+void jig_overflow(const char *op, const char *loc) __attribute__((noreturn, cold));
+void jig_div_zero(const char *loc) __attribute__((noreturn, cold));
+void jig_shift_range(int64_t amount, const char *loc) __attribute__((noreturn, cold));
+void jig_cast_range_i(int64_t v, const char *ty, const char *loc) __attribute__((noreturn, cold));
+void jig_cast_range_u(uint64_t v, const char *ty, const char *loc) __attribute__((noreturn, cold));
+void jig_cast_range_f(double v, const char *ty, const char *loc) __attribute__((noreturn, cold));
+void jig_index_oob(int64_t i, int64_t len, const char *loc) __attribute__((noreturn, cold));
 int64_t jig_ipow(int64_t base, int64_t exp, const char *loc);
 
 /* ---- formatting ---- */

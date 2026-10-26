@@ -1,0 +1,31 @@
+import "std/io"
+import "std/os"
+
+fn steps(start: Int) -> Int {
+  var n = start
+  var s = 0
+  for n != 1 {
+    if n % 2 == 0 {
+      n = n / 2
+    } else {
+      n = 3 * n + 1
+    }
+    s += 1
+  }
+  return s
+}
+
+fn main() effects {io, env} {
+  let args = os.args()
+  let limit = if args.len() > 1 { args[1].to_int().unwrap_or(1000) } else { 1000 }
+  var best = 1
+  var best_steps = 0
+  for i in 1..limit {
+    let s = steps(i)
+    if s > best_steps {
+      best = i
+      best_steps = s
+    }
+  }
+  io.println(best.str() + " takes " + best_steps.str() + " steps")
+}

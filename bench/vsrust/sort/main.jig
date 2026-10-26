@@ -1,0 +1,27 @@
+import "std/io"
+import "std/os"
+
+fn main() effects {io, env} {
+  let args = os.args()
+  let n = if args.len() > 1 { args[1].to_int().unwrap_or(1000) } else { 1000 }
+  var xs: List<Int> = []
+  var state = 42
+  for _i in 0..n {
+    state = state * 48271 % 2147483647
+    xs.push(state)
+  }
+  xs.sort()
+  var checksum = 0
+  for i in 0..xs.len() {
+    checksum = (checksum * 31 + xs[i]) % 1000000007
+  }
+  io.println(
+    xs[0].str() +
+      " " +
+      xs[xs.len() / 2].str() +
+      " " +
+      xs[xs.len() - 1].str() +
+      " " +
+      checksum.str(),
+  )
+}
