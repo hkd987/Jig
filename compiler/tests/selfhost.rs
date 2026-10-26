@@ -694,3 +694,113 @@ fn jigc_features_match_bootstrap() {
     }
     assert!(failures.is_empty(), "{} cases differ:\n{}", failures.len(), failures.join("\n"));
 }
+
+fn write_file(path: &Path, text: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+/// Both compilers' check dumps (sorted) and C programs for DIR, with the module cache under
+/// `home`.
+fn compare_with_modules(exe: &Path, std_dir: &Path, dir: &Path, home: &Path) -> Option<String> {
+    let run = |cmd: &mut Command| {
+        let out = cmd.env("JIG_HOME", home).env("PWD", dir).current_dir(dir).output().unwrap();
+        (out.status.success(), String::from_utf8_lossy(&out.stdout).to_string())
+    };
+    let jig = env!("CARGO_BIN_EXE_jig");
+    let (_, expected) = run(Command::new(jig).args(["debug", "check"]).arg(dir));
+    let (_, actual) = run(Command::new(exe).arg("check").arg(dir).arg(std_dir));
+    let mut e: Vec<&str> = expected.lines().collect();
+    let mut a: Vec<&str> = actual.lines().collect();
+    e.sort();
+    a.sort();
+    if e != a {
+        let missing: Vec<&&str> = e.iter().filter(|l| !a.contains(l)).take(3).collect();
+        let extra: Vec<&&str> = a.iter().filter(|l| !e.contains(l)).take(3).collect();
+        return Some(format!("{}: bootstrap only {missing:?}, jigc only {extra:?}", dir.display()));
+    }
+    let (ok, expected) = run(Command::new(jig).args(["debug", "c"]).arg(dir));
+    if ok {
+        let (_, actual) = run(Command::new(exe).arg("c").arg(dir).arg(std_dir));
+        if actual != expected {
+            return Some(format!("{}: the C programs differ", dir.display()));
+        }
+    }
+    None
+}
+
+/// Projects that require modules: missing downloads, versions raised by other modules,
+/// `replace`, a module whose `jig.mod` names another, bad `jig.mod` lines, and lints and
+/// errors inside modules.
+#[test]
+fn jigc_modules_match_bootstrap() {
+    if !have_cc() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    let root = repo_root();
+    let exe = jigc();
+    let std_dir = root.join("compiler/std");
+    let work = std::fs::canonicalize(PathBuf::from(env!("CARGO_TARGET_TMPDIR"))).unwrap().join("selfhost-modules");
+    let _ = std::fs::remove_dir_all(&work);
+    let home = work.join("home");
+    let cache = home.join("mod");
+    let greet = |dir: &Path, word: &str| {
+        write_file(&dir.join("jig.mod"), "module example.com/greetlib\n");
+        write_file(
+            &dir.join("greet/greet.jig"),
+            &format!(
+                "import \"util\"\n\npub fn hello(name: Str) -> Str {{\n  return \"{word}, \" + util.shout(name)\n}}\n\npub fn unused_api() -> Int {{\n  let x = 1\n  return 2\n}}\n"
+            ),
+        );
+        write_file(&dir.join("util/util.jig"), "pub fn shout(s: Str) -> Str {\n  return s.to_upper() + \"!\"\n}\n");
+    };
+    greet(&cache.join("example.com/greetlib@v1.0.0"), "hello");
+    greet(&cache.join("example.com/greetlib@v1.10.0"), "hi");
+    let mid = cache.join("example.com/middle@v0.1.0");
+    write_file(&mid.join("jig.mod"), "module example.com/middle\nrequire example.com/greetlib v1.10.0\n");
+    write_file(
+        &mid.join("m/m.jig"),
+        "import \"example.com/greetlib/greet\"\n\npub fn twice(s: Str) -> Str {\n  return greet.hello(s) + \" \" + greet.hello(s)\n}\n",
+    );
+    let wrong = cache.join("example.com/wrong@v1.0.0");
+    write_file(&wrong.join("jig.mod"), "module example.com/other\n");
+    write_file(&wrong.join("w/w.jig"), "pub fn w() -> Int {\n  return \"no\"\n}\n");
+    let local = work.join("local-greetlib");
+    write_file(&local.join("jig.mod"), "module example.com/greetlib\n");
+    write_file(&local.join("greet/greet.jig"), "pub fn hello(name: Str) -> Str {\n  return \"local \" + name\n}\n");
+    let main_greet = "import \"example.com/greetlib/greet\"\nimport \"std/io\"\n\nfn main() effects {io} {\n  io.println(greet.hello(\"jig\"))\n}\n";
+    let cases: [(&str, &str, &str); 7] = [
+        ("downloaded", "module app\nrequire example.com/greetlib v1.0.0\n", main_greet),
+        ("missing", "module app\nrequire example.com/greetlib v2.0.0\n", main_greet),
+        (
+            "raised",
+            "module app\nrequire example.com/greetlib v1.0.0\nrequire example.com/middle v0.1.0\n",
+            "import \"example.com/greetlib/greet\"\nimport \"example.com/middle/m\"\nimport \"std/io\"\n\nfn main() effects {io} {\n  io.println(greet.hello(\"a\") + \" / \" + m.twice(\"b\"))\n}\n",
+        ),
+        (
+            "replaced",
+            "module app\nrequire example.com/greetlib v9.9.9\nreplace example.com/greetlib => ../local-greetlib\n",
+            main_greet,
+        ),
+        (
+            "wrong",
+            "module app\nrequire example.com/wrong v1.0.0\n",
+            "import \"example.com/wrong/w\"\nimport \"std/io\"\n\nfn main() effects {io} {\n  io.println(w.w().str())\n}\n",
+        ),
+        ("bad_lines", "module app\nrequire example.com/greetlib\nlink -x\nreplace a => \nrequire example.com/greetlib v1.0.0\n", main_greet),
+        (
+            "unknown_package",
+            "module app\nrequire example.com/greetlib v1.0.0\n",
+            "import \"example.com/greetlib/nope\"\nimport \"std/io\"\n\nfn main() effects {io} {\n  io.println(nope.x())\n}\n",
+        ),
+    ];
+    let mut failures: Vec<String> = Vec::new();
+    for (name, jig_mod, main) in cases {
+        let app = work.join(name);
+        write_file(&app.join("jig.mod"), jig_mod);
+        write_file(&app.join("main.jig"), main);
+        failures.extend(compare_with_modules(exe, &std_dir, &app, &home).map(|m| format!("{name}: {m}")));
+    }
+    assert!(failures.is_empty(), "{} cases differ:\n{}", failures.len(), failures.join("\n"));
+}

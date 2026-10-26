@@ -74,7 +74,7 @@ fn Sema.sort_diags(&mut self) {
 }
 
 /// Check the package in `dir` (an absolute path) with the standard library in `std_dir`.
-fn analyze(dir: Str, std_dir: Str) -> (Sema, Str) effects {fs} {
+fn analyze(dir: Str, std_dir: Str) -> (Sema, Str) effects {fs, env} {
   let ld = load_program(dir, std_dir)
   let root = ld.project_root.unwrap_or(dir)
   var s = new_sema(ld)
@@ -82,6 +82,7 @@ fn analyze(dir: Str, std_dir: Str) -> (Sema, Str) effects {fs} {
   s.check_bodies()
   s.bind_features()
   s.quiet_after_syntax_errors()
+  s.drop_lints_in_modules()
   s.sort_diags()
   s.check_dead_code()
   return (s, root)
@@ -91,6 +92,22 @@ fn analyze(dir: Str, std_dir: Str) -> (Sema, Str) effects {fs} {
 fn dump_name(path: Str, root: Str) -> Str {
   let prefix = join_path(root, "")
   return if path.starts_with(prefix) { path[prefix.len()..path.len()] } else { path }
+}
+
+/// Lints and dead code in required modules are their authors' business.
+fn Sema.drop_lints_in_modules(&mut self) {
+  var kept: List<syntax.Diag> = []
+  for d in self.diags {
+    let lint = d.code.starts_with("E05") || d.code.starts_with("E06")
+    let external = match self.file_of(d.lo) {
+      Some((p, _)) => self.pkgs[p].external
+      None => false
+    }
+    if !lint || !external {
+      kept.push(d)
+    }
+  }
+  self.diags = kept
 }
 
 /// The file, `.jig` or `.feature`, that holds global offset `pos`.
@@ -124,7 +141,7 @@ fn Sema.place(self, root: Str, lo: Int, hi: Int) -> Str {
 }
 
 /// `jigc check DIR STD`: the same lines as `jig debug check DIR`.
-pub fn check_dump(dir: Str, std_dir: Str) -> Str effects {fs} {
+pub fn check_dump(dir: Str, std_dir: Str) -> Str effects {fs, env} {
   let (s, root) = analyze(dir, std_dir)
   var out: List<Str> = []
   for d in s.diags {
@@ -185,7 +202,7 @@ pub fn check_dump(dir: Str, std_dir: Str) -> Str effects {fs} {
 
 /// `jigc c DIR STD`: the C program for the package in DIR, the same text as `jig debug c DIR`.
 /// Locations name files relative to `cwd`.
-pub fn c_dump(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs} {
+pub fn c_dump(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs, env} {
   let (s, _) = analyze(dir, std_dir)
   if !s.diags.is_empty() {
     return Err(dir + " has errors")
@@ -195,7 +212,7 @@ pub fn c_dump(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs}
 
 /// A release build of DIR as one self-contained C file: `c_dump`'s program with the runtime
 /// (`STD/../runtime`) inlined, so a C compiler alone builds it (`cc FILE -pthread -lm`).
-pub fn c_unit(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs} {
+pub fn c_unit(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs, env} {
   let c = c_dump(dir, std_dir, cwd)?
   let rt = std_dir + "/../runtime/"
   let header = fs.read(rt + "jig_rt.h")?

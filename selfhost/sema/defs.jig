@@ -375,6 +375,8 @@ struct Package {
   /// `.feature` files (their `ast` is empty).
   features: List<SrcFile>
   is_std: Bool
+  /// From a required module, not the project.
+  external: Bool
   /// Package-level names.
   scope: Map<Str, Def>
   /// Per file: imported packages by name, with the import's item index.

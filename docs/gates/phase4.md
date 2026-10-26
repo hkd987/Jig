@@ -89,7 +89,7 @@ Release notes are in [`CHANGELOG.md`](../../CHANGELOG.md).
 
 ## Open
 
-- `jigc`: modules from `jig.mod`, the formatter, the prover (Z3 through
+- `jigc`: the formatter, the prover (Z3 through
   the `ffi` effect), the test runner and the interpreter. Until `jigc` passes every test
   suite the Rust compiler stays the `jig` command (D6).
 - Self-hosted speed: identifiers interned instead of sliced, and wall time (memory).

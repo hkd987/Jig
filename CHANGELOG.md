@@ -36,6 +36,6 @@ trace collection.
 C identical to the Rust compiler's, and compiles itself: `bootstrap/jigc.c` builds with any
 C compiler and regenerates itself byte for byte.
 
-**Not yet.** `jigc` does not load modules, format, prove or run tests;
+**Not yet.** `jigc` does not format, prove or run tests;
 the `jig` command is still the Rust compiler. Agent benchmark results, contracts on the
 compiler's own passes, and self-hosted speed parity are open (`docs/gates/phase4.md`).

@@ -32,8 +32,11 @@ UI and run test, the agent benchmark's Jig solutions and `jigc` itself, then on 
 copies (identifiers, types, literals and operators replaced, lines deleted, duplicated or
 swapped, `let`/`var`, `&mut`, `pub` and `effects` changed), which between them raise more than
 fifty different error codes. `jigc` reads the standard library from STD
-(`compiler/std`); the bootstrap compiler embeds it. Modules from `jig.mod` `require`
-lines are not ported yet.
+(`compiler/std`); the bootstrap compiler embeds it. Imports resolve through the modules
+`jig.mod` requires, as in the bootstrap compiler's `modules.rs`: one version of each (the
+highest any module requires), `replace` directories, and the module cache under
+`$JIG_HOME`; the test compares projects with missing, raised, replaced and misnamed
+modules.
 
 Feature files (`sema/feature.jig`) are parsed and their steps bound to `step` functions
 with typed placeholders, as in the bootstrap compiler's `feature/`; the steps and world

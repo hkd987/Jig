@@ -91,7 +91,7 @@ cc -O2 -std=gnu11 -pthread bootstrap/jigc.c -lm -o jigc
 ```
 
 `jigc` checks programs and compiles them to C with output identical to the Rust compiler's.
-It binds `.feature` scenarios too, but does not yet load modules, format, prove, or run tests; until it does,
+It binds `.feature` scenarios and loads required modules too, but does not yet format, prove, or run tests; until it does,
 the Rust compiler (`compiler/`) is the one `jig` command and is kept passing the same tests.
 
 ## License

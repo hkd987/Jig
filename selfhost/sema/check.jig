@@ -247,7 +247,7 @@ fn Sema.check_bodies(&mut self) {
   // Unused imports.
   for pi in 0..self.pkgs.len() {
     let pkg = self.pkgs[pi]
-    if pkg.is_std {
+    if pkg.is_std || pkg.external {
       continue
     }
     for fi in 0..pkg.imports.len() {

@@ -141,7 +141,7 @@ fn Sema.check_dead_code(&mut self) {
     }
     let fd = self.defs.fns[f]
     for r in body.refs {
-      if self.pkgs[self.defs.fns[r].pkg].path == "std/sim" && !self.pkgs[fd.pkg].is_std {
+      if self.pkgs[self.defs.fns[r].pkg].path == "std/sim" && self.is_user(fd.pkg) {
         self.err(
           "E0607",
           fd.name_span,
@@ -179,7 +179,7 @@ fn Sema.check_dead_code(&mut self) {
   // Unreachable functions.
   for fid in 0..self.defs.fns.len() {
     let fd = self.defs.fns[fid]
-    if self.pkgs[fd.pkg].is_std ||
+    if !self.is_user(fd.pkg) ||
       fd.iface.is_some() ||
       (!fd.has_body && !fd.ffi) ||
       reachable.contains(fid) {
@@ -205,7 +205,7 @@ fn Sema.check_dead_code(&mut self) {
   // Unused exports: `pub` functions of non-root packages used only inside their package.
   for fid in 0..self.defs.fns.len() {
     let fd = self.defs.fns[fid]
-    if self.pkgs[fd.pkg].is_std ||
+    if !self.is_user(fd.pkg) ||
       fd.pkg == self.root ||
       !fd.is_pub ||
       fd.iface.is_some() ||
@@ -261,7 +261,7 @@ fn Sema.check_dead_code(&mut self) {
   // Fields and variants.
   for aid in 0..self.defs.adts.len() {
     let ad = self.defs.adts[aid]
-    if self.pkgs[ad.pkg].is_std {
+    if !self.is_user(ad.pkg) {
       continue
     }
     let api = library && ad.pkg == self.root && ad.is_pub
@@ -289,7 +289,7 @@ fn Sema.check_dead_code(&mut self) {
   // Constants.
   for cid in 0..self.defs.consts.len() {
     let cd = self.defs.consts[cid]
-    if self.pkgs[cd.pkg].is_std ||
+    if !self.is_user(cd.pkg) ||
       consts_used.contains(cid) ||
       (library && cd.pkg == self.root && cd.is_pub) {
       continue
@@ -303,8 +303,13 @@ fn Sema.check_dead_code(&mut self) {
   self.sort_diags()
 }
 
+/// Code of the project itself: not the standard library or a required module.
+fn Sema.is_user(self, pkg: Int) -> Bool {
+  return !self.pkgs[pkg].is_std && !self.pkgs[pkg].external
+}
+
 fn Sema.exported(self, pkg: Int, is_pub: Bool) -> Bool {
-  return !self.pkgs[pkg].is_std && pkg != self.root && is_pub
+  return self.is_user(pkg) && pkg != self.root && is_pub
 }
 
 fn Sema.item_name_span(self, pkg: Int, file: Int, item: Int) -> syntax.Span {
@@ -315,7 +320,7 @@ fn Sema.item_name_span(self, pkg: Int, file: Int, item: Int) -> syntax.Span {
 /// pattern type, a signature, a field, an alias or a generic bound.
 fn Sema.cross_package_types(self, adts: &mut Set<Int>, ifaces: &mut Set<Int>) {
   for pid in 0..self.pkgs.len() {
-    if self.pkgs[pid].is_std {
+    if !self.is_user(pid) {
       continue
     }
     var work: List<Int> = []

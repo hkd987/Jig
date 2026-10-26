@@ -3,6 +3,7 @@
 // import cycles. The standard library is read from a directory.
 
 import "std/fs"
+import "std/os"
 import "std/strings"
 import "syntax"
 
@@ -63,8 +64,13 @@ fn find_project_root(start: Str) -> Option<Str> effects {fs} {
 
 /// The lines of a `jig.mod` this port understands: `module` and `link` (modules are not
 /// supported yet), and the errors of the others.
+/// A parsed `jig.mod`.
 struct ModFile {
+  module: Option<Str>
   links: List<Str>
+  reqs: List<(Str, Str)>
+  replaces: List<(Str, Str)>
+  /// Lines that are not understood, with their line numbers.
   errors: List<(Int, Str)>
 }
 
@@ -93,7 +99,7 @@ fn is_module_path(s: Str) -> Bool {
 }
 
 fn parse_mod(text: Str) -> ModFile {
-  var m = ModFile { links: [], errors: [] }
+  var m = ModFile { module: None, links: [], reqs: [], replaces: [], errors: [] }
   let lines = text.lines()
   for i in 0..lines.len() {
     let line = lines[i].split("//")[0].trim()
@@ -102,13 +108,16 @@ fn parse_mod(text: Str) -> ModFile {
     if w.is_empty() {
       ok = true
     } else if w.len() == 2 && w[0] == "module" {
+      m.module = Some(w[1])
       ok = true
     } else if w.len() == 2 && w[0] == "link" && is_mod_name(w[1]) {
       m.links.push(w[1])
       ok = true
     } else if w.len() == 3 && w[0] == "require" && is_module_path(w[1]) && is_mod_name(w[2]) {
+      m.reqs.push((w[1], w[2]))
       ok = true
     } else if w.len() == 4 && w[0] == "replace" && w[2] == "=>" && is_module_path(w[1]) {
+      m.replaces.push((w[1], w[3]))
       ok = true
     }
     if !ok {
@@ -119,6 +128,192 @@ fn parse_mod(text: Str) -> ModFile {
     }
   }
   return m
+}
+
+/// `a` joined with `b` as a path: `b` itself if it is absolute.
+fn path_join(a: Str, b: Str) -> Str {
+  if b.starts_with("/") || a.is_empty() {
+    return b
+  }
+  return join_path(a, b)
+}
+
+/// Where downloaded modules live (`$JIG_HOME/mod`, by default `~/.jig/mod`).
+fn cache_dir() -> Str effects {env} {
+  match os.env("JIG_HOME") {
+    Some(h) => {
+      return path_join(h, "mod")
+    }
+    None => {}
+  }
+  return path_join(path_join(os.env("HOME").unwrap_or("."), ".jig"), "mod")
+}
+
+/// A version's parts: numbers, or text where a part is not one.
+fn version_parts(v: Str) -> List<(Bool, Int, Str)> {
+  var t = v
+  for t.starts_with("v") {
+    t = t[1..t.len()]
+  }
+  var parts: List<(Bool, Int, Str)> = []
+  var cur: List<Char> = []
+  for c in (t + ".").chars() {
+    if c == '.' || c == '-' {
+      let part = Str.from_chars(cur)
+      cur = []
+      var digits = part
+      if digits.starts_with("+") {
+        digits = digits[1..digits.len()]
+      }
+      var numeric = !digits.is_empty()
+      for b in digits.bytes() {
+        if b < 48 || b > 57 {
+          numeric = false
+        }
+      }
+      let n = if numeric { digits.to_int() } else { None }
+      parts.push(
+        match n {
+          Some(x) => (true, x, "")
+          None => (false, 0, part)
+        },
+      )
+    } else {
+      cur.push(c)
+    }
+  }
+  return parts
+}
+
+/// Order versions: `v1.10.0` after `v1.9.2`; numbers compare as numbers (-1, 0 or 1).
+fn version_cmp(a: Str, b: Str) -> Int {
+  let (pa, pb) = (version_parts(a), version_parts(b))
+  for i in 0..min(pa.len(), pb.len()) {
+    let (an, ai, as_) = pa[i]
+    let (bn, bi, bs) = pb[i]
+    let o = if an && bn {
+      if ai < bi {
+        -1
+      } else if ai > bi {
+        1
+      } else {
+        0
+      }
+    } else if an {
+      1
+    } else if bn {
+      -1
+    } else if as_ < bs {
+      -1
+    } else if as_ > bs {
+      1
+    } else {
+      0
+    }
+    if o != 0 {
+      return o
+    }
+  }
+  return if pa.len() < pb.len() { -1 } else if pa.len() > pb.len() { 1 } else { 0 }
+}
+
+/// One module in the build.
+struct Resolved {
+  path: Str
+  version: Str
+  dir: Str
+  /// Not downloaded yet (`jig get`).
+  missing: Bool
+}
+
+/// Every module the project at `root` needs, one version each: the highest any module in the
+/// build requires.
+fn resolve_modules(root: Str, top: ModFile) -> (List<Resolved>, List<Str>) effects {fs, env} {
+  var errors: List<Str> = []
+  var chosen: List<Resolved> = []
+  var pending = top.reqs
+  // Raise versions until nothing changes; each newly chosen version's own requirements count.
+  for !pending.is_empty() {
+    let (path, version) = pending.pop().unwrap_or(("", ""))
+    var at = -1
+    for i in 0..chosen.len() {
+      if at < 0 && chosen[i].path == path {
+        at = i
+      }
+    }
+    if at >= 0 && version_cmp(version, chosen[at].version) <= 0 {
+      continue
+    }
+    var dir = path_join(cache_dir(), path + "@" + version)
+    for (rp, rd) in top.replaces {
+      if rp == path {
+        dir = path_join(root, rd)
+        break
+      }
+    }
+    let mod_file = path_join(dir, "jig.mod")
+    let missing = !fs.exists(mod_file)
+    let r = Resolved { path: path, version: version, dir: dir, missing: missing }
+    if at >= 0 {
+      chosen[at] = r
+    } else {
+      chosen.push(r)
+    }
+    if missing {
+      continue
+    }
+    match fs.read(mod_file) {
+      Ok(t) => {
+        let m = parse_mod(t)
+        let named = match m.module {
+          Some(x) => x == path
+          None => false
+        }
+        if !named {
+          errors.push(
+            mod_file +
+              " says `module " +
+              m.module.unwrap_or("?") +
+              "`, but it is required as `" +
+              path +
+              "`",
+          )
+        }
+        pending.extend(m.reqs)
+      }
+      Err(e) => errors.push("cannot read " + mod_file + ": " + e)
+    }
+  }
+  chosen.sort_by(fn(a, b) { a.path < b.path })
+  return (chosen, errors)
+}
+
+/// The module an import path belongs to: the longest module path it starts with, and the
+/// rest of the import path.
+fn module_of(mods: List<Resolved>, import_path: Str) -> Option<(Int, Str)> {
+  var best: Option<(Int, Str)> = None
+  for i in 0..mods.len() {
+    let mp = mods[i].path
+    var rest: Option<Str> = None
+    if import_path == mp {
+      rest = Some("")
+    } else if import_path.starts_with(mp + "/") {
+      rest = Some(import_path[mp.len() + 1..import_path.len()])
+    }
+    match rest {
+      Some(r) => {
+        let better = match best {
+          Some((b, _)) => mods[b].path.len() < mp.len()
+          None => true
+        }
+        if better {
+          best = Some((i, r))
+        }
+      }
+      None => {}
+    }
+  }
+  return best
 }
 
 struct Loader {
@@ -132,6 +327,10 @@ struct Loader {
   diags: List<syntax.Diag>
   project_root: Option<Str>
   next_base: Int
+  /// Required modules (`jig.mod`), and the module each package belongs to (`None`: the
+  /// project itself or the standard library).
+  modules: List<Resolved>
+  pkg_module: List<Option<Int>>
 }
 
 /// What loading produced: the packages, parsed, and the diagnostics.
@@ -151,7 +350,7 @@ fn dummy_span() -> syntax.Span {
 }
 
 /// Load the package in `dir` (an absolute path) and everything it imports.
-fn load_program(dir: Str, std_dir: Str) -> Loaded effects {fs} {
+fn load_program(dir: Str, std_dir: Str) -> Loaded effects {fs, env} {
   let project_root = find_project_root(dir)
   var ld = Loader {
     std_dir: std_dir
@@ -162,6 +361,8 @@ fn load_program(dir: Str, std_dir: Str) -> Loaded effects {fs} {
     diags: []
     project_root: project_root
     next_base: 1
+    modules: []
+    pkg_module: []
   }
   match project_root {
     Some(r) => match fs.read(join_path(r, "jig.mod")) {
@@ -169,6 +370,13 @@ fn load_program(dir: Str, std_dir: Str) -> Loaded effects {fs} {
         let m = parse_mod(text)
         for (line, e) in m.errors {
           ld.diags.push(diag("E0211", dummy_span(), "jig.mod line " + line.str() + ": " + e))
+        }
+        if !m.reqs.is_empty() {
+          let (mods, errors) = resolve_modules(r, m)
+          for e in errors {
+            ld.diags.push(diag("E0211", dummy_span(), e))
+          }
+          ld.modules = mods
         }
       }
       Err(_) => {}
@@ -191,7 +399,7 @@ fn load_program(dir: Str, std_dir: Str) -> Loaded effects {fs} {
     }
     None => {}
   }
-  let root = ld.add_dir_package(root_path, dir, None)
+  let root = ld.add_dir_package(root_path, dir, None, None)
   for {
     let wave = ld.queue
     if wave.is_empty() {
@@ -214,11 +422,20 @@ fn load_program(dir: Str, std_dir: Str) -> Loaded effects {fs} {
   }
 }
 
-fn Loader.new_package(&mut self, path: Str, is_std: Bool) -> Int {
+fn Loader.new_package(&mut self, path: Str, is_std: Bool, module: Option<Int>) -> Int {
   let id = self.pkgs.len()
   self.pkgs.push(
-    Package { path: path, files: [], features: [], is_std: is_std, scope: Map.new(), imports: [] },
+    Package {
+      path: path
+      files: []
+      features: []
+      is_std: is_std
+      external: module.is_some()
+      scope: Map.new()
+      imports: []
+    },
   )
+  self.pkg_module.push(module)
   self.by_path.insert(path, id)
   self.edges.push([])
   return id
@@ -239,7 +456,7 @@ fn Loader.add_file(&mut self, p: Int, path: Str, text: Str) {
 
 /// A standard package (the prelude is `<prelude>`).
 fn Loader.add_std(&mut self, path: Str, file: Str) -> Int effects {fs} {
-  let p = self.new_package(path, true)
+  let p = self.new_package(path, true, None)
   let text = match fs.read(join_path(self.std_dir, file)) {
     Ok(t) => t
     Err(e) => {
@@ -257,6 +474,7 @@ fn Loader.add_dir_package(
   path: Str,
   dir: Str,
   import_span: Option<syntax.Span>,
+  module: Option<Int>,
 ) -> Option<Int>
   effects {fs}
 {
@@ -280,7 +498,7 @@ fn Loader.add_dir_package(
     self.diags.push(diag("E0203", span, "package `" + path + "` has no .jig files in " + dir))
     return None
   }
-  let p = self.new_package(path, false)
+  let p = self.new_package(path, false, module)
   for n in names {
     if !n.ends_with(".jig") && !n.ends_with(".feature") {
       continue
@@ -315,7 +533,7 @@ fn Loader.resolve_imports(&mut self, p: Int) effects {fs} {
       let item = ast.items[item_id]
       match item.kind {
         Import(path, path_span) => {
-          match self.import_pkg(path, path_span) {
+          match self.import_pkg(path, path_span, self.pkg_module[p]) {
             Some(target) => {
               if target == p {
                 self.diags.push(diag("E0204", path_span, "a package cannot import itself"))
@@ -384,8 +602,11 @@ fn Loader.report_cycles(&mut self, roots: List<Int>) {
   }
 }
 
-/// The package an import names, loading it if needed.
-fn Loader.import_pkg(&mut self, path: Str, span: syntax.Span) -> Option<Int> effects {fs} {
+/// The package an import names, loading it if needed. `from` is the module of the importing
+/// package: its own packages are named relative to its root.
+fn Loader.import_pkg(&mut self, path: Str, span: syntax.Span, from: Option<Int>) -> Option<Int>
+  effects {fs}
+{
   for (p, file) in std_packages() {
     if p == path {
       match self.by_path.get(p) {
@@ -408,19 +629,47 @@ fn Loader.import_pkg(&mut self, path: Str, span: syntax.Span) -> Option<Int> eff
       return None
     }
   }
-  let root = match self.project_root {
-    Some(r) => r
-    None => {
-      let msg = "cannot import `" + path + "`: no project root (a directory with `jig.mod`)"
-      self.diags.push(diag("E0210", span, msg))
-      return None
+  // A required module's package, a package of the importing module, or the project's.
+  var full = path
+  var dir = ""
+  var module: Option<Int> = None
+  match module_of(self.modules, path) {
+    Some((mi, rest)) => {
+      let m = self.modules[mi]
+      if m.missing {
+        self.diags.push(
+          diag("E0211", span, "module `" + m.path + "` " + m.version + " is not downloaded"),
+        )
+        return None
+      }
+      dir = path_join(m.dir, rest)
+      module = Some(mi)
+    }
+    None => match from {
+      Some(mi) => {
+        let m = self.modules[mi]
+        full = m.path + "/" + path
+        dir = path_join(m.dir, path)
+        module = Some(mi)
+      }
+      None => {
+        let root = match self.project_root {
+          Some(r) => r
+          None => {
+            let msg = "cannot import `" + path + "`: no project root (a directory with `jig.mod`)"
+            self.diags.push(diag("E0210", span, msg))
+            return None
+          }
+        }
+        dir = join_path(root, path)
+      }
     }
   }
-  match self.by_path.get(path) {
+  match self.by_path.get(full) {
     Some(id) => {
       return Some(id)
     }
     None => {}
   }
-  return self.add_dir_package(path, join_path(root, path), Some(span))
+  return self.add_dir_package(full, dir, Some(span), module)
 }
