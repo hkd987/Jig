@@ -3146,6 +3146,23 @@ impl<'a> Gen<'a> {
                 }
                 Some(Sv::Unit)
             }
+            ListRepeat => {
+                let Some(Sv::List { len, .. }) = v0 else { return Some(self.fresh(t, "repeat")) };
+                let n = term(1)?;
+                self.oblige(
+                    fr,
+                    st,
+                    ObKind::Panic,
+                    span,
+                    format!("repeat count is not negative: {}", self.src(span)),
+                    format!("(>= {n} 0)"),
+                );
+                self.assume(st, format!("(>= {n} 0)"));
+                // Same elements over and over; only the length is modeled.
+                let Sv::List { elems, .. } = self.fresh(t, "repeat") else { return Some(self.fresh(t, "repeat")) };
+                let new_len = self.define_int(format!("(* {} {n})", len.t));
+                Some(Sv::List { len: Leaf { t: new_len, base: Base::Int(IntTy::I64), depth: 0 }, elems })
+            }
             ListSlice | StrSlice => Some(self.fresh(t, "slice")),
             _ => self.havoc_call(st, args.to_vec_args(), t),
         }

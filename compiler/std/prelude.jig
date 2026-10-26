@@ -220,6 +220,7 @@ pub fn List<T>.extend(&mut self, other: List<T>)
 pub fn List<T>.reverse(&mut self)
 pub fn List<T>.swap(&mut self, i: Int, j: Int)
 pub fn List<T>.truncate(&mut self, len: Int)
+pub fn List<T>.repeat(self, n: Int) -> List<T>
 pub fn List<T: Ord>.sort(&mut self)
 
 pub fn List<T>.first(self) -> Option<T> {

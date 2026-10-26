@@ -1069,6 +1069,21 @@ impl<'l, 'a> Interp<'l, 'a> {
                 }
                 ret(Value::List(Rc::new(xs[lo as usize..hi as usize].to_vec())))
             }
+            ListRepeat => {
+                let xs = list(&a[0]).unwrap_or_default();
+                let n = int(&a[1]);
+                if n < 0 {
+                    return Err(self.panic(format!("repeat count {n} is negative"), span));
+                }
+                let Some(total) = xs.len().checked_mul(n as usize) else {
+                    return Err(self.panic("the repeated list is too long".to_string(), span));
+                };
+                let mut out = Vec::with_capacity(total);
+                for _ in 0..n {
+                    out.extend(xs.iter().cloned());
+                }
+                ret(Value::List(Rc::new(out)))
+            }
             ListNew => ret(Value::List(Rc::new(Vec::new()))),
             ListLen => ret(Value::Int(list(&a[0]).map(|x| x.len()).unwrap_or(0) as i64)),
             ListIsEmpty => ret(Value::Bool(list(&a[0]).is_none_or(|x| x.is_empty()))),

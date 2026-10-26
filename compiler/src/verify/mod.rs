@@ -460,8 +460,11 @@ fn replay_failures(prog: &mut Program, solved: &mut [Solved], reports: &[Option<
                     continue;
                 }
             }
-            // No rebuildable counterexample: try generated inputs.
-            let mut rng = crate::proptest::Rng::new(f.0 as u64 + 1);
+            // No rebuildable counterexample: try generated inputs, seeded by the function's
+            // name so the inputs don't change when unrelated functions are added.
+            let seed =
+                rep.name.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
+            let mut rng = crate::proptest::Rng::new(seed);
             for case in 0..200u64 {
                 let args: Option<Vec<crate::mir::interp::Value>> = ptys
                     .iter()
@@ -469,12 +472,43 @@ fn replay_failures(prog: &mut Program, solved: &mut [Solved], reports: &[Option<
                     .collect();
                 let Some(args) = args else { break };
                 if run_matches(&mut lw, m, args.clone(), o, &own) == Some(true) {
+                    let args = shrink_replay(&mut lw, m, &ptys, args, o, &own);
                     o.replay = Some(Replay::Confirmed(show_args(&mut lw, &args, &ptys, &names)));
                     break;
                 }
             }
         }
     }
+}
+
+/// The smallest inputs found that still fail the obligation's check.
+fn shrink_replay(
+    lw: &mut crate::mir::lower::Lowerer,
+    m: crate::mir::MFnId,
+    ptys: &[crate::sema::ty::Ty],
+    mut args: Vec<crate::mir::interp::Value>,
+    o: &ObResult,
+    own: &[Span],
+) -> Vec<crate::mir::interp::Value> {
+    let mut budget = 300;
+    'outer: while budget > 0 {
+        for i in 0..args.len() {
+            for c in crate::proptest::shrink(lw.tys, lw.defs, ptys[i], &args[i]) {
+                budget -= 1;
+                if budget == 0 {
+                    break 'outer;
+                }
+                let mut trial = args.clone();
+                trial[i] = c;
+                if run_matches(lw, m, trial.clone(), o, own) == Some(true) {
+                    args = trial;
+                    continue 'outer;
+                }
+            }
+        }
+        break;
+    }
+    args
 }
 
 /// Spans of a function's own entry checks (`requires`, parameter refinements).

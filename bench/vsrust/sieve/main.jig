@@ -4,10 +4,7 @@ import "std/os"
 fn main() effects {io, env} {
   let args = os.args()
   let n = if args.len() > 1 { args[1].to_int().unwrap_or(1000) } else { 1000 }
-  var composite: List<Bool> = []
-  for _i in 0..n + 1 {
-    composite.push(false)
-  }
+  var composite = [false].repeat(n + 1)
   var count = 0
   var sum = 0
   for i in 2..n + 1 {

@@ -1713,6 +1713,12 @@ impl<'l, 'a> CGen<'l, 'a> {
                 let d = self.desc(e);
                 format!("jig_list_slice({}, {}, {}, {d}, {loc})", a[0], a[1], a[2])
             }
+            ListRepeat => {
+                let lt = arg_ty(self, 0);
+                let e = self.elem_of(lt);
+                let d = self.desc(e);
+                format!("jig_list_repeat({}, {}, {d}, {loc})", a[0], a[1])
+            }
             Push | Insert => {
                 let lt = arg_ty(self, 0);
                 let e = self.elem_of(lt);

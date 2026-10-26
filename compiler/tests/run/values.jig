@@ -121,6 +121,14 @@ fn main() effects {io} {
   io.println(grid.str())
   io.println(snapshot[1].str())
 
+  // Repeated lists: zeros, other values, and heap values shared until written.
+  var zeros = [0].repeat(5)
+  zeros[4] = 7
+  io.println(zeros.str() + " " + [1, 2].repeat(3).str() + " " + [true].repeat(0).str())
+  var rows = [["x"]].repeat(2)
+  rows[0].push("y")
+  io.println(rows.str() + " " + ["ab", ""].repeat(2).str())
+
   // Structs holding heap values, mutated through &mut.
   var items = [
     Item { name: "nut", tags: ["small"], qty: 3 },

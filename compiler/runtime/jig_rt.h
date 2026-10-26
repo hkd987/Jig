@@ -155,6 +155,7 @@ void jig_list_insert(jig_list **l, int64_t i, void *elem, const jig_type *t, con
 void jig_list_remove(jig_list **l, int64_t i, void *out, const jig_type *t, const char *loc);
 void jig_list_clear(jig_list **l, const jig_type *t);
 void jig_list_extend(jig_list **l, const jig_list *other, const jig_type *t);
+jig_list *jig_list_repeat(const jig_list *l, int64_t n, const jig_type *t, const char *loc);
 void jig_list_reverse(jig_list **l, const jig_type *t);
 void jig_list_swap(jig_list **l, int64_t i, int64_t j, const jig_type *t, const char *loc);
 void jig_list_truncate(jig_list **l, int64_t n, const jig_type *t, const char *loc);

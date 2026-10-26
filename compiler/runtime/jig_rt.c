@@ -621,6 +621,38 @@ void jig_list_extend(jig_list **lp, const jig_list *other, const jig_type *t) {
     l->len += m;
 }
 
+jig_list *jig_list_repeat(const jig_list *l, int64_t n, const jig_type *t, const char *loc) {
+    if (n < 0) jig_panic("repeat count is negative", loc);
+    int64_t m = jig_list_len(l);
+    if (!m || !n) return NULL;
+    if (m > INT64_MAX / n || (uint64_t)(m * n) > SIZE_MAX / t->size) jig_panic("the repeated list is too long", loc);
+    size_t chunk = (size_t)m * t->size, all = (size_t)(m * n) * t->size;
+    bool zero = true;
+    for (size_t i = 0; i < chunk && zero; i++) zero = l->data[i] == 0;
+    jig_list *r = jig_alloc(sizeof(jig_list));
+    r->rc = 1;
+    r->len = r->cap = m * n;
+    if (zero) {
+        /* All-zero elements (false, 0, empty values): fresh zeroed pages, no copying. */
+        r->data = calloc(1, all);
+        if (!r->data) {
+            fputs("out of memory\n", stderr);
+            _exit(102);
+        }
+        return r;
+    }
+    r->data = jig_alloc(all);
+    memcpy(r->data, l->data, chunk);
+    for (size_t done = chunk; done < all;) {
+        size_t c = done < all - done ? done : all - done;
+        memcpy(r->data + done, r->data, c);
+        done += c;
+    }
+    if (t->retain)
+        for (int64_t i = 0; i < r->len; i++) t->retain(r->data + (size_t)i * t->size);
+    return r;
+}
+
 void jig_list_reverse(jig_list **lp, const jig_type *t) {
     if (jig_list_len(*lp) < 2) return;
     jig_list_make_unique(lp, t);

@@ -16,7 +16,7 @@ FAILED struct invariant in `bad_span` at tests/prove/semantics/main.jig:127:3: `
   hint: Show the new value satisfies the predicate: check it first, or require it of the inputs it is computed from.
 FAILED struct invariant in `bad_list_span` at tests/prove/semantics/main.jig:133:3: `Span` requires lo <= hi
   counterexample: xs.len() = 1
-  confirmed: running it with xs = [Span { lo: 0, hi: 1 }] fails this check
+  confirmed: running it with xs = [Span { lo: 0, hi: 0 }] fails this check
   hint: Show the new value satisfies the predicate: check it first, or require it of the inputs it is computed from.
 may trap overflow in `ok_span` at tests/prove/semantics/main.jig:144:10: `s.hi - s.lo` does not overflow Int
   counterexample: s.lo = -9223372036854775808, s.hi = 0
@@ -24,7 +24,7 @@ may trap overflow in `ok_strings` at tests/prove/semantics/main.jig:184:29: `s.l
   counterexample: s.len() = 9223372036854775807
 FAILED assertion in `bad_strings` at tests/prove/semantics/main.jig:189:10: s == t
   counterexample: s.len() = 0, t.len() = 0
-  confirmed: running it with s = "", t = "c" fails this check
+  confirmed: running it with s = "", t = "5" fails this check
   hint: If the counterexample can happen, the code is wrong; otherwise add the missing fact as a `requires`, an `ensures` on a callee or a loop `invariant`.
 FAILED precondition in `main` at tests/prove/semantics/main.jig:201:3: `bad_list_span` requires xs[0].hi < 1000
   hint: Establish it before the call (an `if`, or an `assert` that is proved), or add it to this function's `requires` so callers must.

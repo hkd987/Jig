@@ -364,7 +364,7 @@ Prelude (no import): `assert(c)`, `panic(msg) -> Never`, `min(a, b)`, `max(a, b)
 | `Float` | `str() abs() sqrt() floor() ceil() round() is_nan()` |
 | `Char` | `str() is_digit() is_alpha() is_space()` |
 | `Str` | `len() is_empty() s[i] -> U8, s[a..b] -> Str, + contains(t) starts_with(t) ends_with(t) find(t) -> Option<Int> split(sep) -> List<Str> lines() trim() replace(a, b) repeat(n) to_upper() to_lower() to_int() -> Option<Int> to_float() -> Option<Float> bytes() -> List<U8> chars() -> List<Char>` |
-| `List<T>` | `List.new() [a, b] len() is_empty() xs[i] xs[a..b] push(x) pop() -> Option<T> get(i) -> Option<T> first() last() insert(i, x) remove(i) -> T clear() extend(ys) reverse() swap(i, j) truncate(n) contains(x) index_of(x) -> Option<Int> sort() sort_by(f) map(f) filter(f) fold(init, f) any(f) all(f) join(sep)` (`join` on `List<Str>`) |
+| `List<T>` | `List.new() [a, b] len() is_empty() xs[i] xs[a..b] push(x) pop() -> Option<T> get(i) -> Option<T> first() last() insert(i, x) remove(i) -> T clear() extend(ys) reverse() swap(i, j) truncate(n) repeat(n) contains(x) index_of(x) -> Option<Int> sort() sort_by(f) map(f) filter(f) fold(init, f) any(f) all(f) join(sep)` (`join` on `List<Str>`; `[0].repeat(n)` is n zeros) |
 | `Map<K, V>` | `Map.new() len() is_empty() get(k) -> Option<V> insert(k, v) remove(k) -> Option<V> contains(k) keys() values() entries()` |
 | `Set<T>` | `Set.new() len() insert(x) remove(x) contains(x) items()` |
 | `Option<T>` | `is_some() is_none() unwrap() unwrap_or(d) ok_or(e) map(f)` |

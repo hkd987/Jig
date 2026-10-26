@@ -63,6 +63,8 @@ pub enum Op {
     Reverse,
     Swap,
     Truncate,
+    /// `xs.repeat(n)`: `n` copies of `xs`, end to end.
+    ListRepeat,
     Sort,
     SortBy,
     MapNew,
@@ -212,6 +214,7 @@ pub fn lookup(pkg_path: &str, recv: Option<TyKey>, name: &str) -> Option<(Op, Op
             "reverse" => Reverse,
             "swap" => Swap,
             "truncate" => Truncate,
+            "repeat" => ListRepeat,
             "sort" => Sort,
             "sort_by" => SortBy,
             _ => return None,
