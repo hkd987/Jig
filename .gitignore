@@ -2,3 +2,4 @@
 .jig/
 *.o
 /examples/**/out
+.claude/worktrees/
