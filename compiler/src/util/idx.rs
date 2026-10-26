@@ -188,6 +188,10 @@ impl<T: Copy> ListArena<T> {
     pub fn push_scratch(&mut self, v: T) {
         self.scratch.push(v);
     }
+    /// Drop scratch items pushed since `mark` (a parse that failed partway through a list).
+    pub fn truncate_scratch(&mut self, mark: usize) {
+        self.scratch.truncate(mark);
+    }
     pub fn finish(&mut self, mark: usize) -> List<T> {
         let n = self.scratch.len() - mark;
         if n == 0 {

@@ -414,9 +414,13 @@ pub fn main() -> i32 {
         Some("hook") => crate::tools::hooks::main(rest),
         // Internal: dumps compared against the self-hosted compiler.
         Some("debug") => match rest {
-            [what, file] if what == "tokens" => match std::fs::read_to_string(file) {
+            [what, file] if what == "tokens" || what == "ast" => match std::fs::read_to_string(file) {
                 Ok(src) => {
-                    print!("{}", crate::tools::debug::tokens(&src));
+                    if what == "tokens" {
+                        print!("{}", crate::tools::debug::tokens(&src));
+                    } else {
+                        print!("{}", crate::tools::debug_ast::ast(&src));
+                    }
                     0
                 }
                 Err(e) => {
@@ -425,7 +429,7 @@ pub fn main() -> i32 {
                 }
             },
             _ => {
-                eprintln!("usage: jig debug tokens FILE");
+                eprintln!("usage: jig debug tokens|ast FILE");
                 2
             }
         },

@@ -252,9 +252,12 @@ impl<'a> Parser<'a> {
                 break;
             }
             let before = self.pos;
+            let marks = self.ast.scratch_marks();
             match self.parse_item() {
                 Ok(id) => self.ast.item_lists.push_scratch(id),
                 Err(()) => {
+                    // Whatever the failed item pushed belongs to no list.
+                    self.ast.truncate_scratch(marks);
                     if self.pos == before {
                         self.bump();
                     }
@@ -962,6 +965,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             let before = self.pos;
+            let marks = self.ast.scratch_marks();
             match self.parse_stmt() {
                 Ok(s) => {
                     self.ast.stmt_lists.push_scratch(s);
@@ -971,6 +975,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 Err(()) => {
+                    self.ast.truncate_scratch(marks);
                     if self.pos == before {
                         self.bump();
                     }
@@ -1762,9 +1767,11 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 let alo = self.tok().lo;
+                let marks = self.ast.scratch_marks();
                 match self.parse_arm() {
                     Ok(arm) => arms.push(Arm { span: self.span_from(alo), ..arm }),
                     Err(()) => {
+                        self.ast.truncate_scratch(marks);
                         // Skip to the next arm so one bad arm is one error.
                         if !self.skip_to_arm_end() {
                             return Err(());

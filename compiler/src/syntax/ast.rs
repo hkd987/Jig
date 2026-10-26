@@ -439,7 +439,44 @@ pub enum PatKind {
     Error,
 }
 
+/// Scratch positions of every list arena, so a failed parse can drop what it pushed.
+#[derive(Clone, Copy)]
+pub struct ScratchMarks([usize; 13]);
+
 impl Ast {
+    pub fn scratch_marks(&self) -> ScratchMarks {
+        ScratchMarks([
+            self.item_lists.mark(),
+            self.expr_lists.mark(),
+            self.stmt_lists.mark(),
+            self.type_lists.mark(),
+            self.pat_lists.mark(),
+            self.params.mark(),
+            self.generics.mark(),
+            self.fields.mark(),
+            self.variants.mark(),
+            self.field_inits.mark(),
+            self.arms.mark(),
+            self.names.mark(),
+            self.unit_factors.mark(),
+        ])
+    }
+    pub fn truncate_scratch(&mut self, m: ScratchMarks) {
+        let m = m.0;
+        self.item_lists.truncate_scratch(m[0]);
+        self.expr_lists.truncate_scratch(m[1]);
+        self.stmt_lists.truncate_scratch(m[2]);
+        self.type_lists.truncate_scratch(m[3]);
+        self.pat_lists.truncate_scratch(m[4]);
+        self.params.truncate_scratch(m[5]);
+        self.generics.truncate_scratch(m[6]);
+        self.fields.truncate_scratch(m[7]);
+        self.variants.truncate_scratch(m[8]);
+        self.field_inits.truncate_scratch(m[9]);
+        self.arms.truncate_scratch(m[10]);
+        self.names.truncate_scratch(m[11]);
+        self.unit_factors.truncate_scratch(m[12]);
+    }
     pub fn expr(&self, id: ExprId) -> &Expr {
         &self.exprs[id]
     }
