@@ -12,7 +12,7 @@ bootstrap compiler on every `.jig` file in the repository plus a few hundred mut
 | --- | --- | --- | --- |
 | Lexer | `compiler/src/syntax/lexer.rs` | `syntax/lexer.jig` | `jigc tokens FILE` = `jig debug tokens FILE` |
 | Parser | `compiler/src/syntax/parser.rs` | `syntax/ast.jig`, `syntax/parser.jig` | `jigc ast FILE` = `jig debug ast FILE` |
-| Checker: loading, collection, types, effects, exhaustiveness, lints, dead code | `compiler/src/sema/` | `sema/` | `jigc check DIR STD` = `jig debug check DIR` |
+| Checker: loading, collection, types, effects, exhaustiveness, lints, dead code, feature binding | `compiler/src/sema/`, `compiler/src/feature/` | `sema/` | `jigc check DIR STD` = `jig debug check DIR` |
 | MIR lowering, ownership analyses, C back end | `compiler/src/mir/lower.rs`, `compiler/src/codegen/` | `sema/mir.jig`, `sema/lower*.jig`, `sema/own.jig`, `sema/cgen*.jig` | `jigc c DIR STD` = `jig debug c DIR` |
 | Formatter, prover, test runner, interpreter | | not yet | |
 
@@ -32,8 +32,14 @@ UI and run test, the agent benchmark's Jig solutions and `jigc` itself, then on 
 copies (identifiers, types, literals and operators replaced, lines deleted, duplicated or
 swapped, `let`/`var`, `&mut`, `pub` and `effects` changed), which between them raise more than
 fifty different error codes. `jigc` reads the standard library from STD
-(`compiler/std`); the bootstrap compiler embeds it. `.feature` files and modules from
-`jig.mod` `require` lines are not ported yet.
+(`compiler/std`); the bootstrap compiler embeds it. Modules from `jig.mod` `require`
+lines are not ported yet.
+
+Feature files (`sema/feature.jig`) are parsed and their steps bound to `step` functions
+with typed placeholders, as in the bootstrap compiler's `feature/`; the steps and world
+constructors that scenarios use are roots of the dead-code check. The test also compares
+300 projects with mutated `.feature` files and step patterns (keywords, tables, outlines,
+placeholder values that do not parse or do not fit, missing and ambiguous steps).
 
 The back end (about 6,600 lines of Jig for 7,300 of Rust) lowers to the same MIR, runs the
 same ownership analyses (borrowed locals, last uses, unique lists) and prints the same C:

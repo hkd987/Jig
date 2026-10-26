@@ -10,7 +10,8 @@ fn Sema.check_dead_code(&mut self) {
     return
   }
   let library = self.defs.main.is_none()
-  var roots: List<Int> = []
+  // Scenarios justify the steps they use and the worlds they build.
+  var roots = self.scenario_roots
   match self.defs.main {
     Some(m) => roots.push(m)
     None => {
@@ -115,7 +116,17 @@ fn Sema.check_dead_code(&mut self) {
   }
   // The test simulation is not part of the program: nothing `main` reaches may use it.
   var seen: Set<Int> = Set.new()
-  var work = roots
+  var work: List<Int> = []
+  match self.defs.main {
+    Some(m) => work.push(m)
+    None => {
+      for r in roots {
+        if !self.scenario_steps.contains(r) {
+          work.push(r)
+        }
+      }
+    }
+  }
   for !work.is_empty() {
     let f = work.pop().unwrap_or(0)
     if seen.contains(f) {

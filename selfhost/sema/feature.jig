@@ -1,0 +1,861 @@
+// Features, ported from the bootstrap compiler's `feature/`: the Gherkin subset (`Feature`,
+// `Scenario`, `Scenario Outline` with `Examples`, `Given`/`When`/`Then`/`And`/`But`), and
+// binding each step line to a `step` function at compile time with typed placeholders. The
+// checker needs the binding's errors and, for dead code, the steps and worlds scenarios use.
+
+import "syntax"
+
+struct StepLine {
+  /// `Given`, `When`, `Then`, `And` or `But`.
+  keyword: Str
+  text: Str
+  /// The text after the keyword.
+  text_span: syntax.Span
+}
+
+struct ScenarioAst {
+  name: Str
+  span: syntax.Span
+  steps: List<StepLine>
+  /// `Scenario Outline`: its `Examples` header and rows.
+  outline: Bool
+  header: List<Str>
+  rows: List<List<Str>>
+}
+
+/// Unicode white space, as Rust's `char::is_whitespace`.
+fn is_white(c: Char) -> Bool {
+  let v = c as Int
+  return (v >= 9 && v <= 13) ||
+    v == 32 ||
+    v == 133 ||
+    v == 160 ||
+    v == 5760 ||
+    (v >= 8192 && v <= 8202) ||
+    v == 8232 ||
+    v == 8233 ||
+    v == 8239 ||
+    v == 8287 ||
+    v == 12288
+}
+
+fn char_bytes(c: Char) -> Int {
+  let v = c as Int
+  if v < 128 {
+    return 1
+  }
+  if v < 2048 {
+    return 2
+  }
+  if v < 65536 {
+    return 3
+  }
+  return 4
+}
+
+fn trim_start_ws(s: Str) -> Str {
+  var i = 0
+  for c in s.chars() {
+    if !is_white(c) {
+      break
+    }
+    i += char_bytes(c)
+  }
+  return s[i..s.len()]
+}
+
+fn trim_end_ws(s: Str) -> Str {
+  var end = 0
+  var i = 0
+  for c in s.chars() {
+    i += char_bytes(c)
+    if !is_white(c) {
+      end = i
+    }
+  }
+  return s[0..end]
+}
+
+fn trim_ws(s: Str) -> Str {
+  return trim_end_ws(trim_start_ws(s))
+}
+
+/// The cells of a `| a | b |` table row.
+fn table_row(line: Str) -> List<Str> {
+  var inner = trim_ws(line)
+  var lo = 0
+  for lo < inner.len() && inner[lo] == 124 {
+    lo += 1
+  }
+  var hi = inner.len()
+  for hi > lo && inner[hi - 1] == 124 {
+    hi -= 1
+  }
+  inner = inner[lo..hi]
+  var cells: List<Str> = []
+  for c in inner.split("|") {
+    cells.push(trim_ws(c))
+  }
+  return cells
+}
+
+fn finish_scenario(
+  cur: Option<ScenarioAst>,
+  scenarios: &mut List<ScenarioAst>,
+  diags: &mut List<syntax.Diag>,
+) {
+  let s = match cur {
+    Some(s) => s
+    None => {
+      return
+    }
+  }
+  if s.steps.is_empty() {
+    diags.push(diag("E0801", s.span, "scenario `" + s.name + "` has no steps"))
+  }
+  if s.outline {
+    if s.rows.is_empty() {
+      diags.push(diag("E0801", s.span, "the `Examples` table has no rows"))
+    }
+  } else if s.name.is_empty() {
+    diags.push(diag("E0801", s.span, "a scenario needs a name"))
+  }
+  scenarios.push(s)
+}
+
+/// Parse one `.feature` file whose first byte is at global offset `base`: whether it has a
+/// `Feature:` line, its scenarios, and its errors.
+fn parse_feature(src: Str, base: Int) -> (Bool, List<ScenarioAst>, List<syntax.Diag>) {
+  let keywords = ["Given", "When", "Then", "And", "But"]
+  var diags: List<syntax.Diag> = []
+  var feature = false
+  var scenarios: List<ScenarioAst> = []
+  var cur: Option<ScenarioAst> = None
+  var in_examples = false
+  var offset = 0
+  for offset < src.len() {
+    var next = offset
+    for next < src.len() && src[next] != 10 {
+      next += 1
+    }
+    if next < src.len() {
+      next += 1
+    }
+    let raw = src[offset..next]
+    let line_lo = base + offset
+    offset = next
+    var end = raw.len()
+    for end > 0 && (raw[end - 1] == 10 || raw[end - 1] == 13) {
+      end -= 1
+    }
+    let line = raw[0..end]
+    let started = trim_start_ws(line)
+    let indent = line.len() - started.len()
+    let trimmed = trim_end_ws(started)
+    let span = syntax.Span { lo: line_lo + indent, hi: line_lo + indent + trimmed.len() }
+    if trimmed.is_empty() || trimmed.starts_with("#") {
+      continue
+    }
+    if trimmed.starts_with("@") {
+      diags.push(diag("E0801", span, "tags are not supported"))
+      continue
+    }
+    if trimmed.starts_with("Feature:") {
+      if feature {
+        diags.push(diag("E0801", span, "one `Feature:` per file"))
+        continue
+      }
+      feature = true
+      continue
+    }
+    if trimmed.starts_with("Background:") || trimmed.starts_with("Rule:") {
+      let what = match trimmed.find(":") {
+        Some(i) => trimmed[0..i]
+        None => trimmed
+      }
+      diags.push(diag("E0801", span, "`" + what + "` is not supported"))
+      continue
+    }
+    let outline = trimmed.starts_with("Scenario Outline:")
+    if outline || trimmed.starts_with("Scenario:") {
+      if !feature {
+        diags.push(diag("E0801", span, "a scenario must follow `Feature:`"))
+        continue
+      }
+      finish_scenario(cur, &mut scenarios, &mut diags)
+      in_examples = false
+      let skip = if outline { 17 } else { 9 }
+      cur = Some(
+        ScenarioAst {
+          name: trim_ws(trimmed[skip..trimmed.len()])
+          span: span
+          steps: []
+          outline: outline
+          header: []
+          rows: []
+        },
+      )
+      continue
+    }
+    if trimmed.starts_with("Examples:") {
+      let ok = match cur {
+        Some(s) => s.outline
+        None => false
+      }
+      if ok {
+        in_examples = true
+      } else {
+        diags.push(diag("E0801", span, "`Examples:` belongs to a `Scenario Outline:`"))
+      }
+      continue
+    }
+    if trimmed.starts_with("|") {
+      match cur {
+        Some(s) => if s.outline && in_examples {
+          var t = s
+          let cells = table_row(trimmed)
+          if t.header.is_empty() {
+            t.header = cells
+          } else if cells.len() != t.header.len() {
+            diags.push(
+              diag(
+                "E0801",
+                span,
+                "this row has " +
+                  cells.len().str() +
+                  " cells; the header has " +
+                  t.header.len().str(),
+              ),
+            )
+          } else {
+            t.rows.push(cells)
+          }
+          cur = Some(t)
+        } else {
+          diags.push(diag("E0801", span, "data tables on steps are not supported"))
+        }
+        None => diags.push(diag("E0801", span, "data tables on steps are not supported"))
+      }
+      continue
+    }
+    if trimmed.starts_with("\"\"\"") {
+      diags.push(diag("E0801", span, "doc strings are not supported"))
+      continue
+    }
+    var kw = ""
+    for k in keywords {
+      if kw.is_empty() && trimmed.starts_with(k) {
+        let rest = trimmed[k.len()..trimmed.len()]
+        if rest.is_empty() || rest.starts_with(" ") {
+          kw = k
+        }
+      }
+    }
+    if !kw.is_empty() {
+      match cur {
+        Some(s) => {
+          if in_examples {
+            diags.push(diag("E0801", span, "steps go before the `Examples:` table"))
+            continue
+          }
+          let after = trimmed[kw.len()..trimmed.len()]
+          let text = trim_ws(after)
+          let text_lo = span.lo + kw.len() + (after.len() - trim_start_ws(after).len())
+          var t = s
+          t.steps.push(
+            StepLine {
+              keyword: kw
+              text: text
+              text_span: syntax.Span { lo: text_lo, hi: text_lo + text.len() }
+            },
+          )
+          cur = Some(t)
+        }
+        None => diags.push(diag("E0801", span, "a step must be inside a scenario"))
+      }
+      continue
+    }
+    // Free text: a description, allowed after `Feature:` before the first scenario.
+    if feature && cur.is_none() {
+      continue
+    }
+    diags.push(diag("E0801", span, "expected a step, found `" + trimmed + "`"))
+  }
+  finish_scenario(cur, &mut scenarios, &mut diags)
+  if !feature {
+    diags.push(
+      diag("E0801", syntax.Span { lo: base, hi: base }, "a feature file starts with `Feature:`"),
+    )
+  }
+  return (feature, scenarios, diags)
+}
+
+/// A compiled step pattern: literal text and `{name}` placeholders.
+enum Piece {
+  Lit(text: Str)
+  Hole(name: Str)
+}
+
+fn is_ascii_word(c: Char) -> Bool {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+}
+
+fn compile_pattern(p: Str) -> Result<List<Piece>, Str> {
+  var out: List<Piece> = []
+  var lit: List<Char> = []
+  let cs = p.chars()
+  var i = 0
+  for i < cs.len() {
+    let c = cs[i]
+    i += 1
+    if c != '{' {
+      lit.push(c)
+      continue
+    }
+    var name: List<Char> = []
+    for {
+      if i >= cs.len() {
+        return Err("unterminated or invalid placeholder in `" + p + "`")
+      }
+      let d = cs[i]
+      i += 1
+      if d == '}' {
+        break
+      }
+      if !is_ascii_word(d) {
+        return Err("unterminated or invalid placeholder in `" + p + "`")
+      }
+      name.push(d)
+    }
+    if name.is_empty() {
+      return Err("empty placeholder `{}`")
+    }
+    let after_hole = match out.last() {
+      Some(Hole(_)) => true
+      _ => false
+    }
+    if after_hole && lit.is_empty() {
+      return Err("two placeholders need text between them")
+    }
+    if !lit.is_empty() {
+      out.push(Piece.Lit(Str.from_chars(lit)))
+      lit = []
+    }
+    out.push(Piece.Hole(Str.from_chars(name)))
+  }
+  if !lit.is_empty() {
+    out.push(Piece.Lit(Str.from_chars(lit)))
+  }
+  return Ok(out)
+}
+
+/// Does byte `i` of `s` start a character?
+fn is_boundary(s: Str, i: Int) -> Bool {
+  if i <= 0 || i >= s.len() {
+    return true
+  }
+  let b = s[i] as Int
+  return b < 128 || b >= 192
+}
+
+fn match_from(pieces: List<Piece>, k: Int, text: Str, out: &mut List<Str>) -> Bool {
+  if k >= pieces.len() {
+    return text.is_empty()
+  }
+  match pieces[k] {
+    Lit(l) => {
+      return text.starts_with(l) && match_from(pieces, k + 1, text[l.len()..text.len()], &mut out)
+    }
+    Hole(_) => {
+      var ends: List<Int> = []
+      if text.starts_with("\"") {
+        var esc = false
+        var at = 1
+        for c in text[1..text.len()].chars() {
+          if esc {
+            esc = false
+          } else if c == '\\' {
+            esc = true
+          } else if c == '"' {
+            ends.push(at + 1)
+            break
+          }
+          at += char_bytes(c)
+        }
+      } else {
+        var word = 0
+        for c in text.chars() {
+          if is_white(c) {
+            break
+          }
+          word += char_bytes(c)
+        }
+        // Longest first, so `{n}` in `{n} items` takes all of `12`.
+        var i = word
+        for i > 0 {
+          ends.push(i)
+          i -= 1
+          for i > 0 && !is_boundary(text, i) {
+            i -= 1
+          }
+        }
+      }
+      for e in ends {
+        out.push(text[0..e])
+        if match_from(pieces, k + 1, text[e..text.len()], &mut out) {
+          return true
+        }
+        let _ = out.pop()
+      }
+      return false
+    }
+  }
+}
+
+/// Match step text against a pattern: the placeholder texts in order. A placeholder takes a
+/// quoted string (quotes included) or a run of non-space characters.
+fn match_pattern(pieces: List<Piece>, text: Str) -> Option<List<Str>> {
+  var out: List<Str> = []
+  if match_from(pieces, 0, text, &mut out) {
+    return Some(out)
+  }
+  return None
+}
+
+fn holes_of(pieces: List<Piece>) -> List<Str> {
+  var out: List<Str> = []
+  for p in pieces {
+    match p {
+      Hole(h) => out.push(h)
+      _ => {}
+    }
+  }
+  return out
+}
+
+struct StepDef {
+  f: Int
+  pieces: List<Piece>
+  /// The world type, if the first parameter is a struct.
+  world: Option<Int>
+  /// For each other parameter, in order: (name, type).
+  params: List<(Str, Int)>
+}
+
+/// Whether `s` is a quoted string with valid escapes.
+fn is_quoted(s: Str) -> Bool {
+  if s.len() < 2 || !s.starts_with("\"") || !s.ends_with("\"") {
+    return false
+  }
+  let inner = s[1..s.len() - 1]
+  var esc = false
+  for b in inner.bytes() {
+    if esc {
+      esc = false
+    } else if b == 92 {
+      esc = true
+    }
+  }
+  return !esc
+}
+
+fn all_digits(s: Str) -> Bool {
+  if s.is_empty() {
+    return false
+  }
+  for b in s.bytes() {
+    if b < 48 || b > 57 {
+      return false
+    }
+  }
+  return true
+}
+
+/// Compare two decimal digit strings without leading zeros.
+fn dec_le(a: Str, b: Str) -> Bool {
+  if a.len() != b.len() {
+    return a.len() < b.len()
+  }
+  return a <= b
+}
+
+/// An integer's text as Rust's `i128` parsing reads it: the normalized decimal and its sign,
+/// or None.
+fn parse_int_text(text: Str) -> Option<(Bool, Str)> {
+  var t = text
+  var neg = false
+  if t.starts_with("+") || t.starts_with("-") {
+    neg = t.starts_with("-")
+    t = t[1..t.len()]
+  }
+  if !all_digits(t) {
+    return None
+  }
+  var i = 0
+  for i + 1 < t.len() && t[i] == 48 {
+    i += 1
+  }
+  let digits = t[i..t.len()]
+  let limit = if neg {
+    "170141183460469231731687303715884105728"
+  } else {
+    "170141183460469231731687303715884105727"
+  }
+  if !dec_le(digits, limit) {
+    return None
+  }
+  return Some((neg && digits != "0", digits))
+}
+
+/// Whether text parses as Rust's `f64`.
+fn is_float_text(text: Str) -> Bool {
+  var t = text
+  if t.starts_with("+") || t.starts_with("-") {
+    t = t[1..t.len()]
+  }
+  let lower = t.to_lower()
+  if lower == "inf" || lower == "infinity" || lower == "nan" {
+    return true
+  }
+  let bs = t.bytes()
+  var i = 0
+  var mant = 0
+  for i < bs.len() && bs[i] >= 48 && bs[i] <= 57 {
+    i += 1
+    mant += 1
+  }
+  if i < bs.len() && bs[i] == 46 {
+    i += 1
+    for i < bs.len() && bs[i] >= 48 && bs[i] <= 57 {
+      i += 1
+      mant += 1
+    }
+  }
+  if mant == 0 {
+    return false
+  }
+  if i < bs.len() && (bs[i] == 101 || bs[i] == 69) {
+    i += 1
+    if i < bs.len() && (bs[i] == 43 || bs[i] == 45) {
+      i += 1
+    }
+    var exp = 0
+    for i < bs.len() && bs[i] >= 48 && bs[i] <= 57 {
+      i += 1
+      exp += 1
+    }
+    if exp == 0 {
+      return false
+    }
+  }
+  return i == bs.len()
+}
+
+fn int_bounds(k: IntTy) -> (Str, Str) {
+  return match k {
+    I64 => ("9223372036854775808", "9223372036854775807")
+    I32 => ("2147483648", "2147483647")
+    U8 => ("0", "255")
+    U32 => ("0", "4294967295")
+    U64 => ("0", "18446744073709551615")
+  }
+}
+
+/// Why a placeholder's text is not a value of type `t`, or "" if it is.
+fn Sema.convert_error(self, text: Str, t: Int) -> Str {
+  match self.tys.kinds[t] {
+    Str => {
+      return if is_quoted(text) { "" } else { "`" + text + "` is not a quoted string" }
+    }
+    Int(k, _) => {
+      let clean = text.replace("_", "")
+      return match parse_int_text(clean) {
+        None => "`" + text + "` is not an integer"
+        Some((neg, digits)) => {
+          let (min, max) = int_bounds(k)
+          let fits = if neg { dec_le(digits, min) && min != "0" } else { dec_le(digits, max) }
+          let v = if neg { "-" + digits } else { digits }
+          if fits {
+            ""
+          } else {
+            v + " does not fit in `" + k.name() + "`"
+          }
+        }
+      }
+    }
+    Float(_) => {
+      return if is_float_text(text) { "" } else { "`" + text + "` is not a number" }
+    }
+    Bool => {
+      return if text == "true" || text == "false" {
+        ""
+      } else {
+        "`" + text + "` is not `true` or `false`"
+      }
+    }
+    _ => {
+      return "unsupported placeholder type"
+    }
+  }
+}
+
+/// A scenario's runs: one, or one per `Examples` row with `<column>` substituted.
+fn expand(sc: ScenarioAst) -> List<List<StepLine>> {
+  if !sc.outline {
+    return [sc.steps]
+  }
+  var out: List<List<StepLine>> = []
+  for cells in sc.rows {
+    var lines: List<StepLine> = []
+    for s in sc.steps {
+      var text = s.text
+      for i in 0..min(sc.header.len(), cells.len()) {
+        text = text.replace("<" + sc.header[i] + ">", cells[i])
+      }
+      lines.push(StepLine { keyword: s.keyword, text: text, text_span: s.text_span })
+    }
+    out.push(lines)
+  }
+  return out
+}
+
+/// Check every package's step functions and bind its feature files; the steps and world
+/// constructors scenarios use become roots of the dead-code check.
+fn Sema.bind_features(&mut self) {
+  for p in 0..self.pkgs.len() {
+    if self.pkgs[p].is_std {
+      continue
+    }
+    let steps = self.step_defs(p)
+    for f in self.pkgs[p].features {
+      let (feature, scenarios, ds) = parse_feature(f.text, f.base)
+      self.diags.extend(ds)
+      if feature {
+        for sc in scenarios {
+          for lines in expand(sc) {
+            self.bind_scenario(sc.span, lines, steps)
+          }
+        }
+      }
+    }
+  }
+}
+
+fn Sema.step_defs(&mut self, p: Int) -> List<StepDef> {
+  var out: List<StepDef> = []
+  for f in 0..self.defs.fns.len() {
+    let fd = self.defs.fns[f]
+    if fd.pkg != p {
+      continue
+    }
+    let st = match fd.step_attr {
+      Some(s) => s
+      None => {
+        continue
+      }
+    }
+    let pieces = match compile_pattern(st.pattern) {
+      Ok(ps) => ps
+      Err(e) => {
+        self.diags.push(diag("E0805", st.span, e))
+        continue
+      }
+    }
+    if !fd.generics.is_empty() || fd.self_mode.is_some() || fd.recv.is_some() {
+      self.diags.push(
+        diag("E0805", st.span, "a step must be a plain function (no generics, not a method)"),
+      )
+      continue
+    }
+    if fd.ret != self.tys.unit_ty {
+      self.diags.push(
+        diag("E0805", st.span, "a step function returns `()`; check results with `assert`"),
+      )
+      continue
+    }
+    var world: Option<Int> = None
+    var params: List<(Str, Int)> = []
+    var ok = true
+    for i in 0..fd.params.len() {
+      let pd = fd.params[i]
+      // The world: a struct first parameter, `&mut` for steps that change it.
+      let is_adt = match self.tys.kinds[pd.ty] {
+        Adt(_, _) => true
+        _ => false
+      }
+      if i == 0 && is_adt {
+        world = Some(pd.ty)
+        continue
+      }
+      if pd.mode == Mode.MutRef {
+        self.diags.push(
+          diag(
+            "E0805",
+            st.span,
+            "only the first parameter (the world) may be `&mut`; `" + pd.name + "` is too",
+          ),
+        )
+        ok = false
+        continue
+      }
+      match self.tys.kinds[pd.ty] {
+        Str | Int(_, _) | Float(_) | Bool => params.push((pd.name, pd.ty))
+        _ => {
+          self.diags.push(
+            diag(
+              "E0805",
+              st.span,
+              "placeholder `" +
+                pd.name +
+                "` must be `Str`, a number or `Bool`, not `" +
+                self.tys.display(pd.ty) +
+                "`",
+            ),
+          )
+          ok = false
+        }
+      }
+    }
+    let holes = holes_of(pieces)
+    var mismatch = false
+    for h in holes {
+      var named = false
+      for (n, _) in params {
+        if n == h {
+          named = true
+        }
+      }
+      if !named {
+        mismatch = true
+      }
+    }
+    for (n, _) in params {
+      var count = 0
+      for h in holes {
+        if h == n {
+          count += 1
+        }
+      }
+      if count != 1 {
+        mismatch = true
+      }
+    }
+    if mismatch {
+      self.diags.push(diag("E0805", st.span, "the step's placeholders and parameters do not match"))
+      ok = false
+    }
+    if ok {
+      out.push(StepDef { f: f, pieces: pieces, world: world, params: params })
+    }
+  }
+  return out
+}
+
+fn Sema.bind_scenario(&mut self, span: syntax.Span, lines: List<StepLine>, steps: List<StepDef>) {
+  var calls: List<Int> = []
+  var world: Option<Int> = None
+  var ok = true
+  for line in lines {
+    var matched: List<(StepDef, List<Str>)> = []
+    for s in steps {
+      match match_pattern(s.pieces, line.text) {
+        Some(caps) => matched.push((s, caps))
+        None => {}
+      }
+    }
+    if matched.is_empty() {
+      self.diags.push(diag("E0802", line.text_span, "no step matches `" + line.text + "`"))
+      ok = false
+      continue
+    }
+    if matched.len() > 1 {
+      self.diags.push(
+        diag("E0803", line.text_span, matched.len().str() + " steps match `" + line.text + "`"),
+      )
+      ok = false
+      continue
+    }
+    let (s, caps) = matched[0]
+    let holes = holes_of(s.pieces)
+    for (pn, pt) in s.params {
+      var text = ""
+      var found = false
+      for i in 0..holes.len() {
+        if !found && holes[i] == pn && i < caps.len() {
+          text = caps[i]
+          found = true
+        }
+      }
+      let e = self.convert_error(text, pt)
+      if !e.is_empty() {
+        self.diags.push(
+          diag(
+            "E0804",
+            line.text_span,
+            "`" + pn + "`: " + e + " (the parameter is `" + self.tys.display(pt) + "`)",
+          ),
+        )
+        ok = false
+      }
+    }
+    match s.world {
+      Some(w) => match world {
+        None => world = Some(w)
+        Some(prev) => if prev != w {
+          self.diags.push(
+            diag(
+              "E0805",
+              line.text_span,
+              "this step uses world `" +
+                self.tys.display(w) +
+                "` but earlier steps use `" +
+                self.tys.display(prev) +
+                "`",
+            ),
+          )
+          ok = false
+        }
+      }
+      None => {}
+    }
+    calls.push(s.f)
+  }
+  var new_fn: Option<Int> = None
+  match world {
+    Some(w) => {
+      let a = match self.tys.kinds[w] {
+        Adt(a, _) => a
+        _ => {
+          return
+        }
+      }
+      let found = match self.defs.methods.get((TyKey.Adt(a), "new")) {
+        Some(f) => self.defs.fns[f].self_mode.is_none() && self.defs.fns[f].params.is_empty()
+        None => false
+      }
+      if !found {
+        let n = self.tys.display(w)
+        self.diags.push(
+          diag(
+            "E0805",
+            span,
+            "the world `" + n + "` needs `fn " + n + ".new() -> " + n + "` to start each scenario",
+          ),
+        )
+        return
+      }
+      new_fn = self.defs.methods.get((TyKey.Adt(a), "new"))
+    }
+    None => {}
+  }
+  if ok {
+    for f in calls {
+      self.scenario_steps.insert(f)
+      self.scenario_roots.push(f)
+    }
+    match new_fn {
+      Some(f) => self.scenario_roots.push(f)
+      None => {}
+    }
+  }
+}

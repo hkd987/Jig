@@ -216,18 +216,25 @@ fn load_program(dir: Str, std_dir: Str) -> Loaded effects {fs} {
 
 fn Loader.new_package(&mut self, path: Str, is_std: Bool) -> Int {
   let id = self.pkgs.len()
-  self.pkgs.push(Package { path: path, files: [], is_std: is_std, scope: Map.new(), imports: [] })
+  self.pkgs.push(
+    Package { path: path, files: [], features: [], is_std: is_std, scope: Map.new(), imports: [] },
+  )
   self.by_path.insert(path, id)
   self.edges.push([])
   return id
 }
 
-/// Register a file of package `p`; it is parsed with the next wave.
+/// Register a file of package `p`; a `.jig` file is parsed with the next wave.
 fn Loader.add_file(&mut self, p: Int, path: Str, text: Str) {
   let base = self.next_base
   self.next_base = base + text.len() + 1
   let empty = syntax.Ast { items: [], exprs: [], stmts: [], types: [], pats: [], top: [] }
-  self.pkgs[p].files.push(SrcFile { path: path, base: base, text: text, ast: empty })
+  let f = SrcFile { path: path, base: base, text: text, ast: empty }
+  if path.ends_with(".feature") {
+    self.pkgs[p].features.push(f)
+  } else {
+    self.pkgs[p].files.push(f)
+  }
 }
 
 /// A standard package (the prelude is `<prelude>`).
@@ -275,7 +282,7 @@ fn Loader.add_dir_package(
   }
   let p = self.new_package(path, false)
   for n in names {
-    if !n.ends_with(".jig") {
+    if !n.ends_with(".jig") && !n.ends_with(".feature") {
       continue
     }
     let f = join_path(dir, n)

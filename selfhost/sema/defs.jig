@@ -372,6 +372,8 @@ struct SrcFile {
 struct Package {
   path: Str
   files: List<SrcFile>
+  /// `.feature` files (their `ast` is empty).
+  features: List<SrcFile>
   is_std: Bool
   /// Package-level names.
   scope: Map<Str, Def>

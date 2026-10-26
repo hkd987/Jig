@@ -80,6 +80,7 @@ fn analyze(dir: Str, std_dir: Str) -> (Sema, Str) effects {fs} {
   var s = new_sema(ld)
   s.collect()
   s.check_bodies()
+  s.bind_features()
   s.quiet_after_syntax_errors()
   s.sort_diags()
   s.check_dead_code()
@@ -92,13 +93,29 @@ fn dump_name(path: Str, root: Str) -> Str {
   return if path.starts_with(prefix) { path[prefix.len()..path.len()] } else { path }
 }
 
+/// The file, `.jig` or `.feature`, that holds global offset `pos`.
+fn Sema.src_file_at(self, pos: Int) -> Option<SrcFile> {
+  for pkg in self.pkgs {
+    for f in pkg.files {
+      if f.base <= pos && pos <= f.base + f.text.len() {
+        return Some(f)
+      }
+    }
+    for f in pkg.features {
+      if f.base <= pos && pos <= f.base + f.text.len() {
+        return Some(f)
+      }
+    }
+  }
+  return None
+}
+
 fn Sema.place(self, root: Str, lo: Int, hi: Int) -> Str {
   if lo == 0 && hi == 0 {
     return "- 0 0"
   }
-  return match self.file_of(lo) {
-    Some((p, f)) => {
-      let file = self.pkgs[p].files[f]
+  return match self.src_file_at(lo) {
+    Some(file) => {
       let rel_hi = if hi > file.base { hi - file.base } else { 0 }
       dump_name(file.path, root) + " " + (lo - file.base).str() + " " + rel_hi.str()
     }

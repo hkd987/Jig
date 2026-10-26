@@ -389,7 +389,7 @@ fn jigc_checker_matches_bootstrap() {
         let mut entries: Vec<PathBuf> = std::fs::read_dir(root.join(d)).unwrap().map(|e| e.unwrap().path()).collect();
         entries.sort();
         for p in entries {
-            if p.is_dir() && !has_feature_files(&p) {
+            if p.is_dir() {
                 let entry = if p.join("app").is_dir() { p.join("app") } else { p.clone() };
                 cases.push((p.clone(), entry));
             } else if p.extension().is_some_and(|x| x == "jig") {
@@ -401,7 +401,7 @@ fn jigc_checker_matches_bootstrap() {
         let mut entries: Vec<PathBuf> = std::fs::read_dir(root.join(d)).unwrap().map(|e| e.unwrap().path()).collect();
         entries.sort();
         for p in entries {
-            if p.is_dir() && !has_feature_files(&p) {
+            if p.is_dir() {
                 cases.push((p.clone(), p));
             }
         }
@@ -477,7 +477,7 @@ fn jigc_back_end_matches_bootstrap() {
         std::fs::read_dir(root.join("compiler/tests/run")).unwrap().map(|e| e.unwrap().path()).collect();
     entries.sort();
     for (i, p) in entries.iter().enumerate() {
-        if p.is_dir() && !has_feature_files(p) {
+        if p.is_dir() {
             cases.push(if p.join("app").is_dir() { p.join("app") } else { p.clone() });
         } else if p.extension().is_some_and(|x| x == "jig") {
             let d = work.join(format!("single{i}"));
@@ -489,7 +489,7 @@ fn jigc_back_end_matches_bootstrap() {
     for d in ["examples", "bench/agents/reference/jig"] {
         let mut entries: Vec<PathBuf> = std::fs::read_dir(root.join(d)).unwrap().map(|e| e.unwrap().path()).collect();
         entries.sort();
-        cases.extend(entries.into_iter().filter(|p| p.is_dir() && !has_feature_files(p)));
+        cases.extend(entries.into_iter().filter(|p| p.is_dir()));
     }
     cases.push(root.join("selfhost"));
     let failures: Vec<String> = cases.iter().filter_map(|d| compare_c(exe, &std_dir, d)).collect();
@@ -514,4 +514,183 @@ fn bootstrap_is_current() {
     assert!(out.status.success(), "jigc cc failed: {}", String::from_utf8_lossy(&out.stderr));
     let checked_in = std::fs::read(root.join("bootstrap/jigc.c")).unwrap_or_default();
     assert!(out.stdout == checked_in, "bootstrap/jigc.c is stale: run bootstrap/update.sh");
+}
+
+/// A mutation of a `.feature` file: words replaced by other values, keywords swapped, lines
+/// inserted, deleted, duplicated or swapped.
+fn mutate_feature(s: &str, rng: &mut Rng) -> String {
+    let heads = [
+        "Given ",
+        "When ",
+        "Then ",
+        "And ",
+        "But ",
+        "Scenario: ",
+        "Scenario Outline: ",
+        "Scenario:",
+        "Examples:",
+        "Feature: ",
+        "Background:",
+        "Rule: r",
+        "@slow",
+        "| a | b |",
+        "| 1 |",
+        "|",
+        "\"\"\"",
+        "# note",
+        "Given",
+        "",
+    ];
+    let vals = [
+        "0",
+        "-5",
+        "+7",
+        "1.5",
+        "1e3",
+        ".5",
+        "1.",
+        "inf",
+        "NaN",
+        "true",
+        "false",
+        "\"q\"",
+        "\"a\\\"b\"",
+        "\"\\",
+        "\"",
+        "99999999999999999999",
+        "300",
+        "-0",
+        "1_000",
+        "<start>",
+        "<nope>",
+        "x y",
+        "é",
+        "{n}",
+        "|",
+    ];
+    let mut v: Vec<String> = s.lines().map(|l| l.to_string()).collect();
+    if v.is_empty() {
+        v.push(String::new());
+    }
+    let k = rng.below(v.len());
+    match rng.below(7) {
+        0 | 1 => {
+            let words: Vec<(usize, usize)> = {
+                let b = v[k].as_bytes();
+                let mut out = Vec::new();
+                let mut i = 0;
+                while i < b.len() {
+                    if b[i] == b' ' {
+                        i += 1;
+                        continue;
+                    }
+                    let j = (i..b.len()).find(|&j| b[j] == b' ').unwrap_or(b.len());
+                    out.push((i, j));
+                    i = j;
+                }
+                out
+            };
+            if let Some(&(i, j)) = words.get(rng.below(words.len().max(1))) {
+                v[k].replace_range(i..j, vals[rng.below(vals.len())]);
+            }
+        }
+        2 => {
+            let line = v[k].clone();
+            let indent = line.len() - line.trim_start().len();
+            let rest = line.trim_start();
+            let word = rest.find(' ').map(|i| i + 1).unwrap_or(rest.len());
+            v[k] = format!("{}{}{}", &line[..indent], heads[rng.below(heads.len())], &rest[word..]);
+        }
+        3 => {
+            let words = ["we have 5 items", "a refund is issued", "\"A\" pays 40 to \"B\"", "x"];
+            let line = format!("    {}{}", heads[rng.below(heads.len())], words[rng.below(words.len())]);
+            v.insert(k, line);
+        }
+        4 => {
+            v.remove(k);
+        }
+        5 => {
+            let l = v[k].clone();
+            v.insert(k, l);
+        }
+        _ if v.len() > 1 => {
+            let j = rng.below(v.len() - 1);
+            v.swap(j, j + 1);
+        }
+        _ => {}
+    }
+    v.join("\n") + if rng.below(4) == 0 { "" } else { "\n" }
+}
+
+/// A mutation of a step function's pattern.
+fn mutate_step_pattern(s: &str, rng: &mut Rng) -> String {
+    let starts: Vec<usize> = s.match_indices("step \"").map(|(i, _)| i + 6).collect();
+    let Some(&i) = starts.get(rng.below(starts.len().max(1))) else { return s.to_string() };
+    let j = i + s[i..].find('"').unwrap_or(0);
+    let edits = ["{n}", "{}", "{n", "{a}{b}", "{x y}", "{count}", "{who}", " items", "", "\\\"bob\\\"", "{n} {n}"];
+    let mut pat = s[i..j].to_string();
+    let holes: Vec<(usize, usize)> =
+        pat.match_indices('{').filter_map(|(a, _)| pat[a..].find('}').map(|b| (a, a + b + 1))).collect();
+    let edit = edits[rng.below(edits.len())];
+    match (rng.below(2), holes.get(rng.below(holes.len().max(1)))) {
+        (0, Some(&(a, b))) => pat.replace_range(a..b, edit),
+        _ => {
+            let at = rng.below(pat.len() + 1);
+            if pat.is_char_boundary(at) {
+                pat.insert_str(at, edit);
+            }
+        }
+    }
+    format!("{}{}{}", &s[..i], pat, &s[j..])
+}
+
+#[test]
+fn jigc_features_match_bootstrap() {
+    if !have_cc() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    let root = repo_root();
+    let exe = jigc();
+    let std_dir = root.join("compiler/std");
+    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("selfhost-features");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    let mut cases: Vec<PathBuf> = Vec::new();
+    for d in ["compiler/tests/ui", "examples"] {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(root.join(d)).unwrap().map(|e| e.unwrap().path()).collect();
+        entries.sort();
+        cases.extend(entries.into_iter().filter(|p| p.is_dir() && has_feature_files(p)));
+    }
+    assert!(cases.len() >= 3, "feature packages: {cases:?}");
+    let mut failures: Vec<String> = Vec::new();
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    for k in 0..300 {
+        let proj = &cases[rng.below(cases.len())];
+        let copy = work.join(format!("mut{k}"));
+        copy_dir(proj, &copy);
+        let mut features: Vec<PathBuf> = std::fs::read_dir(&copy)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "feature"))
+            .collect();
+        features.sort();
+        let mut steps: Vec<PathBuf> = Vec::new();
+        jig_files(&copy, &mut steps);
+        steps.retain(|f| std::fs::read_to_string(f).unwrap().contains("step \""));
+        for _ in 0..1 + rng.below(3) {
+            if rng.below(4) != 0 || steps.is_empty() {
+                let f = &features[rng.below(features.len())];
+                let src = std::fs::read_to_string(f).unwrap();
+                std::fs::write(f, mutate_feature(&src, &mut rng)).unwrap();
+            } else {
+                let f = &steps[rng.below(steps.len())];
+                let src = std::fs::read_to_string(f).unwrap();
+                std::fs::write(f, mutate_step_pattern(&src, &mut rng)).unwrap();
+            }
+        }
+        failures.extend(compare_check(exe, &std_dir, &copy).map(|m| format!("mutation {k}: {m}")));
+        failures.extend(compare_c(exe, &std_dir, &copy).map(|m| format!("mutation {k} (C): {m}")));
+    }
+    assert!(failures.is_empty(), "{} cases differ:\n{}", failures.len(), failures.join("\n"));
 }

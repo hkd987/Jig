@@ -62,6 +62,10 @@ struct Sema {
   alias_state: List<Int>
   /// Per package: (file, import name) of every import a body used.
   imports_used: List<Set<(Int, Str)>>
+  /// The step functions bound scenarios call, and those with the worlds' constructors
+  /// (roots of the dead-code check).
+  scenario_steps: Set<Int>
+  scenario_roots: List<Int>
   // ---- the item being checked ----
   pkg: Int
   file: Int
@@ -134,6 +138,8 @@ fn new_sema(ld: Loaded) -> Sema {
     units: Set.new()
     alias_state: []
     imports_used: []
+    scenario_steps: Set.new()
+    scenario_roots: []
     pkg: 0
     file: 0
     ast: empty_ast()
