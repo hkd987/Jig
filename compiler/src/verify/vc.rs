@@ -1490,6 +1490,47 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Locals a loop body changes only by unconditional top-level `push` statements, with
+    /// how many per iteration. Requires a body with no early exit, so every iteration that
+    /// starts runs every push: then a list's length at iteration `i` is `len0 + k*(i - lo)`.
+    fn push_counts(&self, fr: &Frame, body: ExprId, mods: &[(LocalId, Vec<u32>, bool)]) -> Vec<(LocalId, usize)> {
+        let ast = self.ast(fr.pkg);
+        let ExprKind::Block(stmts) = ast.exprs[body].kind else { return vec![] };
+        // No break, continue, return or `?` anywhere inside.
+        let mut stack = vec![body];
+        while let Some(x) = stack.pop() {
+            match ast.exprs[x].kind {
+                ExprKind::Try(_) => return vec![],
+                ExprKind::Block(ss) => {
+                    for &s in ast.stmt_lists.get(ss) {
+                        if matches!(ast.stmts[s].kind, StmtKind::Break | StmtKind::Continue | StmtKind::Return(_)) {
+                            return vec![];
+                        }
+                    }
+                }
+                ExprKind::Closure { .. } => continue,
+                _ => {}
+            }
+            crate::mir::lower::visit_children(ast, x, &mut stack);
+        }
+        let mut counts: FxHashMap<LocalId, usize> = FxHashMap::default();
+        for &s in ast.stmt_lists.get(stmts) {
+            let StmtKind::Expr(e) = ast.stmts[s].kind else { continue };
+            let ExprKind::Call { callee, .. } = ast.exprs[e].kind else { continue };
+            let ExprKind::Field { base, name } = ast.exprs[callee].kind else { continue };
+            let Res::Method(f) = self.res(fr, callee) else { continue };
+            let fd = &self.defs.fns[f];
+            if name.sym.as_str() != "push" || fd.has_body || Some(fd.pkg) != self.prelude {
+                continue;
+            }
+            if let (ExprKind::Name(_), Res::Local(l)) = (ast.exprs[base].kind, self.res(fr, base)) {
+                *counts.entry(l).or_insert(0) += 1;
+            }
+        }
+        // Every modification of the local must be one of those pushes.
+        counts.into_iter().filter(|(l, k)| mods.iter().filter(|(m, _, _)| m == l).count() == *k).collect()
+    }
+
     fn havoc(&mut self, fr: &Frame, st: &mut St, mods: &[(LocalId, Vec<u32>, bool)]) {
         for (l, path, whole) in mods {
             let Some(cur) = st.env.get(l).cloned() else { continue };
@@ -1646,6 +1687,18 @@ impl<'a> Gen<'a> {
                 }
             }
         }
+        // Lists the body only pushes to: their length is known at every iteration.
+        let counted: Vec<(LocalId, usize, String)> = if indexed {
+            self.push_counts(fr, body, &mods)
+                .into_iter()
+                .filter_map(|(l, k)| match st.env.get(&l) {
+                    Some(Sv::List { len, .. }) if len.depth == 0 => Some((l, k, len.t.clone())),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         // An arbitrary iteration: havoc what the loop modifies, assume the invariants.
         let mut it = st.clone();
         self.havoc(fr, &mut it, &mods);
@@ -1659,6 +1712,12 @@ impl<'a> Gen<'a> {
             self.assume(&mut it, format!("(and (<= {lo} {i}) (< {i} {hi}))"));
             let _ = k;
             bind_iter(self, &mut it, &i);
+            for (l, k, len0) in &counted {
+                if let Some(Sv::List { len, .. }) = it.env.get(l) {
+                    let fact = format!("(= {} (+ {len0} (* {k} (- {i} {lo}))))", len.t);
+                    self.assume(&mut it, fact);
+                }
+            }
             i
         } else {
             String::new()

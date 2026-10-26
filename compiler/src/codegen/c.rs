@@ -1324,6 +1324,26 @@ impl<'l, 'a> CGen<'l, 'a> {
                         if vals.is_empty() {
                             return "((jig_list *)NULL)".into();
                         }
+                        // A literal of constants is static data (reference count -1): no
+                        // allocation, and a write copies it first like any shared list.
+                        let constant = ops.iter().all(|o| {
+                            matches!(
+                                o,
+                                Operand::Const(
+                                    Const::Int(..) | Const::Float(_) | Const::Bool(_) | Const::Char(_) | Const::Str(_)
+                                )
+                            )
+                        });
+                        if constant {
+                            let len = vals.len();
+                            let _ = writeln!(self.data_defs, "JIG_LINK {ec} LD{n}[] = {{{}}};", vals.join(", "));
+                            let _ = writeln!(
+                                self.data_defs,
+                                "JIG_LINK jig_list LL{n} = {{-1, {len}, {len}, (char *)LD{n}}};"
+                            );
+                            let _ = writeln!(self.data_decls, "extern jig_list LL{n};");
+                            return format!("(&LL{n})");
+                        }
                         let _ = writeln!(cx.out, "    jig_list *ls{n} = jig_list_with_capacity({}, {d});", vals.len());
                         for v in &vals {
                             let _ = writeln!(cx.out, "    {{ {ec} x = {v}; jig_list_push(&ls{n}, &x, {d}); }}");

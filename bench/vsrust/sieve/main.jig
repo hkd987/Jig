@@ -15,7 +15,7 @@ fn main() effects {io, env} {
       count += 1
       sum += i
       var j = i * i
-      for j <= n {
+      for j <= n invariant j >= 0 {
         composite[j] = true
         j += i
       }
