@@ -412,6 +412,23 @@ pub fn main() -> i32 {
         Some("fmt") => cmd_fmt(rest),
         Some("mcp") => crate::tools::mcp::serve(),
         Some("hook") => crate::tools::hooks::main(rest),
+        // Internal: dumps compared against the self-hosted compiler.
+        Some("debug") => match rest {
+            [what, file] if what == "tokens" => match std::fs::read_to_string(file) {
+                Ok(src) => {
+                    print!("{}", crate::tools::debug::tokens(&src));
+                    0
+                }
+                Err(e) => {
+                    eprintln!("{file}: {e}");
+                    1
+                }
+            },
+            _ => {
+                eprintln!("usage: jig debug tokens FILE");
+                2
+            }
+        },
         Some("search") => {
             let o = parse_opts(rest);
             let q = o.rest.join(" ");

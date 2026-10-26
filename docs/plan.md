@@ -68,7 +68,8 @@ structured diagnostics and a working agent plugin.
 
 ### 1.4 Back end
 - [x] MIR: CFG with typed locals and places, monomorphization, copy/drop glue.
-- [ ] Last-use moves: elide the retain/release pair when a value's last use is a copy.
+- [x] Last-use moves: elide the retain/release pair when a value's last use is a copy
+      (a liveness pass over MIR in the C back end; also borrowed locals, `codegen/own.rs`).
 - [x] MIR interpreter: the deterministic runner for tests (fake `io`, `clock`, `rand`, `fs`).
 - [x] Fast native backend: MIR → C + small C runtime (`compiler/runtime/`), parallel
       per-unit compilation with an object cache; `jig build`, `jig run --native` (D20).
@@ -84,7 +85,8 @@ structured diagnostics and a working agent plugin.
 - [x] Benchmark corpus (examples + generated 100k-line project).
 - [x] Instruction-count benchmarks (Valgrind) in CI; >2% regression blocks merge without
       a `perf-signoff` label (or a `[perf-signoff]` tag on a direct push to `main`).
-- [ ] Incremental check: per-package results cached by content hash.
+- [ ] Incremental check: per-package results cached by content hash. (A full check of the
+      98k-line benchmark corpus takes about 100 ms on 4 cores, at the edit-loop target.)
 
 ### 1.7 Gate
 - [x] Agent-written 1,000-line program built with only the plugin reference
@@ -161,7 +163,9 @@ core passes.
 - [ ] C interop behind the `ffi` effect (SMT solver and LLVM called through the C ABI).
 - [ ] Package manager.
 - [ ] Self-hosted compiler: lexer, parser, checker, MIR, backends, ported pass by pass;
-      arena-and-index design carries over directly.
+      arena-and-index design carries over directly. `selfhost/` (`jigc`): the lexer is done,
+      every contract proved, and matches the bootstrap lexer on every repository file and
+      300 mutations (`compiler/tests/selfhost.rs`).
 - [ ] Agent benchmark vs. Rust and TypeScript; opt-in trace corpus.
 - [ ] Bootstrap path decided (see open questions).
 

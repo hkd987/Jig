@@ -1,0 +1,139 @@
+// Token kinds, the same set and order as the bootstrap compiler's `syntax/token.rs`.
+
+pub enum Kind {
+  Ident
+  Int
+  Float
+  Str
+  Char
+  // keywords
+  As
+  Break
+  Const
+  Continue
+  Effects
+  Else
+  Ensures
+  Enum
+  False
+  Fn
+  For
+  If
+  Import
+  In
+  Interface
+  Invariant
+  Let
+  Match
+  Pub
+  Requires
+  Return
+  Step
+  Struct
+  Test
+  True
+  Type
+  Unit
+  Var
+  Where
+  // punctuation
+  LParen
+  RParen
+  LBrace
+  RBrace
+  LBracket
+  RBracket
+  Comma
+  Dot
+  DotDot
+  Colon
+  /// Statement terminator. Zero-width when inserted at a line break.
+  Semi
+  Arrow
+  FatArrow
+  Question
+  Amp
+  AmpAmp
+  Pipe
+  PipePipe
+  Caret
+  Tilde
+  Bang
+  Eq
+  EqEq
+  Ne
+  Lt
+  Le
+  Gt
+  Ge
+  Shl
+  Shr
+  Plus
+  Minus
+  Star
+  Slash
+  Percent
+  PlusEq
+  MinusEq
+  StarEq
+  SlashEq
+  PercentEq
+  AmpEq
+  PipeEq
+  CaretEq
+  ShlEq
+  ShrEq
+  Eof
+}
+
+/// A token: its kind and byte span (global offsets).
+pub struct Token {
+  pub kind: Kind
+  pub lo: Int
+  pub hi: Int
+  invariant lo <= hi
+}
+
+fn keyword(s: Str) -> Option<Kind> {
+  return match s {
+    "as" => Some(Kind.As)
+    "break" => Some(Kind.Break)
+    "const" => Some(Kind.Const)
+    "continue" => Some(Kind.Continue)
+    "effects" => Some(Kind.Effects)
+    "else" => Some(Kind.Else)
+    "ensures" => Some(Kind.Ensures)
+    "enum" => Some(Kind.Enum)
+    "false" => Some(Kind.False)
+    "fn" => Some(Kind.Fn)
+    "for" => Some(Kind.For)
+    "if" => Some(Kind.If)
+    "import" => Some(Kind.Import)
+    "in" => Some(Kind.In)
+    "interface" => Some(Kind.Interface)
+    "invariant" => Some(Kind.Invariant)
+    "let" => Some(Kind.Let)
+    "match" => Some(Kind.Match)
+    "pub" => Some(Kind.Pub)
+    "requires" => Some(Kind.Requires)
+    "return" => Some(Kind.Return)
+    "step" => Some(Kind.Step)
+    "struct" => Some(Kind.Struct)
+    "test" => Some(Kind.Test)
+    "true" => Some(Kind.True)
+    "type" => Some(Kind.Type)
+    "unit" => Some(Kind.Unit)
+    "var" => Some(Kind.Var)
+    "where" => Some(Kind.Where)
+    _ => None
+  }
+}
+
+/// Whether a line break after this token ends the statement.
+fn Kind.ends_statement(self) -> Bool {
+  return match self {
+    Ident | Int | Float | Str | Char | True | False | Return | Break | Continue => true
+    RParen | RBracket | RBrace | Gt | Shr | Question => true
+    _ => false
+  }
+}

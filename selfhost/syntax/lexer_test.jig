@@ -1,0 +1,119 @@
+// The bootstrap lexer's unit tests, in Jig.
+
+fn kinds(src: Str) -> List<Kind> {
+  let lx = lex(src, 1)
+  assert(lx.errors.is_empty())
+  return lx.tokens.map(fn(t) { t.kind })
+}
+
+test "line ends become statement ends" {
+  assert(
+    kinds("let x = 1\nlet y = x\n") ==
+      [
+        Kind.Let,
+        Kind.Ident,
+        Kind.Eq,
+        Kind.Int,
+        Kind.Semi,
+        Kind.Let,
+        Kind.Ident,
+        Kind.Eq,
+        Kind.Ident,
+        Kind.Semi,
+        Kind.Eof,
+      ],
+  )
+}
+
+test "no statement ends inside parentheses" {
+  assert(
+    kinds("f(\n  a,\n  b\n)\n") ==
+      [
+        Kind.Ident,
+        Kind.LParen,
+        Kind.Ident,
+        Kind.Comma,
+        Kind.Ident,
+        Kind.RParen,
+        Kind.Semi,
+        Kind.Eof,
+      ],
+  )
+}
+
+test "braces inside parentheses restore line ends" {
+  assert(
+    kinds("f(fn(x) {\n  x\n})\n") ==
+      [
+        Kind.Ident,
+        Kind.LParen,
+        Kind.Fn,
+        Kind.LParen,
+        Kind.Ident,
+        Kind.RParen,
+        Kind.LBrace,
+        Kind.Ident,
+        Kind.Semi,
+        Kind.RBrace,
+        Kind.RParen,
+        Kind.Semi,
+        Kind.Eof,
+      ],
+  )
+}
+
+test "a leading dot or operator continues the line" {
+  assert(
+    kinds("xs\n  .len()\n") ==
+      [Kind.Ident, Kind.Dot, Kind.Ident, Kind.LParen, Kind.RParen, Kind.Semi, Kind.Eof],
+  )
+  assert(kinds("a\n  && b\n") == [Kind.Ident, Kind.AmpAmp, Kind.Ident, Kind.Semi, Kind.Eof])
+}
+
+test "numbers and ranges" {
+  assert(kinds("0..10") == [Kind.Int, Kind.DotDot, Kind.Int, Kind.Semi, Kind.Eof])
+  assert(kinds("1.5e3") == [Kind.Float, Kind.Semi, Kind.Eof])
+  assert(
+    kinds("t.0.1") == [Kind.Ident, Kind.Dot, Kind.Int, Kind.Dot, Kind.Int, Kind.Semi, Kind.Eof],
+  )
+  assert(kinds("0xff_ff 1_000") == [Kind.Int, Kind.Int, Kind.Semi, Kind.Eof])
+}
+
+test "strings, characters and comments" {
+  let lx = lex("let s = \"a\\n\\u{e9}\" // hi\n'x'\n", 1)
+  assert(lx.errors.is_empty() && lx.comments.len() == 1 && lx.comments[0].trailing)
+  assert(
+    lx.tokens.map(fn(t) { t.kind }) ==
+      [Kind.Let, Kind.Ident, Kind.Eq, Kind.Str, Kind.Semi, Kind.Char, Kind.Semi, Kind.Eof],
+  )
+}
+
+test "errors are reported with their codes" {
+  let lx = lex("\"abc\nlet x = 1;\n$", 1)
+  assert(lx.errors.map(fn(e) { e.code }) == ["E0102", "E0107", "E0101"])
+}
+
+test "a generic's closing bracket ends a statement" {
+  assert(
+    kinds("items: List<Int>\nn: Int\n") ==
+      [
+        Kind.Ident,
+        Kind.Colon,
+        Kind.Ident,
+        Kind.Lt,
+        Kind.Ident,
+        Kind.Gt,
+        Kind.Semi,
+        Kind.Ident,
+        Kind.Colon,
+        Kind.Ident,
+        Kind.Semi,
+        Kind.Eof,
+      ],
+  )
+}
+
+test "spans are global offsets"(base: Int) requires base >= 0, base < 1000000 {
+  let lx = lex("ab cd", base)
+  assert(lx.tokens[0].lo == base && lx.tokens[1].hi == base + 5)
+}

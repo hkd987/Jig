@@ -27,10 +27,10 @@ jobs:
       - name: Rust formatting
         run: cargo fmt --check
       - name: Jig formatting
-        run: ./target/debug/jig fmt --check compiler/std compiler/tests/run compiler/tests/fixtures compiler/tests/prove compiler/tests/props examples
+        run: ./target/debug/jig fmt --check compiler/std compiler/tests/run compiler/tests/fixtures compiler/tests/prove compiler/tests/props examples selfhost
       - name: Check examples
         run: |
-          for d in examples/*/; do
+          for d in examples/*/ selfhost/; do
             echo "== $d"
             ./target/debug/jig check "$d"
             ./target/debug/jig test "$d"
