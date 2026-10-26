@@ -881,16 +881,8 @@ impl Collector<'_> {
             } else {
                 self.defs.methods.insert((key, item.name.sym), fid);
             }
-            // A field and a method may not share a name.
-            if let TyKey::Adt(a) = key {
-                if self.defs.adts[a].fields().iter().any(|fd| fd.name == item.name.sym) {
-                    self.err(
-                        codes::E0202,
-                        item.name.span,
-                        format!("`{}` already has a field named `{}`", r.ty.sym, item.name.sym),
-                    );
-                }
-            }
+            // A method may share a field's name: `x.name` reads the field, `x.name()` calls the
+            // method (so a struct can satisfy a getter-style interface).
         } else if f.self_param.is_some() {
             self.err(codes::E0327, item.name.span, "only methods (`fn Type.name`) can take `self`");
         }
@@ -925,7 +917,7 @@ impl Collector<'_> {
             None => EffectSet::PURE,
         };
         if !self.defs.fns[fid].has_body && !self.pkgs[pid].is_std && !is_iface {
-            self.err(codes::E0105, item.name.span, format!("function `{}` has no body", item.name.sym));
+            self.err(codes::E0109, item.name.span, format!("function `{}` has no body", item.name.sym));
         }
     }
 

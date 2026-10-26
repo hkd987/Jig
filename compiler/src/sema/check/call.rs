@@ -519,7 +519,7 @@ impl Cx<'_> {
         self.call_value(e, ct, &arg_ids, span)
     }
 
-    fn call_value(&mut self, _e: ExprId, ct: Ty, args: &[ExprId], span: Span) -> Ty {
+    fn call_value(&mut self, e: ExprId, ct: Ty, args: &[ExprId], span: Span) -> Ty {
         let r = self.resolve(ct);
         match self.tys.kind(r).clone() {
             TyKind::Fn(ps, ret, eff) => {
@@ -557,7 +557,20 @@ impl Cx<'_> {
             }
             _ => {
                 let s = self.show(ct);
-                self.err(codes::E0303, span, format!("`{s}` is not a function"));
+                let mut d = Diagnostic::error(codes::E0303, span, format!("`{s}` is not a function"));
+                // `max(a, b)` where a parameter or variable named `max` hides the prelude.
+                let callee = match self.ast.exprs[e].kind {
+                    ExprKind::Call { callee, .. } => Some(callee),
+                    _ => None,
+                };
+                if let Some(ExprKind::Name(n)) = callee.map(|c| self.ast.exprs[c].kind) {
+                    if self.pkgs[self.prelude].scope.contains_key(&n) {
+                        d = d.note(format!(
+                            "the local `{n}` hides the prelude function `{n}`; rename the local to call it"
+                        ));
+                    }
+                }
+                self.diags.push(d);
                 for &a in args {
                     self.check_expr(a, None);
                 }

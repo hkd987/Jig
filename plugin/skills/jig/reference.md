@@ -7,7 +7,8 @@ no GC, no warnings: every lint is an error.
 
 ## Files and packages
 
-- A package is a directory of `.jig` files. All files in it share one namespace.
+- A package is a directory of `.jig` files. All files in it share one namespace, but
+  imports are per file: each file imports the packages it names.
 - A project root holds a `jig.mod` file with one line: `module <name>`. Import paths are
   relative to the root: `import "geom"` loads `<root>/geom/`. `std/...` is the standard
   library. Without `jig.mod`, a package can import only `std`.
@@ -81,8 +82,10 @@ const MAX_USERS: Int = 1_000
 ```
 
 Construct with all fields named: `Point { x: 1, y: 2 }`. Variants are qualified when
-constructed: `Shape.Circle(1.0)`, `Shape.Empty`. The prelude variants `Some`, `None`,
-`Ok` and `Err` need no qualifier.
+constructed: `Shape.Circle(1.0)`, `Shape.Empty`, or through an alias
+(`type E = model.LedgerError` then `E.OutOfStock(n)`). The prelude variants `Some`, `None`,
+`Ok` and `Err` need no qualifier. Prelude names (`Option`, `Result`, `Some`, `Err`,
+`min`, ...) cannot be redefined.
 
 ### Units of measure
 
@@ -95,7 +98,9 @@ fn speed(d: Float<m>, t: Float<s>) -> Float<m/s> {
 ```
 
 `+`, `-` and comparisons need equal units; `*` and `/` combine them. Literals take the unit
-their context expects. `x as Float<m>` adds a unit; `d as Float` removes it.
+their context expects. `x as Float<m>` adds a unit; `d as Float` removes it. Units work on
+`Int` too (`Int<cent>`). Unit names are program-wide: declare each once, in any package,
+and use it unqualified everywhere.
 
 ## Values and memory
 
@@ -151,6 +156,9 @@ fn Point.origin() -> Point {                 // associated function: Point.origi
 }
 ```
 
+- A method may share a field's name: `x.name` reads the field, `x.name()` calls the
+  method. A custom `fn T.str(self) -> Str` replaces the derived `Show` everywhere, even
+  when it is not `pub`.
 - Closures capture copies of variables. Their body yields its last expression:
   `xs.map(fn(x) { x * 2 })`. Parameter types may be omitted when the expected type is known.
 - `if` and `match` are expressions; their blocks also yield their last expression.
@@ -219,12 +227,15 @@ Operators, tightest first: postfix (`f()`, `x[i]`, `x.f`, `?`), `as`, unary (`-`
 `* / % << >> &`, `+ - | ^`, comparisons, `&&`, `||`. Integer overflow, division by zero,
 out-of-range shifts and out-of-bounds indexing trap unless the compiler proves they cannot
 happen. A call statement whose result is not `()` is an error; write `let _ = f()`.
+Assignment is a statement, not an expression. Declaring a name that is already in scope
+(shadowing) is an error.
 
 ### Match
 
 `match` must be exhaustive; an arm that can never match is an error. Patterns: `_`, a binding
 name, literals, variants with sub-patterns (unqualified), tuples, alternatives `A | B`,
-guards `if cond`.
+guards `if cond`. An arm's body is an expression, a block, or a single statement
+(`Open => n += 1`, `Done => return total`).
 
 ```
 fn area(s: Shape) -> Float {
@@ -259,19 +270,27 @@ fn parse_port(s: Str) -> Result<Int, Str> {
 - `ensures` lists postconditions; `result` is the return value and `old(e)` is `e` on entry.
 - `invariant` on a `for` loop must hold before each iteration; on a struct, whenever a
   value is constructed or mutated.
-- `T where pred` refines a type: `amt: Int where amt > 0`, or `self` in an alias.
+- `T where pred` refines a parameter (`amt: Int where amt > 0`), a struct field, an alias
+  (`self` names the value) or the return type (`-> Int where result >= 0`, the same as
+  `ensures result >= 0`). It is checked wherever a value enters the type: arguments,
+  returns, construction and assignment. For a local, use `assert`.
 - Contract expressions are pure. They may call pure functions, and use
   `forall i in a..b: pred` and `exists i in a..b: pred`.
 
 `jig prove` checks each function against its own contract and its callees' contracts, never
-their bodies. A proven contract has no runtime cost. An unproven one becomes a runtime
-check in debug builds plus a generated property test, and the report gives a
-counterexample.
+their bodies, and also proves the absence of traps (overflow, division by zero, bounds,
+`unwrap`, reachable `panic`). Results are cached per function: changing a body re-proves
+only that function, since callers depend on its contract. A failed contract comes with a
+counterexample in source terms. An unproven obligation keeps its runtime check in debug
+builds. To prove facts after a loop, state them as loop invariants; to prove facts about
+a call's result, put them in the callee's `ensures`.
 
 ## Tests
 
 `test` blocks live next to the code they test and run in a deterministic runner with fake
-effects. A `test` with parameters is a property test with generated inputs.
+effects. A `test` with parameters is a property test: it runs 100 generated inputs (edge
+values first, growing in size), skips inputs that fail its own `requires`, and shrinks a
+failure to a minimal counterexample.
 
 ```
 test "transfer keeps the total" {
@@ -286,7 +305,8 @@ test "add commutes"(x: Int, y: Int) requires x < 1000, y < 1000 {
 }
 ```
 
-Tests do not justify code: a function called only from tests is dead code.
+Tests do not justify code: a function called only from tests is dead code, unless it is in
+a file whose name ends in `_test.jig` (a test helper).
 
 ## Features and steps
 
@@ -317,10 +337,12 @@ A missing, ambiguous or mistyped step is a compile error, and so is a step no sc
 
 ## Dead code and traceability
 
-Roots are `main`, the `pub` API of a library package, and step functions used by a scenario.
-Unreachable functions, unused fields, unused exports and impossible match arms fail the
-build. `jig trace` answers: which scenarios exercise a function, which code is reachable but
-covered by no scenario, and what becomes dead if a scenario is deleted.
+Roots are `main` and step functions used by a scenario; a package without `main` (a
+library) also has its root package's `pub` items as roots. Unreachable functions, unused
+fields, variants and constants, and impossible match arms fail the build. So does an
+unused export: a `pub` item of a non-root package that no other package uses (remove the
+`pub`). `jig trace` (planned) will answer which scenarios exercise a function, what is
+reachable but covered by no scenario, and what dies if a scenario is deleted.
 
 ## Standard library
 
@@ -339,6 +361,11 @@ Prelude (no import): `assert(c)`, `panic(msg) -> Never`, `min(a, b)`, `max(a, b)
 | `Result<T, E>` | `is_ok() is_err() unwrap() unwrap_or(d) ok() map(f) map_err(f)` |
 
 `unwrap()` requires `is_some()`/`is_ok()`: it is a proof obligation like any `requires`.
+Also: `Char.is_upper() is_lower() is_alnum() to_upper() to_lower()` and `Set.is_empty()`.
+Behavior worth knowing: `io.read_line()` strips `\n` or `\r\n` and returns a final
+unterminated line; `"a  b".split(" ")` keeps empty pieces; `sort_by(less)` takes a strict
+`fn(T, T) -> Bool` and sorts in place, like `sort()`; `Map.insert` on an existing key keeps
+its position; `Str.to_int` and `to_float` ignore surrounding spaces and accept a sign.
 
 | Package | Functions |
 | --- | --- |
@@ -354,12 +381,12 @@ Prelude (no import): `assert(c)`, `panic(msg) -> Never`, `min(a, b)`, `max(a, b)
 | Command | Does |
 | --- | --- |
 | `jig check [--json]` | parse, types, effects, lints, dead code; milliseconds |
-| `jig prove [--json]` | SMT proofs per function, cached |
+| `jig prove [filter] [--json] [--verbose]` | SMT proofs per function, cached in `.jig/proofs` |
 | `jig test [--json] [filter]` | unit tests, property tests, scenarios |
 | `jig build [--release] [-o out]` | native binary (debug: checks on; release: `clang -O2`, contracts off) |
 | `jig run [--native] [-- args]` | run `main` (interpreter, or a native debug build) |
 | `jig fmt [--check]` | canonical formatting; no options |
-| `jig trace <query>` | traceability reports |
+| `jig trace <query>` | traceability reports (planned) |
 | `jig explain <code>` | long explanation of a diagnostic code |
 
 Every diagnostic has a stable code (`E0301`), a span, a message, and where possible a

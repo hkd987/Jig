@@ -62,6 +62,10 @@ codes! {
     E0108 = 108, "invalid-item", "expected an item",
         "Only `import`, `fn`, `struct`, `enum`, `interface`, `type`, `const`, `unit`, `test` and \
          `step` declarations may appear at the top level of a file.";
+    E0109 = 109, "missing-body", "function has no body",
+        "Every function outside an interface needs a `{ ... }` body after its signature and \
+         contract clauses (`requires`, `ensures`, `effects`). Only interface methods and the \
+         standard library's builtins are declared without one.";
 
     // ---- E02: names and packages ----
     E0201 = 201, "unresolved-name", "cannot find name",

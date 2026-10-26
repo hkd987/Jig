@@ -7,6 +7,32 @@ The test subject (an agent) had `docs/reference.md`, the tool output (`jig expla
 compiler source, std source, tests or other examples. Every claim below comes from
 running that binary.
 
+## Follow-up (after the run)
+
+The agent used a compiler frozen at the start of its run. Status of its findings on `main`:
+
+| Item | Status |
+| --- | --- |
+| B1 property tests | Fixed: generated inputs, `requires` as a filter, shrinking (`tests/props`). |
+| B2 refinement aliases | Fixed (landed during the run): checked on arguments, returns, construction and assignment. |
+| B3 invariants on mutation | Fixed (landed during the run): re-checked after field assignment and for `&mut` parameters on return. |
+| B4 `Never` in struct position (C) | Fixed (`tests/run/never.jig`). |
+| B5 type-only imports | Fixed (`tests/ui/type_imports`). |
+| B6 E0603 coverage | Fixed: structs, enums, interfaces and constants. `gate1` dropped six `pub`s and one on an interface. |
+| B7 trap messages | Messages fixed. Native panics still have no call stack. |
+| B8 `jig prove` | Exists now. `jig trace` is marked planned in the reference. |
+| G1/L3 method and field names | Fixed: a method may share a field's name. |
+| G2 assignment arms | Fixed: `Open => open += 1` parses. |
+| G4 private `str` | Fixed. |
+| G6 return refinements | Fixed: `-> T where pred` means `ensures pred`. A `where` on `let` is still rejected; the reference says to use `assert`. |
+| G3, G5, G7–G11 | Documented in the reference. |
+| D1 parse cascades | Fixed: one bad arm gives one error, and a package whose recovery dropped code reports only its syntax errors. |
+| D3 shadowed prelude function | A note now names the shadowing local. |
+| D4 E0105 catch-all | "has no body" is now E0109. Other syntax errors stay E0105 ("expected X, found Y"). |
+| D5, D6 values in failures | Fixed: property-test inputs and every value a failed contract mentions are shown. |
+| L1 test helpers | Fixed: functions in `*_test.jig` files may be used only by tests. |
+| D2, D7, L2, L4, L5 | Open. |
+
 ## 1. Summary
 
 **Program.** `examples/gate1/` is an inventory and order ledger. It reads a line-based

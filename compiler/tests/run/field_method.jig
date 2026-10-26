@@ -1,0 +1,24 @@
+// A method may share a field's name: x.name reads the field, x.name() calls the method.
+import "std/io"
+
+interface Named {
+  fn name(self) -> Str
+}
+
+struct Item {
+  name: Str
+  qty: Int
+}
+
+fn Item.name(self) -> Str {
+  return self.name + "!"
+}
+
+fn greet<T: Named>(x: T) -> Str {
+  return "hi " + x.name()
+}
+
+fn main() effects {io} {
+  let it = Item { name: "bolt", qty: 2 }
+  io.println(it.name + " " + it.name() + " " + greet(it) + " " + it.qty.str())
+}
