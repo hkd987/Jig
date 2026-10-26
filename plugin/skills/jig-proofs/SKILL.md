@@ -22,8 +22,15 @@ FAILED postcondition in `clamp` at main.jig:12:11: result <= hi
   counterexample: x = 7, lo = 0, hi = 5
 ```
 
-First ask: can these inputs really happen? If so, the code or the contract is wrong; fix
-it. If not, the prover is missing a fact. Facts come only from these places:
+`jig prove` then runs the function on the interpreter to tell you which case you are in:
+
+- `confirmed: running it with x = 7, lo = 0, hi = 5 fails this check`: a real bug. Fix the
+  code or the contract.
+- `not reproduced: the counterexample passes at run time`: the code is fine; the prover is
+  missing a fact.
+
+With neither line (the inputs could not be rebuilt or the run stopped elsewhere), ask
+yourself whether the inputs can really happen. Facts come only from these places:
 
 | Missing fact about | Put it in |
 | --- | --- |

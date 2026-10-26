@@ -112,8 +112,9 @@ tests; generated property and fuzz tests for whatever isn't proved.
       arithmetic traps); unproven ones keep their debug check.
 - [x] `test` blocks with parameters as property tests: generation by type, `requires` as a
       filter, shrinking.
-- [ ] Generated property tests from unproven contracts; replaying counterexamples on the
-      interpreter to tell real failures from missing facts.
+- [x] Counterexample replay: failed contracts are re-run on the interpreter with the
+      solver's inputs (or, when those can't be rebuilt, up to 200 generated inputs) and
+      reported as confirmed bugs or missing facts.
 - [x] Plugin: `prove` MCP tool with per-obligation hints; `jig-proofs` skill.
 - [x] Gate measurement in CI (`bench/reprove.py`): 0.21 s re-proof of a 20k-line project
       after a one-function change (limit 1 s); `docs/gates/phase2.md`.

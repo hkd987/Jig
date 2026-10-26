@@ -281,8 +281,9 @@ fn parse_port(s: Str) -> Result<Int, Str> {
 their bodies, and also proves the absence of traps (overflow, division by zero, bounds,
 `unwrap`, reachable `panic`). Results are cached per function: changing a body re-proves
 only that function, since callers depend on its contract. A failed contract comes with a
-counterexample in source terms. An unproven obligation keeps its runtime check in debug
-builds. To prove facts after a loop, state them as loop invariants; to prove facts about
+counterexample in source terms, and is replayed on the interpreter: "confirmed" means
+those inputs really fail, "not reproduced" means the prover is missing a fact. An unproven
+obligation keeps its runtime check in debug builds. To prove facts after a loop, state them as loop invariants; to prove facts about
 a call's result, put them in the callee's `ensures`.
 
 ## Tests

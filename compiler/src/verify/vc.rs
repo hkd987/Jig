@@ -107,7 +107,13 @@ pub struct FnVcs {
     pub obligations: Vec<Obligation>,
     /// Parameter leaves to show in counterexamples: (label, term, kind).
     pub show: Vec<(String, String, Base)>,
+    /// When every parameter is built from integers, booleans and characters: each
+    /// parameter's type and leaf terms, so a counterexample can be replayed.
+    pub inputs: Option<Vec<ParamLeaves>>,
 }
+
+/// A parameter's type and its leaf terms with their kinds.
+pub type ParamLeaves = (Ty, Vec<(String, Base)>);
 
 // ---------- symbolic values ----------
 
@@ -220,6 +226,30 @@ impl Sv {
         other.leaves(&mut b);
         a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| x.t == y.t)
     }
+}
+
+/// The leaves of a value made only of integers, booleans and characters (in `fresh` order).
+fn scalar_leaves(v: &Sv) -> Option<Vec<(String, Base)>> {
+    let mut ls = Vec::new();
+    v.leaves(&mut ls);
+    if let Sv::List { .. } | Sv::Enum { .. } = v {
+        return None;
+    }
+    let mut out = Vec::new();
+    for l in ls {
+        match l.base {
+            Base::Bool | Base::Int(_) | Base::Char if l.depth == 0 => out.push((l.t.clone(), l.base.clone())),
+            _ => return None,
+        }
+    }
+    fn plain(v: &Sv) -> bool {
+        match v {
+            Sv::Unit | Sv::Leaf(_) => true,
+            Sv::Tuple(xs) | Sv::Struct(_, xs) => xs.iter().all(plain),
+            _ => false,
+        }
+    }
+    plain(v).then_some(out)
 }
 
 pub fn int_lit(v: i128) -> String {
@@ -901,6 +931,7 @@ impl<'a> Gen<'a> {
             Frame { pkg, body: Some(body), inst: Box::new([]), result: None, old: None, names: vec![], own: true };
         let mut st = St::default();
         let mut show = Vec::new();
+        let mut inputs = Some(Vec::new());
         // Parameters: fresh values satisfying their types, refinements and preconditions.
         let ast_params: Vec<ast::Param> = ast.params.get(decl.params).to_vec();
         let offset = fd.self_mode.is_some() as usize;
@@ -910,6 +941,10 @@ impl<'a> Gen<'a> {
             let (t, name) = (ld.ty, ld.name);
             let v = self.fresh(t, name.as_str());
             self.show_leaves(name.as_str(), &v, t, &mut show);
+            match (&mut inputs, scalar_leaves(&v)) {
+                (Some(ins), Some(ls)) => ins.push((t, ls)),
+                _ => inputs = None,
+            }
             self.assume_type_preds(&mut st, t, &v, 0);
             if i >= offset {
                 if let Some(Some(al)) = refines.get(i - offset) {
@@ -1003,7 +1038,7 @@ impl<'a> Gen<'a> {
         for a in std::mem::take(&mut self.axioms) {
             decls.push(format!("(assert {a})"));
         }
-        Some(FnVcs { decls, obligations: std::mem::take(&mut self.obligations), show })
+        Some(FnVcs { decls, obligations: std::mem::take(&mut self.obligations), show, inputs })
     }
 
     fn show_leaves(&mut self, label: &str, v: &Sv, t: Ty, out: &mut Vec<(String, String, Base)>) {

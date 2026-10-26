@@ -33,6 +33,18 @@ pub struct ObResult {
     pub msg: String,
     pub status: Status,
     pub elidable: bool,
+    /// For failed contracts: what running the function on the interpreter showed.
+    pub replay: Option<Replay>,
+    /// The counterexample's parameter values, when they can be rebuilt (not cached).
+    pub model: Option<Vec<Vec<i128>>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Replay {
+    /// Running the function on these inputs fails the same check: a real bug.
+    Confirmed(String),
+    /// The counterexample's inputs pass: the prover is missing a fact.
+    NotReproduced,
 }
 
 pub struct FnReport {
@@ -258,7 +270,12 @@ fn load_cached(path: &PathBuf, base: u32) -> Option<Vec<ObResult>> {
             }
             _ => Status::Unknown(o.get("reason").and_then(|r| r.as_str()).unwrap_or("").to_string()),
         };
-        out.push(ObResult { kind, span: Span::new(lo, hi), msg, status, elidable });
+        let replay = match o.get("replay").and_then(|r| r.as_str()) {
+            Some("not reproduced") => Some(Replay::NotReproduced),
+            Some(inputs) => Some(Replay::Confirmed(inputs.to_string())),
+            None => None,
+        };
+        out.push(ObResult { kind, span: Span::new(lo, hi), msg, status, elidable, replay, model: None });
     }
     Some(out)
 }
@@ -272,6 +289,11 @@ fn store_cached(path: &PathBuf, base: u32, obs: &[ObResult]) {
         j.set("hi", (o.span.hi - base) as i64);
         j.set("msg", o.msg.as_str());
         j.set("elidable", o.elidable);
+        match &o.replay {
+            Some(Replay::Confirmed(inputs)) => j.set("replay", inputs.as_str()),
+            Some(Replay::NotReproduced) => j.set("replay", "not reproduced"),
+            None => {}
+        }
         arr.push(j);
     }
     let j = Json::obj().with("obligations", arr);
@@ -372,8 +394,13 @@ pub fn prove(prog: &mut Program, opts: &ProveOpts) -> Result<Report, String> {
             .collect();
         handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("solver worker panicked".into()))).collect()
     });
+    let mut solved = Vec::new();
     for r in results {
-        for (idx, key, base, obs) in r? {
+        solved.extend(r?);
+    }
+    replay_failures(prog, &mut solved, &reports);
+    {
+        for (idx, key, base, obs) in solved {
             if let Some(dir) = &opts.cache_dir {
                 // Timeouts are not cached: a faster machine (or a longer timeout) may prove them.
                 if !obs.iter().any(|o| matches!(&o.status, Status::Unknown(r) if r == "timeout")) {
@@ -387,6 +414,160 @@ pub fn prove(prog: &mut Program, opts: &ProveOpts) -> Result<Report, String> {
     }
     let reports: Vec<FnReport> = reports.into_iter().flatten().collect();
     Ok(Report { fns: reports, solver: solver_name, millis: start.elapsed().as_millis() })
+}
+
+/// Run functions whose contracts failed on the interpreter: first with the counterexample
+/// (when its inputs can be rebuilt), then with generated inputs. A run that fails the same
+/// check confirms a real bug; a counterexample that passes means a missing fact.
+fn replay_failures(prog: &mut Program, solved: &mut [Solved], reports: &[Option<FnReport>]) {
+    let todo: Vec<usize> = (0..solved.len())
+        .filter(|&i| solved[i].3.iter().any(|o| o.kind.is_contract() && matches!(o.status, Status::Failed(_))))
+        .collect();
+    if todo.is_empty() {
+        return;
+    }
+    let mut lw = crate::mir::lower::Lowerer::new(prog, crate::mir::LowerOpts { check_contracts: true });
+    for i in todo {
+        let Some(rep) = reports[solved[i].0].as_ref() else { continue };
+        let f = rep.fid;
+        let ptys: Vec<crate::sema::ty::Ty> = match lw.bodies[f].as_ref() {
+            Some(b) => b.param_locals.iter().map(|&l| b.locals[l].ty).collect(),
+            None => continue,
+        };
+        let names: Vec<String> = match lw.bodies[f].as_ref() {
+            Some(b) => b.param_locals.iter().map(|&l| b.locals[l].name.to_string()).collect(),
+            None => continue,
+        };
+        // The function's own entry checks reject inputs instead of failing them.
+        let own = own_entry_spans(&lw, f);
+        let m = lw.instance(f, Box::new([]));
+        let obs = &mut solved[i].3;
+        for o in obs.iter_mut().filter(|o| o.kind.is_contract() && matches!(o.status, Status::Failed(_))) {
+            if let Some(model) = &o.model {
+                let mut vals = model.iter().map(|v| v.iter().copied());
+                let args: Option<Vec<crate::mir::interp::Value>> =
+                    ptys.iter().map(|&t| build_value(lw.tys, lw.defs, t, &mut vals.next()?)).collect();
+                if let Some(args) = args {
+                    o.replay = match run_matches(&mut lw, m, args.clone(), o, &own) {
+                        Some(true) => Some(Replay::Confirmed(show_args(&mut lw, &args, &ptys, &names))),
+                        Some(false) => Some(Replay::NotReproduced),
+                        None => None,
+                    };
+                    continue;
+                }
+            }
+            // No rebuildable counterexample: try generated inputs.
+            let mut rng = crate::proptest::Rng::new(f.0 as u64 + 1);
+            for case in 0..200u64 {
+                let args: Option<Vec<crate::mir::interp::Value>> = ptys
+                    .iter()
+                    .map(|&t| crate::proptest::generate(lw.tys, lw.defs, t, &mut rng, 2 + case * 5, 0))
+                    .collect();
+                let Some(args) = args else { break };
+                if run_matches(&mut lw, m, args.clone(), o, &own) == Some(true) {
+                    o.replay = Some(Replay::Confirmed(show_args(&mut lw, &args, &ptys, &names)));
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Spans of a function's own entry checks (`requires`, parameter refinements).
+fn own_entry_spans(lw: &crate::mir::lower::Lowerer, f: FnId) -> Vec<Span> {
+    let fd = &lw.defs.fns[f];
+    let pkg = &lw.pkgs[fd.pkg];
+    let mut out: Vec<Span> = fd.params.iter().map(|p| p.span).collect();
+    if let ast::ItemKind::Fn(d) = pkg.ast.items[fd.item].kind {
+        out.extend(pkg.ast.expr_lists.get(d.requires).iter().map(|&e| pkg.ast.exprs[e].span));
+        for p in pkg.ast.params.get(d.params) {
+            if let Some(r) = p.refine {
+                out.push(pkg.ast.exprs[r].span);
+            }
+        }
+    }
+    out
+}
+
+/// Run `m(args)`: `Some(true)` if it fails the obligation's check, `Some(false)` if it runs
+/// to completion, `None` if it stops elsewhere first (rejected by the function's own entry
+/// checks, or another failure), which says nothing about this obligation.
+fn run_matches(
+    lw: &mut crate::mir::lower::Lowerer,
+    m: crate::mir::MFnId,
+    args: Vec<crate::mir::interp::Value>,
+    o: &ObResult,
+    own: &[Span],
+) -> Option<bool> {
+    use crate::mir::interp::{Effects, Interp, Trap};
+    let mut it = Interp::new(lw, Effects::fake(1));
+    it.fuel = 5_000_000;
+    match it.call(m, args) {
+        Err(Trap::Panic { span, msg, .. }) => {
+            if own.contains(&span) {
+                return None;
+            }
+            let pred = o.msg.rsplit_once("requires ").map(|(_, p)| p).unwrap_or(&o.msg);
+            let pred = pred.trim_end_matches(" (on entry)").trim_end_matches(" (preserved)");
+            if span == o.span || (o.kind == ObKind::Precondition && msg.contains(pred)) {
+                Some(true)
+            } else {
+                None
+            }
+        }
+        Err(Trap::Exit(_)) => None,
+        Ok(_) => Some(false),
+    }
+}
+
+fn show_args(
+    lw: &mut crate::mir::lower::Lowerer,
+    args: &[crate::mir::interp::Value],
+    tys: &[crate::sema::ty::Ty],
+    names: &[String],
+) -> String {
+    let mut it = crate::mir::interp::Interp::new(lw, crate::mir::interp::Effects::fake(1));
+    args.iter()
+        .zip(tys)
+        .zip(names)
+        .map(|((v, &t), n)| format!("{n} = {}", it.show(v, t, true).unwrap_or_else(|_| "?".into())))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A value of a scalar-tree type from model values in leaf order.
+fn build_value(
+    tys: &mut crate::sema::ty::TyCtx,
+    defs: &crate::sema::defs::Defs,
+    t: crate::sema::ty::Ty,
+    vals: &mut impl Iterator<Item = i128>,
+) -> Option<crate::mir::interp::Value> {
+    use crate::mir::interp::Value;
+    use crate::sema::ty::{IntTy, TyKind};
+    Some(match tys.kind(t).clone() {
+        TyKind::Int(IntTy::U64, _) => Value::UInt(vals.next()? as u64),
+        TyKind::Int(..) => Value::Int(vals.next()? as i64),
+        TyKind::Bool => Value::Bool(vals.next()? != 0),
+        TyKind::Char => Value::Char(vals.next()? as u32),
+        TyKind::Tuple(ts) if ts.is_empty() => Value::Unit,
+        TyKind::Tuple(ts) => {
+            let mut xs = Vec::new();
+            for &x in ts.iter() {
+                xs.push(build_value(tys, defs, x, vals)?);
+            }
+            Value::Tuple(std::rc::Rc::new(xs))
+        }
+        TyKind::Adt(a, args) if !defs.adts[a].is_enum() => {
+            let fts: Vec<crate::sema::ty::Ty> = defs.adts[a].fields().iter().map(|f| f.ty).collect();
+            let mut xs = Vec::new();
+            for ft in fts {
+                let ft = tys.subst(ft, &args);
+                xs.push(build_value(tys, defs, ft, vals)?);
+            }
+            Value::Tuple(std::rc::Rc::new(xs))
+        }
+        _ => return None,
+    })
 }
 
 /// A solved function: (report index, cache key, span base, results).
@@ -404,6 +585,7 @@ fn solve_fn(s: &mut Solver, vcs: vc::FnVcs, debug: bool) -> Vec<ObResult> {
     }
     let mut obs = Vec::new();
     for ob in vcs.obligations {
+        let mut model = None;
         let status = if ob.goal == "true" || ob.pc.iter().any(|p| p == "false") {
             Status::Proved
         } else {
@@ -428,6 +610,22 @@ fn solve_fn(s: &mut Solver, vcs: vc::FnVcs, debug: bool) -> Vec<ObResult> {
                             cex.push((label.clone(), show_value(&v, b)));
                         }
                     }
+                    if ob.kind.is_contract() {
+                        model = vcs.inputs.as_ref().and_then(|ins| {
+                            let mut out = Vec::new();
+                            for (_, leaves) in ins {
+                                let terms: Vec<String> = leaves.iter().map(|(t, _)| t.clone()).collect();
+                                let vals = s.values(&terms);
+                                let mut vs = Vec::new();
+                                for v in vals {
+                                    let v = v?;
+                                    vs.push(v.as_int().or_else(|| v.as_bool().map(|b| b as i128))?);
+                                }
+                                out.push(vs);
+                            }
+                            Some(out)
+                        });
+                    }
                     Status::Failed(cex)
                 }
                 Sat::Unknown => Status::Unknown(match s.last_error.take() {
@@ -441,7 +639,15 @@ fn solve_fn(s: &mut Solver, vcs: vc::FnVcs, debug: bool) -> Vec<ObResult> {
             s.send("(pop 1)");
             st
         };
-        obs.push(ObResult { kind: ob.kind, span: ob.span, msg: ob.msg, status, elidable: ob.elidable });
+        obs.push(ObResult {
+            kind: ob.kind,
+            span: ob.span,
+            msg: ob.msg,
+            status,
+            elidable: ob.elidable,
+            replay: None,
+            model,
+        });
     }
     s.send("(pop 1)");
     obs
@@ -489,6 +695,11 @@ pub fn obligation_json(prog: &Program, f: &FnReport, o: &ObResult) -> Json {
     if o.status != Status::Proved {
         j.set("hint", hint(o));
     }
+    match &o.replay {
+        Some(Replay::Confirmed(inputs)) => j.set("confirmed_with", inputs.as_str()),
+        Some(Replay::NotReproduced) => j.set("reproduced", false),
+        None => {}
+    }
     j
 }
 
@@ -520,6 +731,18 @@ pub fn render(prog: &Program, r: &Report, verbose: bool) -> String {
                 location(prog, o.span),
                 o.msg
             ));
+            match &o.replay {
+                Some(Replay::Confirmed(inputs)) if inputs.is_empty() => {
+                    out.push_str("  confirmed: running it fails this check\n")
+                }
+                Some(Replay::Confirmed(inputs)) => {
+                    out.push_str(&format!("  confirmed: running it with {inputs} fails this check\n"))
+                }
+                Some(Replay::NotReproduced) => out.push_str(
+                    "  not reproduced: the counterexample passes at run time, so the prover is missing a fact\n",
+                ),
+                None => {}
+            }
             if o.kind.is_contract() {
                 out.push_str(&format!("  hint: {}\n", hint(o)));
             }
