@@ -9,6 +9,10 @@ The official agent plugin for the Jig language.
   file is formatted.
 - **Skill `jig-proofs`:** how to read `jig prove` counterexamples and add the facts the prover
   needs (requires, callee ensures, loop invariants).
+- **Spec-first commands:** `/jig:spec` drafts feature scenarios, `/jig:contracts` drafts
+  signatures, contracts and step functions with placeholder bodies, `/jig:implement` fills
+  them in until scenarios, tests and proofs pass; each step stops for human approval.
+  `/jig:review` writes the report a reviewer reads instead of the code.
 - **MCP tools** (`jig mcp`): `check`, `test`, `prove`, `trace`, `run`, `fmt`, `explain`,
   `search` (by type signature) and `reference`.
 

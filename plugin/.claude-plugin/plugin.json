@@ -1,7 +1,7 @@
 {
   "name": "jig",
   "version": "0.1.0",
-  "description": "Write Jig with the language reference, edit-time checks, commit gates, proof guidance and the jig MCP tools (check, test, prove, run, fmt, explain, search)",
+  "description": "Write Jig with the language reference, edit-time checks, commit gates, proof guidance, spec-first commands (spec, contracts, implement, review) and the jig MCP tools (check, test, prove, trace, run, fmt, explain, search)",
   "author": { "name": "hkd987" },
   "repository": "https://github.com/hkd987/Jig",
   "license": "MIT",

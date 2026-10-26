@@ -147,7 +147,8 @@ optimizing release backend.
       `bench/vsrust`, eight programs.
 - [x] **Gate passed:** geometric mean 0.97x Rust by wall clock and 0.89x by instructions
       (limit 1.10); CI fails above the limit; `docs/gates/phase3.md`.
-- [ ] Plugin: spec-first commands (draft scenarios → draft contracts → implement), trace tools.
+- [x] Plugin: spec-first commands (`/jig:spec` → `/jig:contracts` → `/jig:implement`, each
+      stopping for approval; `/jig:review` for the reviewer's report), trace tools (MCP `trace`).
 
 ## Phase 4 · Self-hosting and alpha
 

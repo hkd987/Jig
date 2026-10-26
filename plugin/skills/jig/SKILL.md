@@ -20,6 +20,9 @@ code; it is short and complete. [cookbook.md](cookbook.md) has idioms for common
 4. Run `jig fmt` (or the `fmt` tool) before committing. Commits are blocked until the project
    checks, tests pass and files are formatted.
 
+For a new feature, work spec-first: `/jig:spec` (scenarios), `/jig:contracts` (signatures and
+contracts), `/jig:implement`, each approved by the user before the next.
+
 Use the MCP tools: `check`, `test`, `prove`, `run`, `fmt`, `explain <code>` for any
 diagnostic code, `search` to find a function by type (`Str -> Option<Int>`), and
 `reference`.
