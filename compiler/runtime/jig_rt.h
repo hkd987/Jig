@@ -84,6 +84,9 @@ void jig_unreachable(const char *loc) __attribute__((noreturn, cold));
 /* ---- memory ---- */
 void *jig_alloc(size_t n);
 void jig_free(void *p);
+/* Objects of a size known at both ends (boxes, closures, list and map headers): no header. */
+void *jig_alloc_obj(size_t n);
+void jig_free_obj(void *p, size_t n);
 static inline void jig_rc_inc(int64_t *rc) {
     if (*rc >= 0) (*rc)++;
 }

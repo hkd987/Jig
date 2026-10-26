@@ -28,6 +28,8 @@ pub struct CGen<'l, 'a> {
     fns: Vec<String>,
     data_decls: String,
     data_defs: String,
+    /// Static boxes for nullary variants of recursive enums, by (type, variant).
+    static_boxes: FxHashMap<(Ty, u32), String>,
     /// All source locations, NUL-separated; a location is an offset into `jig_locs`.
     loc_table: String,
     loc_parts: Vec<String>,
@@ -86,6 +88,7 @@ pub fn generate(lw: &mut Lowerer) -> Result<CProgram, String> {
         fns: Vec::new(),
         data_decls: String::new(),
         data_defs: String::new(),
+        static_boxes: FxHashMap::default(),
         loc_table: String::new(),
         loc_parts: Vec::new(),
         loc_flushed: 0,
@@ -487,7 +490,7 @@ impl<'l, 'a> CGen<'l, 'a> {
                                 }
                                 s.push_str("        break;\n");
                             }
-                            s.push_str("    }\n    jig_free(*p);\n");
+                            s.push_str("    }\n    jig_free_obj(*p, sizeof(**p));\n");
                         }
                     }
                     TyKind::Adt(a, _) if self.lw.defs.adts[*a].is_enum() => {
@@ -1139,7 +1142,7 @@ impl<'l, 'a> CGen<'l, 'a> {
                 let _ = writeln!(d, "    {g}(&e->c{i});");
             }
         }
-        d.push_str("    jig_free(e);\n}\n");
+        d.push_str("    jig_free_obj(e, sizeof(*e));\n}\n");
         let _ = writeln!(self.glue_decls, "JIG_FN void envdrop{}(jig_env *ep);", f.0);
         self.glue.push_str(&d);
     }
@@ -1358,11 +1361,24 @@ impl<'l, 'a> CGen<'l, 'a> {
                     AggKind::Variant(_, v) => {
                         let fields: Vec<String> =
                             vals.iter().enumerate().map(|(i, x)| format!(".f{i} = {x}")).collect();
+                        if self.is_recursive_enum(*ty) && vals.is_empty() {
+                            // A variant without fields is one shared static value.
+                            if let Some(name) = self.static_boxes.get(&(*ty, *v)) {
+                                return format!("(&{name})");
+                            }
+                            let n = self.fresh();
+                            let name = format!("NV{n}");
+                            let _ =
+                                writeln!(self.data_defs, "JIG_LINK struct {c}_box {name} = {{.rc = -1, .tag = {v}}};");
+                            let _ = writeln!(self.data_decls, "extern struct {c}_box {name};");
+                            self.static_boxes.insert((*ty, *v), name.clone());
+                            return format!("(&{name})");
+                        }
                         if self.is_recursive_enum(*ty) {
                             let n = self.fresh();
                             let _ = writeln!(
                                 cx.out,
-                                "    {c} bx{n} = jig_alloc(sizeof(*bx{n})); bx{n}->rc = 1; bx{n}->tag = {v};"
+                                "    {c} bx{n} = jig_alloc_obj(sizeof(*bx{n})); bx{n}->rc = 1; bx{n}->tag = {v};"
                             );
                             for (i, x) in vals.iter().enumerate() {
                                 let _ = writeln!(cx.out, "    bx{n}->u.v{v}.f{i} = {x};");
@@ -1428,7 +1444,7 @@ impl<'l, 'a> CGen<'l, 'a> {
                 let w = self.wrapper(*f);
                 let vals: Vec<String> = caps.iter().map(|o| self.owned(mf, cx, o, span)).collect();
                 let n = self.fresh();
-                let _ = writeln!(cx.out, "    struct env{} *env{n} = jig_alloc(sizeof(*env{n})); env{n}->hdr.rc = 1; env{n}->hdr.drop = envdrop{};", f.0, f.0);
+                let _ = writeln!(cx.out, "    struct env{} *env{n} = jig_alloc_obj(sizeof(*env{n})); env{n}->hdr.rc = 1; env{n}->hdr.drop = envdrop{};", f.0, f.0);
                 for (i, v) in vals.iter().enumerate() {
                     let _ = writeln!(cx.out, "    env{n}->c{i} = {v};");
                 }

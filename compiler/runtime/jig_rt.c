@@ -130,6 +130,32 @@ void *jig_alloc(size_t n) {
     return h + 1;
 }
 
+void *jig_alloc_obj(size_t n) {
+    if (__builtin_expect(n > POOL_MAX, 0)) {
+        void *p = malloc(n);
+        if (!p) jig_oom();
+        return p;
+    }
+    size_t c = (n + 15) >> 4;
+    pool_block *b = pool_free[c];
+    if (b) {
+        pool_free[c] = b->next;
+        return b;
+    }
+    return pool_carve(c << 4);
+}
+
+void jig_free_obj(void *p, size_t n) {
+    if (n > POOL_MAX) {
+        free(p);
+        return;
+    }
+    size_t c = (n + 15) >> 4;
+    pool_block *b = p;
+    b->next = pool_free[c];
+    pool_free[c] = b;
+}
+
 static void *jig_alloc_zeroed(size_t n) {
     if (n + 8 <= POOL_MAX) return memset(jig_alloc(n), 0, n);
     uint64_t *h = calloc(1, n + 8);
@@ -180,6 +206,13 @@ static void *jig_alloc_zeroed(size_t n) {
 }
 
 void jig_free(void *p) { free(p); }
+
+void *jig_alloc_obj(size_t n) { return jig_alloc(n); }
+
+void jig_free_obj(void *p, size_t n) {
+    (void)n;
+    free(p);
+}
 
 static void *jig_realloc(void *p, size_t n) {
     void *q = realloc(p, n ? n : 1);
@@ -626,11 +659,11 @@ void jig_list_release(jig_list *l, const jig_type *t) {
     if (t->release)
         for (int64_t i = 0; i < l->len; i++) t->release(l->data + (size_t)i * t->size);
     jig_free(l->data);
-    jig_free(l);
+    jig_free_obj(l, sizeof(jig_list));
 }
 
 jig_list *jig_list_with_capacity(int64_t n, const jig_type *t) {
-    jig_list *l = jig_alloc(sizeof(jig_list));
+    jig_list *l = jig_alloc_obj(sizeof(jig_list));
     l->rc = 1;
     l->len = 0;
     l->cap = n;
@@ -753,7 +786,7 @@ jig_list *jig_list_repeat(const jig_list *l, int64_t n, const jig_type *t, const
     size_t chunk = (size_t)m * t->size, all = (size_t)(m * n) * t->size;
     bool zero = true;
     for (size_t i = 0; i < chunk && zero; i++) zero = l->data[i] == 0;
-    jig_list *r = jig_alloc(sizeof(jig_list));
+    jig_list *r = jig_alloc_obj(sizeof(jig_list));
     r->rc = 1;
     r->len = r->cap = m * n;
     if (zero) {
@@ -1055,7 +1088,7 @@ void jig_map_release(jig_map *m, const jig_type *k, const jig_type *v) {
     jig_free(m->keys);
     jig_free(m->vals);
     jig_free(m->index);
-    jig_free(m);
+    jig_free_obj(m, sizeof(jig_map));
 }
 
 static void map_copy(jig_map **mp, const jig_type *k, const jig_type *v) __attribute__((noinline));
@@ -1066,7 +1099,7 @@ static inline void map_make_unique(jig_map **mp, const jig_type *k, const jig_ty
 
 static void map_copy(jig_map **mp, const jig_type *k, const jig_type *v) {
     jig_map *m = *mp;
-    jig_map *c = jig_alloc(sizeof(jig_map));
+    jig_map *c = jig_alloc_obj(sizeof(jig_map));
     c->rc = 1;
     c->len = m ? m->len : 0;
     c->cap = c->len > 4 ? c->len : 4;
