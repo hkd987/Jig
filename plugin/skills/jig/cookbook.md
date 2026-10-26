@@ -253,4 +253,4 @@ fn clamp(x: Int, lo: Int, hi: Int) -> Int
 }
 ```
 
-Contracts are checked at run time in debug builds and tests; `jig prove` proves them.
+Contracts are checked at run time unless `jig prove` proves them; proved checks are removed from native builds.

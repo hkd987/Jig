@@ -283,8 +283,10 @@ their bodies, and also proves the absence of traps (overflow, division by zero, 
 only that function, since callers depend on its contract. A failed contract comes with a
 counterexample in source terms, and is replayed on the interpreter: "confirmed" means
 those inputs really fail, "not reproduced" means the prover is missing a fact. An unproven
-obligation keeps its runtime check in debug builds. To prove facts after a loop, state them as loop invariants; to prove facts about
-a call's result, put them in the callee's `ensures`.
+obligation keeps its runtime check in every build; a proved one has none, and a `requires`
+proved at every call is not checked in the callee either. To prove facts after a loop,
+state them as loop invariants; to prove facts about a call's result, put them in the
+callee's `ensures`.
 
 ## Tests
 

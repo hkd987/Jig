@@ -195,17 +195,22 @@ impl<'a> Lowerer<'a> {
         b.locals[Local(0)].ty = b.ret_ty;
         let check = b.lw.mir.opts.check_contracts;
         if check {
-            // Parameter refinements, then preconditions.
+            // Parameter refinements, then preconditions, unless proved at every call.
+            let entry = !b.lw.mir.elide.entries.contains(&f);
             let ps: Vec<ast::Param> = b.ast.params.get(decl.params).to_vec();
-            for p in &ps {
+            for p in ps.iter().filter(|_| entry) {
                 if let Some(pred) = p.refine {
                     b.check(pred, CheckKind::Refinement);
                 }
             }
             let fd = &b.lw.defs.fns[f];
             let offset = fd.self_mode.is_some() as usize;
-            let refined: Vec<(usize, AliasId)> =
-                fd.params.iter().enumerate().filter_map(|(i, p)| p.refine.map(|al| (i + offset, al))).collect();
+            let refined: Vec<(usize, AliasId)> = fd
+                .params
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| p.refine.filter(|_| entry).map(|al| (i + offset, al)))
+                .collect();
             b.ret_refine = fd.ret_refine;
             for (i, al) in refined {
                 let l = b.params[i].0;
@@ -215,7 +220,7 @@ impl<'a> Lowerer<'a> {
                 b.check_alias(al, Place::local(l));
                 b.cur_span = saved;
             }
-            for &r in b.ast.expr_lists.get(decl.requires).to_vec().iter() {
+            for &r in b.ast.expr_lists.get(decl.requires).to_vec().iter().filter(|_| entry) {
                 b.check(r, CheckKind::Precondition);
             }
             // `&mut` parameters must satisfy their struct predicates again on return.

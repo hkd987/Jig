@@ -1,11 +1,16 @@
 import "std/io"
 import "std/os"
 
-fn a(i: Int, j: Int) -> Float {
+fn a(i: Int, j: Int) -> Float
+  requires 0 <= i && i < 100000 && 0 <= j && j < 100000
+{
   return 1.0 / (((i + j) * (i + j + 1) / 2 + i + 1) as Float)
 }
 
-fn mul_av(v: List<Float>, out: &mut List<Float>) {
+fn mul_av(v: List<Float>, out: &mut List<Float>)
+  requires v.len() < 100000 && out.len() == v.len()
+  ensures out.len() == v.len()
+{
   let n = v.len()
   for i in 0..n {
     var s = 0.0
@@ -16,7 +21,10 @@ fn mul_av(v: List<Float>, out: &mut List<Float>) {
   }
 }
 
-fn mul_atv(v: List<Float>, out: &mut List<Float>) {
+fn mul_atv(v: List<Float>, out: &mut List<Float>)
+  requires v.len() < 100000 && out.len() == v.len()
+  ensures out.len() == v.len()
+{
   let n = v.len()
   for i in 0..n {
     var s = 0.0
@@ -27,7 +35,10 @@ fn mul_atv(v: List<Float>, out: &mut List<Float>) {
   }
 }
 
-fn mul_atav(v: List<Float>, out: &mut List<Float>, tmp: &mut List<Float>) {
+fn mul_atav(v: List<Float>, out: &mut List<Float>, tmp: &mut List<Float>)
+  requires v.len() < 100000 && out.len() == v.len() && tmp.len() == v.len()
+  ensures out.len() == v.len() && tmp.len() == v.len()
+{
   mul_av(v, &mut tmp)
   mul_atv(tmp, &mut out)
 }
@@ -35,15 +46,14 @@ fn mul_atav(v: List<Float>, out: &mut List<Float>, tmp: &mut List<Float>) {
 fn main() effects {io, env} {
   let args = os.args()
   let n = if args.len() > 1 { args[1].to_int().unwrap_or(100) } else { 100 }
-  var u: List<Float> = []
-  var v: List<Float> = []
-  var tmp: List<Float> = []
-  for _i in 0..n {
-    u.push(1.0)
-    v.push(0.0)
-    tmp.push(0.0)
+  if n < 1 || n > 10000 {
+    io.println("n must be between 1 and 10000")
+    return
   }
-  for _k in 0..10 {
+  var u = [1.0].repeat(n)
+  var v = [0.0].repeat(n)
+  var tmp = [0.0].repeat(n)
+  for _k in 0..10 invariant u.len() == n && v.len() == n && tmp.len() == n {
     mul_atav(u, &mut v, &mut tmp)
     mul_atav(v, &mut u, &mut tmp)
   }

@@ -182,10 +182,15 @@ fn native_build(
     let proven = crate::verify::cached_proven(prog, &root.join(".jig").join("proofs"));
     if !proven.is_empty() && std::env::var_os("JIG_QUIET").is_none() {
         eprintln!(
-            "using proofs: {} contract, {} arithmetic and {} bounds checks removed",
+            "using proofs: {} contract, {} arithmetic and {} bounds checks removed{}",
             proven.contract.len(),
             proven.safety.len(),
-            proven.bounds.len()
+            proven.bounds.len(),
+            match proven.entries.len() {
+                0 => String::new(),
+                1 => "; 1 function's preconditions hold at every call".to_string(),
+                n => format!("; {n} functions' preconditions hold at every call"),
+            }
         );
     }
     crate::codegen::build::build(prog, &crate::codegen::build::BuildOpts { release, build_dir, out, proven })

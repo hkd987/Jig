@@ -114,7 +114,7 @@ impl Report {
             }
         }
         let keep = |m: FxHashMap<Span, bool>| m.into_iter().filter(|(_, ok)| *ok).map(|(s, _)| s).collect();
-        Proven { contract: keep(contract), safety: keep(safety), bounds: keep(bounds) }
+        Proven { contract: keep(contract), safety: keep(safety), bounds: keep(bounds), entries: FxHashSet::default() }
     }
 }
 
@@ -127,11 +127,14 @@ pub struct Proven {
     pub safety: FxHashSet<Span>,
     /// List indexing proved in bounds at these spans.
     pub bounds: FxHashSet<Span>,
+    /// Functions whose entry checks (`requires`, parameter refinements) are proved at every
+    /// call, so the function itself need not check them.
+    pub entries: FxHashSet<FnId>,
 }
 
 impl Proven {
     pub fn is_empty(&self) -> bool {
-        self.contract.is_empty() && self.safety.is_empty() && self.bounds.is_empty()
+        self.contract.is_empty() && self.safety.is_empty() && self.bounds.is_empty() && self.entries.is_empty()
     }
 }
 
@@ -333,7 +336,67 @@ pub fn cached_proven(prog: &Program, cache_dir: &std::path::Path) -> Proven {
             fns.push(FnReport { fid: f, name: String::new(), obligations: obs, cached: true });
         }
     }
-    Report { fns, solver, millis: 0 }.proven()
+    let report = Report { fns, solver, millis: 0 };
+    let mut proven = report.proven();
+    proven.entries = proven_entries(prog, &report);
+    proven
+}
+
+/// Functions whose entry checks hold at every call. The program is closed (no dynamic loading
+/// or reflection), so when each call site has its preconditions proved, the callee need not
+/// check them again. A function used as a value or reached through a generic bound has calls
+/// the prover cannot see, and one with no calls at all is an entry point; neither qualifies.
+/// Calls in `test` blocks don't count: tests run in the interpreter, which keeps every check.
+fn proven_entries(prog: &Program, report: &Report) -> FxHashSet<FnId> {
+    let mut sites: FxHashMap<FnId, Vec<Span>> = FxHashMap::default();
+    let mut as_value: FxHashSet<FnId> = FxHashSet::default();
+    for (pid, pkg) in prog.pkgs.iter_enumerated() {
+        let ast = &pkg.ast;
+        let tests: Vec<Span> =
+            ast.items.iter().filter(|it| matches!(it.kind, ast::ItemKind::Test { .. })).map(|it| it.span).collect();
+        let in_test = |sp: Span| tests.iter().any(|t| t.lo <= sp.lo && sp.hi <= t.hi);
+        let mut callee_of: FxHashMap<u32, Span> = FxHashMap::default();
+        for e in ast.exprs.iter() {
+            if let ExprKind::Call { callee, .. } = e.kind {
+                callee_of.insert(callee.0, e.span);
+            }
+        }
+        let res = &prog.tables[pid].expr_res;
+        for (i, e) in ast.exprs.iter().enumerate() {
+            let f = match res.get(i) {
+                Some(crate::sema::defs::Res::Fn(f) | crate::sema::defs::Res::Method(f)) => *f,
+                _ => continue,
+            };
+            match callee_of.get(&(i as u32)) {
+                Some(&call) if in_test(call) => {}
+                Some(&call) => sites.entry(f).or_default().push(call),
+                None if in_test(e.span) => {}
+                None => {
+                    as_value.insert(f);
+                }
+            }
+        }
+    }
+    let dyn_names: FxHashSet<crate::util::Symbol> =
+        prog.bodies.iter().flatten().flat_map(|b| b.dyn_methods.iter().copied()).collect();
+    // Per call site: whether every precondition obligation there was proved.
+    let mut at: FxHashMap<Span, bool> = FxHashMap::default();
+    for f in &report.fns {
+        for o in f.obligations.iter().filter(|o| o.kind == ObKind::Precondition) {
+            *at.entry(o.span).or_insert(true) &= o.elidable && o.status == Status::Proved;
+        }
+    }
+    let mut out = FxHashSet::default();
+    for (f, calls) in sites {
+        let fd = &prog.defs.fns[f];
+        if as_value.contains(&f) || fd.step.is_some() || (fd.recv.is_some() && dyn_names.contains(&fd.name)) {
+            continue;
+        }
+        if calls.iter().all(|sp| at.get(sp) == Some(&true)) {
+            out.insert(f);
+        }
+    }
+    out
 }
 
 pub fn prove(prog: &mut Program, opts: &ProveOpts) -> Result<Report, String> {

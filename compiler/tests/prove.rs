@@ -140,3 +140,38 @@ fn proofs_remove_checks_from_builds() {
     assert!(count(&proved_c, "failed: ") < count(&plain_c, "failed: "));
     assert!(count(&proved_c, "jig_add_i64") < count(&plain_c, "jig_add_i64"));
 }
+
+/// A precondition proved at every call site is not checked again in the callee; one unproven
+/// call, or a use of the function as a value, keeps the check.
+#[test]
+fn preconditions_proved_at_every_call_leave_the_callee() {
+    let cc = jig::codegen::build::c_compiler(false);
+    let have_cc = std::process::Command::new(&cc).arg("--version").output().is_ok_and(|o| o.status.success());
+    if !have_solver() || !have_cc {
+        eprintln!("skipping: needs an SMT solver and a C compiler");
+        return;
+    }
+    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("prove-entries");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/prove/entries/main.jig");
+    std::fs::copy(&src, work.join("main.jig")).unwrap();
+    let cache = work.join(".jig/proofs");
+    let _ = report_for(&work, Some(cache.clone()));
+    let prog = jig::sema::analyze(&Sources::Disk, &work);
+    let proven = jig::verify::cached_proven(&prog, &cache);
+    let mut names: Vec<&str> = proven.entries.iter().map(|&f| prog.defs.fns[f].name.as_str()).collect();
+    names.sort();
+    assert_eq!(names, vec!["half"]);
+    let mut prog = jig::sema::analyze(&Sources::Disk, &work);
+    let dir = work.join("build");
+    let opts = jig::codegen::build::BuildOpts { release: true, build_dir: dir.clone(), out: work.join("exe"), proven };
+    jig::codegen::build::build(&mut prog, &opts).expect("build");
+    let out = std::process::Command::new(work.join("exe")).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout, "5 2\n3\n2 3\n");
+    // Release builds keep unproven contract checks: the bad call to `third` still stops.
+    assert!(String::from_utf8_lossy(&out.stderr).contains("precondition failed: x >= 0"));
+    let c = std::fs::read_to_string(dir.join("exe.c")).unwrap();
+    assert_eq!(c.matches("precondition failed: x >= 0").count(), 2, "third and quarter keep their checks");
+}

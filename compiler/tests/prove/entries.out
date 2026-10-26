@@ -1,0 +1,4 @@
+FAILED precondition in `main` at tests/prove/entries/main.jig:34:14: `third` requires x >= 0
+  confirmed: running it fails this check
+  hint: Establish it before the call (an `if`, or an `assert` that is proved), or add it to this function's `requires` so callers must.
+proved 4 of 5 contract obligations and 7 of 7 safety obligations in 5 functions (0 from cache)

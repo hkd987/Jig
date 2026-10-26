@@ -1,0 +1,35 @@
+import "std/io"
+import "std/os"
+
+// Preconditions proved at every call need no check in the callee; one unproven call, or a
+// use as a value, keeps the check.
+
+fn half(x: Int) -> Int
+  requires x >= 0
+{
+  return x / 2
+}
+
+fn third(x: Int) -> Int
+  requires x >= 0
+{
+  return x / 3
+}
+
+fn quarter(x: Int) -> Int
+  requires x >= 0
+{
+  return x / 4
+}
+
+fn apply(f: fn(Int) -> Int, x: Int) -> Int {
+  return f(x)
+}
+
+fn main() effects {io, env} {
+  let k = os.args().len() - 5
+  io.println(half(10).str() + " " + half(4).str())
+  io.println(third(9).str())
+  io.println(quarter(8).str() + " " + apply(quarter, 12).str())
+  io.println(third(k).str())
+}

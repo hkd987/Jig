@@ -832,8 +832,11 @@ void jig_swap_oob(int64_t i, int64_t j, int64_t n, const char *loc) {
     jig_panic(msg, loc);
 }
 
-/* Introsort on a plain array: quicksort with median-of-three pivots, heapsort when the
- * recursion gets deep, insertion sort for short runs. Instantiated per scalar type. */
+/* Sorting primitive keys: equal keys are indistinguishable, so stability doesn't matter.
+ * Introsort with a branchless Lomuto partition (no mispredicted branches on random data),
+ * median-of-3 (ninther for large ranges) pivots, a second pass that gathers keys equal to
+ * a minimal pivot (so many duplicates stay linear), heapsort past the depth limit and
+ * insertion sort for short ranges. Instantiated per scalar type. */
 #define JIG_SORT_IMPL(NAME, T)                                                                  \
     static void NAME##_sift(T *a, int64_t root, int64_t n) {                                    \
         for (;;) {                                                                              \
@@ -845,8 +848,12 @@ void jig_swap_oob(int64_t i, int64_t j, int64_t n, const char *loc) {
             root = c;                                                                           \
         }                                                                                       \
     }                                                                                           \
+    static inline int64_t NAME##_med3(T *a, int64_t i, int64_t j, int64_t k) {                  \
+        return a[i] < a[j] ? (a[j] < a[k] ? j : (a[i] < a[k] ? k : i))                          \
+                           : (a[i] < a[k] ? i : (a[j] < a[k] ? k : j));                         \
+    }                                                                                           \
     static void NAME##_rec(T *a, int64_t n, int depth) {                                        \
-        while (n > 16) {                                                                        \
+        while (n > 24) {                                                                        \
             if (depth-- == 0) {                                                                 \
                 for (int64_t i = n / 2 - 1; i >= 0; i--) NAME##_sift(a, i, n);                  \
                 for (int64_t e = n - 1; e > 0; e--) {                                           \
@@ -855,25 +862,46 @@ void jig_swap_oob(int64_t i, int64_t j, int64_t n, const char *loc) {
                 }                                                                               \
                 return;                                                                         \
             }                                                                                   \
-            T x = a[0], y = a[n / 2], z = a[n - 1];                                             \
-            T p = x < y ? (y < z ? y : (x < z ? z : x)) : (x < z ? x : (y < z ? z : y));        \
-            int64_t i = 0, j = n - 1;                                                           \
-            for (;;) {                                                                          \
-                while (a[i] < p) i++;                                                           \
-                while (p < a[j]) j--;                                                           \
-                if (i >= j) break;                                                              \
-                T t = a[i]; a[i] = a[j]; a[j] = t;                                              \
-                i++;                                                                            \
-                j--;                                                                            \
+            int64_t m = n / 2, pi;                                                              \
+            if (n > 128) {                                                                      \
+                int64_t s = n / 8;                                                              \
+                pi = NAME##_med3(a, NAME##_med3(a, 0, s, 2 * s), NAME##_med3(a, m - s, m, m + s), \
+                                 NAME##_med3(a, n - 1 - 2 * s, n - 1 - s, n - 1));               \
+            } else {                                                                            \
+                pi = NAME##_med3(a, 0, m, n - 1);                                               \
+            }                                                                                   \
+            { T t = a[0]; a[0] = a[pi]; a[pi] = t; }                                            \
+            T p = a[0];                                                                         \
+            int64_t lt = 1;                                                                     \
+            for (int64_t i = 1; i < n; i++) {                                                   \
+                T v = a[i];                                                                     \
+                int less = v < p;                                                               \
+                a[i] = a[lt];                                                                   \
+                a[lt] = v;                                                                      \
+                lt += less;                                                                     \
+            }                                                                                   \
+            lt--;                                                                               \
+            { T t = a[0]; a[0] = a[lt]; a[lt] = t; }                                            \
+            /* a[0..lt) < p == a[lt] <= a(lt..n) */                                             \
+            int64_t lo = lt + 1;                                                                \
+            if (lt == 0) {                                                                      \
+                /* The pivot is the minimum: keys equal to it are done. */                      \
+                for (int64_t i = 1; i < n; i++) {                                               \
+                    T v = a[i];                                                                 \
+                    int eq = !(p < v);                                                          \
+                    a[i] = a[lo];                                                               \
+                    a[lo] = v;                                                                  \
+                    lo += eq;                                                                   \
+                }                                                                               \
             }                                                                                   \
             /* Recurse into the smaller side, loop on the larger. */                           \
-            if (j + 1 < n - j - 1) {                                                            \
-                NAME##_rec(a, j + 1, depth);                                                    \
-                a += j + 1;                                                                     \
-                n -= j + 1;                                                                     \
+            if (lt < n - lo) {                                                                  \
+                NAME##_rec(a, lt, depth);                                                       \
+                a += lo;                                                                        \
+                n -= lo;                                                                        \
             } else {                                                                            \
-                NAME##_rec(a + j + 1, n - j - 1, depth);                                        \
-                n = j + 1;                                                                      \
+                NAME##_rec(a + lo, n - lo, depth);                                              \
+                n = lt;                                                                         \
             }                                                                                   \
         }                                                                                       \
         for (int64_t i = 1; i < n; i++) {                                                       \

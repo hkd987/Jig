@@ -164,7 +164,7 @@ fn compile_units(
 /// Build `main` of an analyzed, error-free program into a native executable.
 pub fn build(prog: &mut Program, opts: &BuildOpts) -> Result<PathBuf, String> {
     let c = {
-        let mut lw = Lowerer::new(prog, LowerOpts { check_contracts: !opts.release });
+        let mut lw = Lowerer::new(prog, LowerOpts { check_contracts: true });
         lw.mir.elide = opts.proven.clone();
         super::c::generate(&mut lw)?
     };
