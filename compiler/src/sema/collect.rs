@@ -287,6 +287,7 @@ fn new_fn(
         n_recv_generics: n_recv,
         params: Vec::new(),
         ret: Ty(0),
+        ret_refine: None,
         effects: EffectSet::PURE,
         is_pub: item.is_pub || iface.is_some(),
         has_body: f.body.is_some(),
@@ -351,6 +352,30 @@ impl Collector<'_> {
             }
         }
         None
+    }
+
+    /// The refinement alias a type expression names directly (`amt: Cents`), if any.
+    fn refinement_alias(&mut self, sc: &TyScope, te: TypeExprId) -> Option<AliasId> {
+        let t = *self.ast(sc.pkg).ty(te);
+        let TypeExprKind::Named { pkg, name, args, .. } = t.kind else { return None };
+        if !self.ast(sc.pkg).type_lists.get(args).is_empty() {
+            return None;
+        }
+        let def = match pkg {
+            Some(p) => {
+                let &(target, _) = self.pkgs[sc.pkg].imports.get(sc.file)?.get(&p.sym)?;
+                self.pkgs[target].scope.get(&name.sym).copied()?
+            }
+            None => {
+                if sc.generics.contains(&name.sym) || builtin_type(name.sym).is_some() {
+                    return None;
+                }
+                self.lookup_name(sc, name)?
+            }
+        };
+        let Def::Alias(al) = def else { return None };
+        self.ensure_alias(al);
+        self.defs.aliases[al].refine.is_some().then_some(al)
     }
 
     pub fn resolve_type(&mut self, sc: &TyScope, te: TypeExprId) -> Ty {
@@ -654,7 +679,8 @@ impl Collector<'_> {
                 continue;
             }
             let ty = self.resolve_type(sc, f.ty);
-            out.push(FieldDef { name: f.name.sym, ty, is_pub: f.is_pub, span: f.span });
+            let refine = self.refinement_alias(sc, f.ty);
+            out.push(FieldDef { name: f.name.sym, ty, is_pub: f.is_pub, span: f.span, refine });
         }
         out
     }
@@ -878,11 +904,13 @@ impl Collector<'_> {
                 Some(t) => self.resolve_type(&sc, t),
                 None => self.tys.error,
             };
+            let refine = p.ty.and_then(|t| self.refinement_alias(&sc, t));
             params.push(ParamDef {
                 name: p.name.sym,
                 ty,
                 mode: if p.mut_ref { Mode::MutRef } else { Mode::Value },
                 span: p.span,
+                refine,
             });
         }
         self.defs.fns[fid].params = params;
@@ -890,6 +918,7 @@ impl Collector<'_> {
             Some(t) => self.resolve_type(&sc, t),
             None => self.tys.unit,
         };
+        self.defs.fns[fid].ret_refine = f.ret.and_then(|t| self.refinement_alias(&sc, t));
         self.defs.fns[fid].effects = match f.effects {
             Some(list) => self.resolve_effects(pid, list),
             None => EffectSet::PURE,
@@ -1111,7 +1140,8 @@ impl Collector<'_> {
                 if p.mut_ref {
                     self.err(codes::E0314, p.span, "test parameters cannot be `&mut`");
                 }
-                out.push(ParamDef { name: p.name.sym, ty, mode: Mode::Value, span: p.span });
+                let refine = p.ty.and_then(|t| self.refinement_alias(&sc, t));
+                out.push(ParamDef { name: p.name.sym, ty, mode: Mode::Value, span: p.span, refine });
             }
             self.defs.tests[tid].params = out;
         }

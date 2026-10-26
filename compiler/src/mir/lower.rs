@@ -148,9 +148,21 @@ impl<'a> Lowerer<'a> {
                     b.check(pred, CheckKind::Refinement);
                 }
             }
+            let fd = &b.lw.defs.fns[f];
+            let offset = fd.self_mode.is_some() as usize;
+            let refined: Vec<(usize, AliasId)> =
+                fd.params.iter().enumerate().filter_map(|(i, p)| p.refine.map(|al| (i + offset, al))).collect();
+            b.ret_refine = fd.ret_refine;
+            for (i, al) in refined {
+                let l = b.params[i].0;
+                b.check_alias(al, Place::local(l));
+            }
             for &r in b.ast.expr_lists.get(decl.requires).to_vec().iter() {
                 b.check(r, CheckKind::Precondition);
             }
+            // `&mut` parameters must satisfy their struct predicates again on return.
+            let mut_params: Vec<Local> = b.params.iter().filter(|(_, m)| *m == Mode::MutRef).map(|(l, _)| *l).collect();
+            b.mut_params = mut_params;
             // Snapshot `old(...)` values for the postconditions.
             for &en in b.ast.expr_lists.get(decl.ensures).to_vec().iter() {
                 b.snapshot_olds(en);
@@ -189,6 +201,9 @@ struct FnBuilder<'l, 'a> {
     ret_ty: Ty,
     olds: FxHashMap<ExprId, Local>,
     ensures: Vec<ExprId>,
+    /// Checked on return: the return type's refinement and `&mut` parameters' predicates.
+    ret_refine: Option<AliasId>,
+    mut_params: Vec<Local>,
     params: Vec<(Local, Mode)>,
     n_captures: usize,
     cur_span: crate::diag::Span,
@@ -223,6 +238,8 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
             ret_ty,
             olds: FxHashMap::default(),
             ensures: Vec::new(),
+            ret_refine: None,
+            mut_params: Vec::new(),
             params: Vec::new(),
             n_captures: 0,
             cur_span: span,
@@ -312,13 +329,26 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
         self.goto(self.exit);
         // Postconditions in the exit block.
         let ensures = std::mem::take(&mut self.ensures);
-        if !ensures.is_empty() {
+        let mut_params = std::mem::take(&mut self.mut_params);
+        let ret_refine = self.ret_refine.take();
+        if !ensures.is_empty() || !mut_params.is_empty() || ret_refine.is_some() {
             let exit = self.exit;
             let body_start = self.new_block();
             self.cur = exit;
             // The exit block checks then returns; re-route: exit -> checks -> return.
             let ret_block = body_start;
             self.blocks[ret_block].term = Terminator::Return;
+            if let Some(al) = ret_refine {
+                self.check_alias(al, Place::local(Local(0)));
+            }
+            for l in mut_params {
+                let t = self.locals[l].ty;
+                if let TyKind::Adt(adt, _) = *self.lw.tys.kind(t) {
+                    if !self.lw.defs.adts[adt].is_enum() {
+                        self.check_struct_predicates(adt, Place::local(l));
+                    }
+                }
+            }
             for en in ensures {
                 self.check(en, CheckKind::Postcondition);
             }
@@ -443,6 +473,7 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
             StmtKind::Let { pat, init, .. } => self.let_pat(pat, init),
             StmtKind::Assign { target, op, value } => {
                 let p = self.place(target);
+                let checked = p.clone();
                 match op {
                     None => self.expr_into(value, p),
                     Some(op) => {
@@ -461,6 +492,9 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                         self.assign(Place::local(t), rv);
                         self.assign(p, Rvalue::Use(Operand::Copy(Place::local(t))));
                     }
+                }
+                if self.lw.mir.opts.check_contracts && !checked.proj.is_empty() {
+                    self.check_mutated(checked);
                 }
             }
             StmtKind::Expr(e) => {
@@ -1240,13 +1274,102 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
         }
     }
 
+    /// After an assignment through a projection, re-check the predicates of every struct on
+    /// the path and the refinement of the assigned field.
+    fn check_mutated(&mut self, p: Place) {
+        let mut t = self.locals[p.local].ty;
+        let mut prefix = Place::local(p.local);
+        let n = p.proj.len();
+        for (k, el) in p.proj.iter().enumerate() {
+            let parent = t;
+            t = match el {
+                PlaceElem::Field(i) => match self.lw.tys.kind(parent).clone() {
+                    TyKind::Adt(adt, args) => {
+                        let ft = self.lw.defs.adts[adt].fields()[*i as usize].ty;
+                        self.lw.tys.subst(ft, &args)
+                    }
+                    TyKind::Tuple(ts) => ts[*i as usize],
+                    _ => return,
+                },
+                PlaceElem::Index(_) => match self.lw.tys.kind(parent) {
+                    TyKind::List(e) => *e,
+                    _ => return,
+                },
+                PlaceElem::VariantField(..) => return,
+            };
+            prefix.proj.push(el.clone());
+            if let (PlaceElem::Field(i), TyKind::Adt(adt, _)) = (el, self.lw.tys.kind(parent).clone()) {
+                if k + 1 == n {
+                    if let Some(al) = self.lw.defs.adts[adt].fields()[*i as usize].refine {
+                        self.check_alias(al, prefix.clone());
+                    }
+                }
+            }
+        }
+        // Struct predicates, innermost first.
+        for k in (0..n).rev() {
+            let q = Place { local: p.local, proj: p.proj[..k].to_vec() };
+            let qt = self.place_ty(&q);
+            if let TyKind::Adt(adt, _) = *self.lw.tys.kind(qt) {
+                if !self.lw.defs.adts[adt].is_enum() {
+                    self.check_struct_predicates(adt, q);
+                }
+            }
+        }
+    }
+
+    fn place_ty(&mut self, p: &Place) -> Ty {
+        let mut t = self.locals[p.local].ty;
+        for el in &p.proj {
+            t = match (el, self.lw.tys.kind(t).clone()) {
+                (PlaceElem::Field(i), TyKind::Adt(adt, args)) => {
+                    let ft = self.lw.defs.adts[adt].fields()[*i as usize].ty;
+                    self.lw.tys.subst(ft, &args)
+                }
+                (PlaceElem::Field(i), TyKind::Tuple(ts)) => ts[*i as usize],
+                (PlaceElem::Index(_), TyKind::List(e)) => e,
+                _ => return self.lw.tys.error,
+            };
+        }
+        t
+    }
+
+    /// Check a refinement alias's predicate (`self` names the value).
+    fn check_alias(&mut self, al: AliasId, value: Place) {
+        let ad = &self.lw.defs.aliases[al];
+        let Some(pred) = ad.refine else { return };
+        let pkg = ad.pkg;
+        let t = self.place_ty(&value);
+        let l = self.temp(t);
+        self.assign(Place::local(l), Rvalue::Use(Operand::Copy(value)));
+        let owner = ad.name;
+        self.in_package(pkg, |b| b.check_with_names(pred, &[(sym::SELF_LOWER, l)], CheckKind::Refinement, owner));
+    }
+
+    /// Run `f` with the AST and tables of another package (for predicates written there).
+    fn in_package(&mut self, pkg: PkgId, f: impl FnOnce(&mut Self)) {
+        let (ast, tables) = (self.ast, self.tables);
+        self.ast = &self.lw.pkgs[pkg].ast;
+        self.tables = &self.lw.tables[pkg];
+        f(self);
+        self.ast = ast;
+        self.tables = tables;
+    }
+
     /// Field refinements and struct invariants at construction.
     fn check_struct_predicates(&mut self, adt: AdtId, value: Place) {
         let ad = &self.lw.defs.adts[adt];
-        if ad.pkg != self.pkg {
-            // Predicates are written in the struct's package; checked when built there.
-            return;
+        let pkg = ad.pkg;
+        let aliases: Vec<(u32, AliasId)> =
+            ad.fields().iter().enumerate().filter_map(|(i, f)| f.refine.map(|al| (i as u32, al))).collect();
+        for (i, al) in aliases {
+            self.check_alias(al, value.field(i));
         }
+        self.in_package(pkg, |b| b.check_struct_predicates_here(adt, value));
+    }
+
+    fn check_struct_predicates_here(&mut self, adt: AdtId, value: Place) {
+        let ad = &self.lw.defs.adts[adt];
         let item = self.ast.items[ad.item];
         let ItemKind::Struct { fields, invariants, .. } = item.kind else { return };
         let fdecls: Vec<ast::FieldDecl> = self.ast.fields.get(fields).to_vec();
@@ -1267,23 +1390,32 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
         preds.extend(invs);
         // The checker resolved these names to its own locals; map by name.
         for pred in preds {
-            self.check_with_names(pred, &bound, CheckKind::Invariant);
+            let owner = self.lw.defs.adts[adt].name;
+            self.check_with_names(pred, &bound, CheckKind::Invariant, owner);
         }
     }
 
     /// Check a predicate whose free names are given by `names` (struct predicates are checked
     /// outside any function body, so their locals are matched by name).
-    fn check_with_names(&mut self, pred: ExprId, names: &[(Symbol, Local)], kind: CheckKind) {
+    /// The check is reported at the current site (construction, assignment, call), naming the
+    /// type whose predicate failed and the values involved.
+    fn check_with_names(&mut self, pred: ExprId, names: &[(Symbol, Local)], kind: CheckKind, owner: Symbol) {
         let text = self.src(pred);
-        let span = self.ast.exprs[pred].span;
+        let span = self.cur_span;
         let c = self.temp(self.lw.tys.bool);
         let ok = self.eval_pred_names(pred, names, Place::local(c));
         if ok {
+            let mut values = Vec::new();
+            for &(n, l) in names {
+                if text.split(|ch: char| !(ch.is_alphanumeric() || ch == '_')).any(|w| w == n.as_str()) {
+                    values.push((n, Operand::local(l), self.locals[l].ty));
+                }
+            }
             self.push(Stmt::Check {
                 cond: Operand::local(c),
                 kind,
-                msg: Symbol::intern(&text),
-                values: Vec::new(),
+                msg: Symbol::intern(&format!("`{owner}` requires {text}")),
+                values,
                 span,
             });
         }

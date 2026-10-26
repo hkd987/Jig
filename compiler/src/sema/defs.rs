@@ -122,6 +122,8 @@ pub struct ParamDef {
     pub ty: Ty,
     pub mode: Mode,
     pub span: Span,
+    /// The refinement alias the parameter's type names (`amt: Cents`), if any.
+    pub refine: Option<AliasId>,
 }
 
 pub struct FnDef {
@@ -139,6 +141,8 @@ pub struct FnDef {
     pub n_recv_generics: usize,
     pub params: Vec<ParamDef>,
     pub ret: Ty,
+    /// The refinement alias the return type names, if any.
+    pub ret_refine: Option<AliasId>,
     pub effects: EffectSet,
     pub is_pub: bool,
     pub has_body: bool,
@@ -177,6 +181,8 @@ pub struct FieldDef {
     pub ty: Ty,
     pub is_pub: bool,
     pub span: Span,
+    /// The refinement alias the field's type names, if any.
+    pub refine: Option<AliasId>,
 }
 
 pub struct VariantDef {

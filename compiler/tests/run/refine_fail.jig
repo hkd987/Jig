@@ -1,0 +1,27 @@
+import "std/io"
+
+// Refinement aliases are checked where values enter them: parameters, returns, fields.
+
+type Cents = Int where self >= 0
+
+struct Acct {
+  name: Str
+  bal: Cents
+}
+
+fn fee(amt: Cents) -> Cents {
+  return amt / 10
+}
+
+fn spend(a: &mut Acct, amt: Int) {
+  a.bal -= amt
+}
+
+fn main() effects {io} {
+  var a = Acct { name: "ann", bal: 50 }
+  io.println(fee(a.bal).str())
+  spend(&mut a, 20)
+  io.println(a.bal.str())
+  spend(&mut a, 40)
+  io.println(a.name + " " + a.bal.str())
+}
