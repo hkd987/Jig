@@ -10,7 +10,9 @@ import "syntax"
 // library's directory, `compiler/std`; `c` prints the C program a release build compiles).
 // `jigc cc DIR STD` prints that program with the runtime inlined: one C file that a C
 // compiler alone builds, which is how `bootstrap/jigc.c` is made. `jigc fmt FILE` prints
-// the file as `jig fmt` writes it.
+// the file as `jig fmt` writes it. `jigc test DIR STD [FILTER]` runs DIR's tests and
+// scenarios on the interpreter and prints the lines of `jig test --json`; `jigc sim DIR STD`
+// runs `main` there with simulated effects.
 
 fn main() effects {io, fs, env} {
   let args = os.args()
@@ -34,6 +36,32 @@ fn main() effects {io, fs, env} {
     }
     return
   }
+  if (args.len() == 4 || args.len() == 5) && args[1] == "test" {
+    let cwd = os.env("PWD").unwrap_or("")
+    match sema.test_json(args[2], args[3], cwd, if args.len() == 5 { args[4] } else { "" }) {
+      Ok((lines, passed)) => {
+        io.print(lines)
+        if !passed {
+          os.exit(1)
+        }
+      }
+      Err(e) => {
+        io.eprintln("error: " + e)
+        os.exit(1)
+      }
+    }
+    return
+  }
+  if args.len() == 4 && args[1] == "sim" {
+    match sema.sim_main(args[2], args[3], os.env("PWD").unwrap_or("")) {
+      Ok(out) => io.print(out)
+      Err(e) => {
+        io.eprintln("error: " + e)
+        os.exit(1)
+      }
+    }
+    return
+  }
   if args.len() == 3 && args[1] == "fmt" {
     let formatted = match fs.read(args[2]) {
       Ok(src) => syntax.format_source(src)
@@ -49,7 +77,9 @@ fn main() effects {io, fs, env} {
     return
   }
   if args.len() < 3 || (args[1] != "tokens" && args[1] != "ast") {
-    io.eprintln("usage: jigc tokens|ast|fmt FILE, jigc check|c|cc DIR STD")
+    io.eprintln(
+      "usage: jigc tokens|ast|fmt FILE, jigc check|c|cc|sim DIR STD, jigc test DIR STD [FILTER]",
+    )
     os.exit(2)
   }
   match fs.read(args[2]) {

@@ -33,9 +33,10 @@ commit gate, a proof-hint skill, spec-first commands and MCP tools. Opt-in, loca
 trace collection.
 
 **Self-hosting.** `jigc`, the compiler written in Jig, checks programs and compiles them to
-C identical to the Rust compiler's, and compiles itself: `bootstrap/jigc.c` builds with any
+C identical to the Rust compiler's, runs tests and scenarios on its own interpreter with
+the same results, and compiles itself: `bootstrap/jigc.c` builds with any
 C compiler and regenerates itself byte for byte.
 
-**Not yet.** `jigc` does not prove or run tests;
+**Not yet.** `jigc` does not prove, and its interpreter cannot call C;
 the `jig` command is still the Rust compiler. Agent benchmark results, contracts on the
 compiler's own passes, and self-hosted speed parity are open (`docs/gates/phase4.md`).

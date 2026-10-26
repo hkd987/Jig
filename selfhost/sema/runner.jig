@@ -1,0 +1,707 @@
+// The test runner, ported from the bootstrap compiler's `runner.rs` and `proptest.rs`: scenarios
+// and tests on the interpreter with faked effects, property tests with generated inputs shrunk
+// to a small counterexample, and `main` with captured output.
+
+import "syntax"
+
+/// A test as a function: its parameters, its `requires` checked, then its body.
+fn Lw.test_fn(&mut self, tid: Int) -> Int {
+  let td = self.s.defs.tests[tid]
+  let item = self.s.pkgs[td.pkg].files[td.file].ast.items[td.item]
+  let (label, pre, body) = match item.kind {
+    Test(l, _, p, b) => (l, p, b)
+    _ => ("", [], 0)
+  }
+  let m = self.mir.fns.len()
+  self.mir.fns.push(
+    MFn {
+      name: "test \"" + label + "\""
+      source: None
+      type_args: []
+      params: []
+      n_captures: 0
+      ret: self.s.tys.unit_ty
+      locals: []
+      blocks: []
+      intrinsic: None
+      span: item.span
+      lowered: false
+    },
+  )
+  self.begin_fn(td.pkg, td.file, self.s.test_bodies[tid].unwrap_or(new_body()), [], m)
+  self.params_from_body([Mode.Value].repeat(td.params.len()))
+  for r in pre {
+    self.check(r, CheckKind.Precondition)
+  }
+  self.lower_body_block(body)
+  self.finish()
+  return m
+}
+
+/// A scenario as a function: build the world, then call each step on it.
+fn Lw.scenario_fn(&mut self, sc: ScenarioDef) -> Int {
+  let unit_ty = self.s.tys.unit_ty
+  var locals = [unit_ty]
+  var stmts: List<SpannedStmt> = []
+  var world: Option<(Int, Int)> = None
+  match sc.world {
+    Some((t, new)) => {
+      let w = locals.len()
+      locals.push(t)
+      let m = self.instance(new, [])
+      stmts.push(
+        SpannedStmt {
+          stmt: Stmt.Assign(place_of(w), Rvalue.Call(Callee.Fn(m), [], t))
+          span: sc.span
+        },
+      )
+      world = Some((w, t))
+    }
+    None => {}
+  }
+  for st in sc.steps {
+    let m = self.instance(st.f, [])
+    let fd = self.s.defs.fns[st.f]
+    var args: List<Arg> = []
+    match world {
+      Some((w, t)) => if !fd.params.is_empty() && fd.params[0].ty == t {
+        args.push(
+          if fd.params[0].mode == Mode.MutRef {
+            Arg.MutRef(place_of(w))
+          } else {
+            Arg.Value(op_local(w))
+          },
+        )
+      }
+      None => {}
+    }
+    for a in st.args {
+      args.push(Arg.Value(Operand.Const(a)))
+    }
+    let tmp = locals.len()
+    locals.push(unit_ty)
+    stmts.push(
+      SpannedStmt {
+        stmt: Stmt.Assign(place_of(tmp), Rvalue.Call(Callee.Fn(m), args, unit_ty))
+        span: st.span
+      },
+    )
+  }
+  let m = self.mir.fns.len()
+  self.mir.fns.push(
+    MFn {
+      name: "scenario \"" + sc.name + "\""
+      source: None
+      type_args: []
+      params: []
+      n_captures: 0
+      ret: unit_ty
+      locals: locals
+      blocks: [Block { stmts: stmts, term: Terminator.Return, term_span: sc.span }]
+      intrinsic: None
+      span: sc.span
+      lowered: true
+    },
+  )
+  return m
+}
+
+// ---------- generated inputs ----------
+
+/// xorshift64*: small, fast and the same everywhere.
+struct Rng {
+  state: U64
+}
+
+fn new_rng(seed: U64) -> Rng {
+  return Rng { state: seed.wrapping_mul(11400714819323198485) | 1 }
+}
+
+fn Rng.next_u64(&mut self) -> U64 {
+  var x = self.state
+  x = x ^ (x >> 12)
+  x = x ^ (x << 25)
+  x = x ^ (x >> 27)
+  self.state = x
+  return x.wrapping_mul(2685821657736338717)
+}
+
+fn Rng.below(&mut self, n: U64) -> U64 {
+  if n == 0 {
+    return 0
+  }
+  return self.next_u64() % n
+}
+
+fn Rng.chance(&mut self, one_in: U64) -> Bool {
+  return self.below(one_in) == 0
+}
+
+fn clamp_int(v: Int, k: IntTy) -> Int {
+  return max(k.min_int(), min(v, k.max_int()))
+}
+
+fn gen_int(r: &mut Rng, k: IntTy, size: U64) -> Value {
+  if r.chance(6) {
+    // Edge values find off-by-one and overflow bugs.
+    let i = r.below(9) as Int
+    if k == IntTy.U64 {
+      let edges: List<U64> = [0, 1, 0, 0, 18446744073709551615, 1, 18446744073709551614, 2, 0]
+      return Value.UInt(edges[i])
+    }
+    let lo = k.min_int()
+    let hi = k.max_int()
+    let edges = [0, 1, -1, lo, hi, lo + 1, hi - 1, 2, -2]
+    return Value.Int(clamp_int(edges[i], k))
+  }
+  let span: U64 = if r.chance(10) { 2147483648 } else { if size > 1 { size } else { 1 } }
+  let mag = r.below(span + 1)
+  if k == IntTy.U64 {
+    return Value.UInt(mag)
+  }
+  let v = if k.signed() && r.chance(2) { 0 - mag as Int } else { mag as Int }
+  return Value.Int(clamp_int(v, k))
+}
+
+fn gen_char(r: &mut Rng) -> Int {
+  return match r.below(10) {
+    0 => 32
+    1 => 48 + r.below(10) as Int
+    2 => [233, 223, 20013, 8594][r.below(4) as Int]
+    3 => 65 + r.below(26) as Int
+    _ => 97 + r.below(26) as Int
+  }
+}
+
+/// A value of type `t`, or `None` for types inputs cannot be generated for (maps, functions).
+fn Interp.generate(&mut self, t: Int, r: &mut Rng, size: U64, depth: Int) -> Option<Value> {
+  match self.lw.s.tys.kinds[t] {
+    Int(k, _) => {
+      return Some(gen_int(&mut r, k, size))
+    }
+    Float(_) => {
+      if r.chance(8) {
+        return Some(Value.Float(0.0))
+      }
+      return Some(Value.Float((r.below(2 * size + 1) as Float - size as Float) / 4.0))
+    }
+    Bool => {
+      return Some(Value.Bool(r.chance(2)))
+    }
+    Char => {
+      return Some(Value.Char(gen_char(&mut r)))
+    }
+    Str => {
+      let n = r.below(min(size as Int, 12) as U64 + 1)
+      var cs: List<Char> = []
+      for _ in 0..n as Int {
+        cs.push(gen_char(&mut r) as Char)
+      }
+      return Some(Value.Str(Str.from_chars(cs)))
+    }
+    Tuple(ts) => {
+      if ts.is_empty() {
+        return Some(Value.Unit)
+      }
+      var xs: List<Value> = []
+      for x in ts {
+        xs.push(self.generate(x, &mut r, size, depth + 1)?)
+      }
+      return Some(Value.Tuple(xs))
+    }
+    List(e) => {
+      let n = if depth > 2 { r.below(3) } else { r.below(min(size as Int, 8) as U64 + 1) }
+      var xs: List<Value> = []
+      for _ in 0..n as Int {
+        xs.push(self.generate(e, &mut r, size, depth + 1)?)
+      }
+      return Some(Value.List(xs))
+    }
+    Adt(a, args) => {
+      let ad = self.lw.s.defs.adts[a]
+      if ad.is_enum {
+        // Deep in recursive types, prefer variants without payloads so values stay finite.
+        var leafy: List<Int> = []
+        for i in 0..ad.variants.len() {
+          if ad.variants[i].fields.is_empty() {
+            leafy.push(i)
+          }
+        }
+        let vi = if depth > 3 && !leafy.is_empty() {
+          leafy[r.below(leafy.len() as U64) as Int]
+        } else {
+          r.below(ad.variants.len() as U64) as Int
+        }
+        var fields: List<Value> = []
+        for f in ad.variants[vi].fields {
+          let ft = self.lw.s.tys.subst(f.ty, args)
+          fields.push(self.generate(ft, &mut r, size, depth + 1)?)
+        }
+        return Some(Value.Variant(vi, fields))
+      }
+      var xs: List<Value> = []
+      for f in ad.fields {
+        let ft = self.lw.s.tys.subst(f.ty, args)
+        xs.push(self.generate(ft, &mut r, size, depth + 1)?)
+      }
+      return Some(Value.Tuple(xs))
+    }
+    _ => {
+      return None
+    }
+  }
+}
+
+/// Simpler candidates for a failing value, simplest first.
+fn Interp.shrink(&mut self, t: Int, v: Value) -> List<Value> {
+  var out: List<Value> = []
+  match (self.lw.s.tys.kinds[t], v) {
+    (Int(_, _), UInt(u)) => if u != 0 {
+      for c in [0, u / 2, u - 1] {
+        var seen = c == u
+        for o in out {
+          seen = seen || val_eq(o, Value.UInt(c))
+        }
+        if !seen {
+          out.push(Value.UInt(c))
+        }
+      }
+    }
+    (Int(_, _), Int(x)) => if x != 0 {
+      for c in [0, x / 2, x - (if x > 0 { 1 } else { -1 })] {
+        var seen = c == x
+        for o in out {
+          seen = seen || val_eq(o, Value.Int(c))
+        }
+        if !seen {
+          out.push(Value.Int(c))
+        }
+      }
+    }
+    (Float(_), Float(f)) => if f != 0.0 {
+      out.push(Value.Float(0.0))
+      if f - trunc(f) != 0.0 {
+        out.push(Value.Float(trunc(f)))
+      }
+      out.push(Value.Float(f / 2.0))
+    }
+    (Bool, Bool(b)) => if b { out.push(Value.Bool(false)) }
+    (Char, Char(c)) => if c != 97 { out.push(Value.Char(97)) }
+    (Str, Str(s)) => if !s.is_empty() {
+      out.push(Value.Str(""))
+      let cs = s.chars()
+      out.push(Value.Str(Str.from_chars(cs[1..cs.len()])))
+      out.push(Value.Str(Str.from_chars(cs[0..cs.len() - 1])))
+    }
+    (List(e), List(xs)) => if !xs.is_empty() {
+      out.push(Value.List([]))
+      for i in 0..min(xs.len(), 8) {
+        var ys = xs
+        let _ = ys.remove(i)
+        out.push(Value.List(ys))
+      }
+      for i in 0..min(xs.len(), 4) {
+        for c in self.shrink(e, xs[i]) {
+          var ys = xs
+          ys[i] = c
+          out.push(Value.List(ys))
+        }
+      }
+    }
+    (Tuple(ts), Tuple(xs)) => {
+      for i in 0..ts.len() {
+        for c in self.shrink(ts[i], xs[i]) {
+          var ys = xs
+          ys[i] = c
+          out.push(Value.Tuple(ys))
+        }
+      }
+    }
+    (Adt(a, args), Tuple(xs)) => if !self.lw.s.defs.adts[a].is_enum {
+      let fs = self.lw.s.defs.adts[a].fields
+      for i in 0..fs.len() {
+        let ft = self.lw.s.tys.subst(fs[i].ty, args)
+        for c in self.shrink(ft, xs[i]) {
+          var ys = xs
+          ys[i] = c
+          out.push(Value.Tuple(ys))
+        }
+      }
+    }
+    (Adt(a, args), Variant(vi, xs)) => {
+      let fs = self.lw.s.defs.adts[a].variants[vi].fields
+      for i in 0..fs.len() {
+        let ft = self.lw.s.tys.subst(fs[i].ty, args)
+        for c in self.shrink(ft, xs[i]) {
+          var ys = xs
+          ys[i] = c
+          out.push(Value.Variant(vi, ys))
+        }
+      }
+    }
+    _ => {}
+  }
+  return out
+}
+
+// ---------- running tests ----------
+
+struct TestResult {
+  name: Str
+  pkg: Str
+  passed: Bool
+  message: Str
+  location: Str
+  stdout: Str
+  backtrace: List<Str>
+}
+
+enum Case {
+  Pass(stdout: Str)
+  /// A property test's own `requires` rejected the inputs.
+  Discard(stdout: Str)
+  Fail(message: Str, span: Option<syntax.Span>, backtrace: List<Str>, stdout: Str)
+}
+
+fn Interp.span_location(self, span: Option<syntax.Span>) -> Str {
+  return match span {
+    Some(s) => self.location(s.lo)
+    None => ""
+  }
+}
+
+fn Interp.result(self, name: Str, pkg: Str, c: Case) -> TestResult {
+  return match c {
+    Pass(out) | Discard(out) => TestResult {
+      name: name
+      pkg: pkg
+      passed: true
+      message: ""
+      location: ""
+      stdout: out
+      backtrace: []
+    }
+    Fail(msg, span, bt, out) => TestResult {
+      name: name
+      pkg: pkg
+      passed: false
+      message: msg
+      location: self.span_location(span)
+      stdout: out
+      backtrace: bt
+    }
+  }
+}
+
+/// Every scenario, then every test of the packages being tested, whose name contains `filter`.
+fn run_tests(lw: Lw, cwd: Str, filter: Str) -> List<TestResult> {
+  var it = new_interp(lw, fake_effects(1), cwd)
+  var out: List<TestResult> = []
+  var scenarios: List<ScenarioDef> = []
+  for sc in it.lw.s.scenarios {
+    if sc.name.contains(filter) {
+      scenarios.push(sc)
+    }
+  }
+  for i in 0..scenarios.len() {
+    let sc = scenarios[i]
+    let m = it.lw.scenario_fn(sc)
+    let name = "Scenario: " + sc.name
+    let pkg = it.lw.s.pkgs[sc.pkg].path
+    var r = it.run_case(m, [], (23783 ^ i) as U64, [])
+    match r {
+      Fail(msg, span, bt, stdout) => {
+        // Name the step that failed: the scenario's frame points at its line.
+        for st in sc.steps {
+          let loc = " at " + it.location(st.span.lo)
+          var hit = false
+          for b in bt {
+            hit = hit || b.ends_with(loc)
+          }
+          if hit {
+            r = Case.Fail(
+              msg + "\n  in step: " + st.text + " (" + it.location(st.span.lo) + ")",
+              span,
+              bt,
+              stdout,
+            )
+            break
+          }
+        }
+      }
+      _ => {}
+    }
+    out.push(it.result(name, pkg, r))
+  }
+  var ids: List<Int> = []
+  for tid in 0..it.lw.s.defs.tests.len() {
+    let td = it.lw.s.defs.tests[tid]
+    if it.lw.s.pkgs[td.pkg].is_std || it.lw.s.pkgs[td.pkg].external {
+      continue
+    }
+    if test_label(it.lw.s, tid).contains(filter) {
+      ids.push(tid)
+    }
+  }
+  for i in 0..ids.len() {
+    let tid = ids[i]
+    let m = it.lw.test_fn(tid)
+    let seed = (2654435769 ^ (i + 1)) as U64
+    let td = it.lw.s.defs.tests[tid]
+    let c = if td.params.is_empty() {
+      it.run_case(m, [], seed, [])
+    } else {
+      it.run_property(tid, m, seed)
+    }
+    out.push(it.result(test_label(it.lw.s, tid), it.lw.s.pkgs[td.pkg].path, c))
+  }
+  return out
+}
+
+fn test_label(s: Sema, tid: Int) -> Str {
+  let td = s.defs.tests[tid]
+  return match s.pkgs[td.pkg].files[td.file].ast.items[td.item].kind {
+    Test(l, _, _, _) => l
+    _ => ""
+  }
+}
+
+fn same_span(a: syntax.Span, b: syntax.Span) -> Bool {
+  return a.lo == b.lo && a.hi == b.hi
+}
+
+/// Run one case; a failed check whose span is one of `discard` (the test's own `requires`)
+/// discards the case instead of failing it.
+fn Interp.run_case(
+  &mut self,
+  m: Int,
+  args: List<Value>,
+  seed: U64,
+  discard: List<syntax.Span>,
+) -> Case {
+  self.fx = fake_effects(seed)
+  self.stack = []
+  self.fuel = 200000000
+  let r = self.call(m, args)
+  let stdout = self.fx.stdout
+  match r {
+    Ok(_) => {
+      return Case.Pass(stdout)
+    }
+    Err(t) => match t {
+      Exit(c) => {
+        if c == 0 {
+          return Case.Pass(stdout)
+        }
+        return Case.Fail("exited with code " + c.str(), None, [], stdout)
+      }
+      Panic(msg, span, bt) => {
+        for d in discard {
+          if same_span(d, span) {
+            return Case.Discard(stdout)
+          }
+        }
+        return Case.Fail(msg, Some(span), bt, stdout)
+      }
+    }
+  }
+}
+
+const PROPERTY_CASES: Int = 100
+
+/// A property test: generated inputs, discarded when they fail the test's `requires`, and
+/// shrunk to a small counterexample when a case fails.
+fn Interp.run_property(&mut self, tid: Int, m: Int, seed: U64) -> Case {
+  let td = self.lw.s.defs.tests[tid]
+  let ast = self.lw.s.pkgs[td.pkg].files[td.file].ast
+  var discard: List<syntax.Span> = []
+  match ast.items[td.item].kind {
+    Test(_, _, pre, _) => {
+      for e in pre {
+        discard.push(ast.exprs[e].span)
+      }
+    }
+    _ => {}
+  }
+  var params: List<Int> = []
+  var names: List<Str> = []
+  for p in td.params {
+    params.push(p.ty)
+    names.push(p.name)
+  }
+  var rng = new_rng(seed)
+  var ran = 0
+  var discarded = 0
+  var last_stdout = ""
+  for ran < PROPERTY_CASES && discarded < PROPERTY_CASES * 20 {
+    let size = (2 + ran * 10) as U64
+    var args: List<Value> = []
+    for t in params {
+      match self.generate(t, &mut rng, size, 0) {
+        Some(v) => args.push(v)
+        None => {
+          let ty = self.lw.s.tys.display(t)
+          return Case.Fail(
+            "cannot generate inputs of type `" + ty + "` for a property test",
+            None,
+            [],
+            "",
+          )
+        }
+      }
+    }
+    match self.run_case(m, args, seed ^ ran as U64, discard) {
+      Pass(out) => {
+        ran += 1
+        last_stdout = out
+      }
+      Discard(_) => discarded += 1
+      Fail(_, _, _, _) => {
+        return self.shrink_failure(m, params, names, args, seed, discard)
+      }
+    }
+  }
+  if ran == 0 {
+    return Case.Fail(
+      "no generated input satisfied the test's `requires` (" + discarded.str() + " tried)",
+      None,
+      [],
+      "",
+    )
+  }
+  return Case.Pass(last_stdout)
+}
+
+fn is_fail(c: Case) -> Bool {
+  return match c {
+    Fail(_, _, _, _) => true
+    _ => false
+  }
+}
+
+fn Interp.shrink_failure(
+  &mut self,
+  m: Int,
+  params: List<Int>,
+  names: List<Str>,
+  first: List<Value>,
+  seed: U64,
+  discard: List<syntax.Span>,
+) -> Case {
+  var args = first
+  var fail = self.run_case(m, args, seed, discard)
+  var budget = 500
+  var progress = true
+  for progress && budget > 0 {
+    progress = false
+    var i = 0
+    for !progress && budget > 0 && i < args.len() {
+      let cands = self.shrink(params[i], args[i])
+      var j = 0
+      for !progress && j < cands.len() {
+        budget -= 1
+        if budget == 0 {
+          break
+        }
+        var trial = args
+        trial[i] = cands[j]
+        let r = self.run_case(m, trial, seed, discard)
+        if is_fail(r) {
+          args = trial
+          fail = r
+          progress = true
+        }
+        j += 1
+      }
+      i += 1
+    }
+  }
+  self.fx = fake_effects(seed)
+  self.stack = []
+  var shown: List<Str> = []
+  for i in 0..args.len() {
+    let s = match self.show(args[i], params[i], true) {
+      Ok(t) => t
+      Err(_) => "?"
+    }
+    shown.push(names[i] + " = " + s)
+  }
+  return match fail {
+    Fail(msg, span, bt, out) => Case.Fail(
+      msg + "\n  with inputs: " + shown.join(", "),
+      span,
+      bt,
+      out,
+    )
+    other => other
+  }
+}
+
+// ---------- output ----------
+
+fn json_str(s: Str) -> Str {
+  var out = "\""
+  for c in s.chars() {
+    let v = c as Int
+    if c == '"' {
+      out += "\\\""
+    } else if c == '\\' {
+      out += "\\\\"
+    } else if c == '\n' {
+      out += "\\n"
+    } else if c == '\r' {
+      out += "\\r"
+    } else if c == '\t' {
+      out += "\\t"
+    } else if v < 32 {
+      let hex = "0123456789abcdef"
+      out += "\\u00" + hex[v / 16..v / 16 + 1] + hex[v % 16..v % 16 + 1]
+    } else {
+      out += Str.from_chars([c])
+    }
+  }
+  return out + "\""
+}
+
+/// A result as one line of `jig test --json`.
+fn test_result_json(r: TestResult) -> Str {
+  var j = "{\"kind\":\"test\",\"name\":" + json_str(r.name) + ",\"package\":" + json_str(r.pkg)
+  j += ",\"passed\":" + (if r.passed { "true" } else { "false" })
+  if !r.passed {
+    j += ",\"message\":" + json_str(r.message) + ",\"location\":" + json_str(r.location)
+    if !r.backtrace.is_empty() {
+      var parts: List<Str> = []
+      for b in r.backtrace {
+        parts.push(json_str(b))
+      }
+      j += ",\"backtrace\":[" + parts.join(",") + "]"
+    }
+  }
+  if !r.stdout.is_empty() {
+    j += ",\"stdout\":" + json_str(r.stdout)
+  }
+  return j + "}"
+}
+
+/// `main` on the interpreter with faked effects, as the run tests do: its output, then how it
+/// ended unless it returned.
+fn run_main_sim(lw: Lw, cwd: Str) -> Result<Str, Str> {
+  let main = match lw.s.defs.main {
+    Some(f) => f
+    None => {
+      return Err("this package has no `main` function")
+    }
+  }
+  var it = new_interp(lw, fake_effects(42), cwd)
+  let m = it.lw.instance(main, [])
+  let r = it.call(m, [])
+  var out = it.fx.stdout
+  match r {
+    Ok(_) => {}
+    Err(t) => match t {
+      Exit(c) => out += "<exit " + c.str() + ">\n"
+      Panic(msg, _, _) => out += "<panic: " + msg + ">\n"
+    }
+  }
+  return Ok(out)
+}

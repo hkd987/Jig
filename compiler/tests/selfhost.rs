@@ -945,3 +945,145 @@ fn jigc_formatter_matches_bootstrap() {
     }
     assert!(failures.is_empty(), "{} cases differ:\n{}", failures.len(), failures.join("\n"));
 }
+
+/// Run a command, giving up after `secs` seconds: its success and output, or `None`.
+fn output_within(cmd: &mut Command, secs: u64) -> Option<(bool, String)> {
+    let mut child = cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut stdout, &mut s);
+        s
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return Some((status.success(), reader.join().unwrap()));
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// `jigc test DIR` against `jig test --json DIR`, both run from the repository root. A package
+/// whose tests the bootstrap does not finish quickly (a mutation that loops) is skipped.
+fn compare_tests(exe: &Path, std_dir: &Path, dir: &Path) -> Option<String> {
+    let root = std::fs::canonicalize(repo_root()).unwrap();
+    let jig = env!("CARGO_BIN_EXE_jig");
+    let (_, expected) = output_within(Command::new(jig).args(["test", "--json"]).arg(dir).current_dir(&root), 20)?;
+    let out =
+        output_within(Command::new(exe).arg("test").arg(dir).arg(std_dir).current_dir(&root).env("PWD", &root), 120);
+    let actual = match out {
+        Some((_, a)) => a,
+        None => return Some(format!("{}: jigc test timed out", dir.display())),
+    };
+    if actual == expected {
+        return None;
+    }
+    let (e, a): (Vec<&str>, Vec<&str>) = (expected.lines().collect(), actual.lines().collect());
+    let first = e.iter().zip(&a).position(|(x, y)| x != y).unwrap_or(e.len().min(a.len()));
+    Some(format!(
+        "{}: line {} differs (bootstrap {:?}, jigc {:?})",
+        dir.display(),
+        first + 1,
+        e.get(first),
+        a.get(first)
+    ))
+}
+
+/// Whether a package calls C (which jigc's test runner cannot do yet).
+fn calls_c(dir: &Path) -> bool {
+    let mut files = Vec::new();
+    jig_files(dir, &mut files);
+    files.iter().any(|f| std::fs::read_to_string(f).unwrap_or_default().contains("ffi}"))
+}
+
+/// jigc's interpreter and test runner agree with the bootstrap's: `jigc test` prints what
+/// `jig test --json` prints (results, failure messages, locations, backtraces and captured
+/// output) for every package with tests or scenarios, every run test turned into a test of its
+/// `main`, and mutated copies of them (code, `.feature` files and step patterns); and
+/// `jigc sim` gives every run test's expected output.
+#[test]
+fn jigc_tests_match_bootstrap() {
+    if !have_cc() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    let root = repo_root();
+    let exe = jigc();
+    let std_dir = std::fs::canonicalize(root.join("compiler/std")).unwrap();
+    let work = std::fs::canonicalize(PathBuf::from(env!("CARGO_TARGET_TMPDIR"))).unwrap().join("selfhost-tests");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    let mut failures: Vec<String> = Vec::new();
+    let mut cases: Vec<PathBuf> = Vec::new();
+    let mut entries: Vec<PathBuf> =
+        std::fs::read_dir(root.join("compiler/tests/run")).unwrap().map(|e| e.unwrap().path()).collect();
+    entries.sort();
+    for p in entries.iter().filter(|p| p.extension().is_some_and(|x| x == "jig")) {
+        let name = p.file_stem().unwrap().to_string_lossy().to_string();
+        let src = std::fs::read_to_string(p).unwrap();
+        if src.contains("ffi}") {
+            continue;
+        }
+        let d = work.join(format!("run-{name}"));
+        write_file(&d.join("main.jig"), &src);
+        let expected = std::fs::read_to_string(p.with_extension("out")).unwrap_or_default();
+        let out = Command::new(exe).arg("sim").arg(&d).arg(&std_dir).output().unwrap();
+        if String::from_utf8_lossy(&out.stdout) != expected {
+            failures.push(format!("jigc sim {name}: {:?}", String::from_utf8_lossy(&out.stdout)));
+        }
+        write_file(&d.join("main.jig"), &format!("{src}\ntest \"main runs\" {{\n  main()\n}}\n"));
+        cases.push(d);
+    }
+    let mut entries: Vec<PathBuf> =
+        std::fs::read_dir(root.join("examples")).unwrap().map(|e| e.unwrap().path()).collect();
+    entries.sort();
+    cases.extend(entries.into_iter().filter(|p| p.is_dir() && !calls_c(p)));
+    cases.push(root.join("compiler/tests/props"));
+    cases.push(root.join("selfhost"));
+    let originals = cases.len();
+    for d in &cases {
+        failures.extend(compare_tests(exe, &std_dir, d));
+    }
+    // Mutations that still check: tests that fail in new places and ways.
+    let mut rng = Rng(0x5851_f42d_4c95_7f2d);
+    let mut compared = 0;
+    for k in 0..600 {
+        if compared == 150 {
+            break;
+        }
+        let proj = &cases[rng.below(originals - 1)];
+        let copy = work.join(format!("mut{k}"));
+        copy_dir(proj, &copy);
+        let mut files = Vec::new();
+        jig_files(&copy, &mut files);
+        let features: Vec<PathBuf> = std::fs::read_dir(&copy)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "feature"))
+            .collect();
+        for _ in 0..1 + rng.below(2) {
+            if !features.is_empty() && rng.below(2) == 0 {
+                let f = &features[rng.below(features.len())];
+                let src = std::fs::read_to_string(f).unwrap();
+                std::fs::write(f, mutate_feature(&src, &mut rng)).unwrap();
+            } else {
+                let f = &files[rng.below(files.len())];
+                let src = std::fs::read_to_string(f).unwrap();
+                std::fs::write(f, mutate(&src, &mut rng)).unwrap();
+            }
+        }
+        if jig::sema::analyze(&Sources::Disk, &copy).diags.has_errors() {
+            continue;
+        }
+        compared += 1;
+        failures.extend(compare_tests(exe, &std_dir, &copy).map(|m| format!("mutation {k}: {m}")));
+    }
+    assert!(compared >= 80, "only {compared} mutations checked");
+    assert!(failures.is_empty(), "{} cases differ:\n{}", failures.len(), failures.join("\n"));
+}

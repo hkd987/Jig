@@ -221,3 +221,39 @@ pub fn c_unit(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs,
   let program = c.replace(include, header) + "\n" + runtime.replace(include, "")
   return Ok("#define _GNU_SOURCE\n#define JIG_POOL 1\n" + program)
 }
+
+/// `jigc test DIR STD [FILTER]`: run the tests and scenarios of DIR on the interpreter, printing
+/// the same lines as `jig test --json`. Locations name files relative to `cwd`.
+pub fn test_json(dir: Str, std_dir: Str, cwd: Str, filter: Str) -> Result<(Str, Bool), Str>
+  effects {fs, env}
+{
+  let (s, _) = analyze(dir, std_dir)
+  if !s.diags.is_empty() {
+    return Err(dir + " has errors")
+  }
+  let results = run_tests(new_lw(s), cwd, filter)
+  var out = ""
+  var failed = 0
+  for r in results {
+    out += test_result_json(r) + "\n"
+    if !r.passed {
+      failed += 1
+    }
+  }
+  out += "{\"kind\":\"summary\",\"passed\":" +
+    (results.len() - failed).str() +
+    ",\"failed\":" +
+    failed.str() +
+    "}\n"
+  return Ok((out, failed == 0))
+}
+
+/// `jigc sim DIR STD`: run `main` of DIR on the interpreter with simulated effects, printing
+/// its output and then `<exit N>` or `<panic: MESSAGE>` if it did not return.
+pub fn sim_main(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs, env} {
+  let (s, _) = analyze(dir, std_dir)
+  if !s.diags.is_empty() {
+    return Err(dir + " has errors")
+  }
+  return run_main_sim(new_lw(s), cwd)
+}

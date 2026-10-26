@@ -90,7 +90,7 @@ Release notes are in [`CHANGELOG.md`](../../CHANGELOG.md).
 ## Open
 
 - `jigc`: the prover (Z3 through
-  the `ffi` effect), the test runner and the interpreter. Until `jigc` passes every test
+  the `ffi` effect), and C calls from its interpreter (its test runner is done). Until `jigc` passes every test
   suite the Rust compiler stays the `jig` command (D6).
 - Self-hosted speed: identifiers interned instead of sliced, and wall time (memory).
 - Contracts on the compiler's passes.

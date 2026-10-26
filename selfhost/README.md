@@ -15,7 +15,8 @@ bootstrap compiler on every `.jig` file in the repository plus a few hundred mut
 | Checker: loading, collection, types, effects, exhaustiveness, lints, dead code, feature binding | `compiler/src/sema/`, `compiler/src/feature/` | `sema/` | `jigc check DIR STD` = `jig debug check DIR` |
 | MIR lowering, ownership analyses, C back end | `compiler/src/mir/lower.rs`, `compiler/src/codegen/` | `sema/mir.jig`, `sema/lower*.jig`, `sema/own.jig`, `sema/cgen*.jig` | `jigc c DIR STD` = `jig debug c DIR` |
 | Formatter | `compiler/src/fmt/` | `syntax/fmt.jig`, `syntax/fmt_expr.jig` | `jigc fmt FILE` = `jig fmt FILE` |
-| Prover, test runner, interpreter | | not yet | |
+| Interpreter, test runner, property tests | `compiler/src/mir/interp.rs`, `compiler/src/runner.rs`, `compiler/src/proptest.rs` | `sema/interp.jig`, `sema/intrinsics.jig`, `sema/runner.jig` | `jigc test DIR STD` = `jig test --json DIR` |
+| Prover | `compiler/src/verify/` | not yet | |
 
 `jigc` compiles itself: `jigc cc selfhost compiler/std` prints a self-contained C file that a
 C compiler builds into a `jigc` printing the same file again. That file is checked in as
@@ -51,6 +52,15 @@ it fits in 100 columns and broken otherwise. The test formats every `.jig` file 
 repository and 600 copies with their layout mutated (indentation stripped, lines joined
 and split, names lengthened past the width, comments and blank lines inserted, spacing
 changed); `jigc fmt` must write exactly what `jig fmt` writes, or refuse the same files.
+
+The interpreter (`sema/interp.jig`, `sema/intrinsics.jig`) runs the same MIR with the same
+faked effects (captured console, in-memory files, a deterministic clock, random numbers and
+network), checks and messages, and the runner (`sema/runner.jig`) runs scenarios, tests and
+property tests with the same seeds, generated inputs and shrinking. The test compares
+`jigc test` with `jig test --json` (results, messages, locations, backtraces, captured
+output) on every package with tests, every run test called from a test, and 150 mutated
+copies that still check, about a third of them with failing tests; `jigc sim` must print
+every run test's expected output. Calling C from the interpreter is not ported yet.
 
 The back end (about 6,600 lines of Jig for 7,300 of Rust) lowers to the same MIR, runs the
 same ownership analyses (borrowed locals, last uses, unique lists) and prints the same C:

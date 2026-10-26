@@ -9,8 +9,27 @@ struct StepLine {
   /// `Given`, `When`, `Then`, `And` or `But`.
   keyword: Str
   text: Str
-  /// The text after the keyword.
+  /// The whole line, and the text after the keyword.
+  span: syntax.Span
   text_span: syntax.Span
+}
+
+/// A scenario bound to its steps: what the test runner runs.
+struct ScenarioDef {
+  pkg: Int
+  name: Str
+  span: syntax.Span
+  /// The world's type and its `new` function, when any step takes one.
+  world: Option<(Int, Int)>
+  steps: List<StepCall>
+}
+
+struct StepCall {
+  f: Int
+  /// The placeholders' values.
+  args: List<Const>
+  span: syntax.Span
+  text: Str
 }
 
 struct ScenarioAst {
@@ -266,6 +285,7 @@ fn parse_feature(src: Str, base: Int) -> (Bool, List<ScenarioAst>, List<syntax.D
             StepLine {
               keyword: kw
               text: text
+              span: span
               text_span: syntax.Span { lo: text_lo, hi: text_lo + text.len() }
             },
           )
@@ -600,11 +620,11 @@ fn Sema.convert_error(self, text: Str, t: Int) -> Str {
 }
 
 /// A scenario's runs: one, or one per `Examples` row with `<column>` substituted.
-fn expand(sc: ScenarioAst) -> List<List<StepLine>> {
+fn expand(sc: ScenarioAst) -> List<(Str, List<StepLine>)> {
   if !sc.outline {
-    return [sc.steps]
+    return [(sc.name, sc.steps)]
   }
-  var out: List<List<StepLine>> = []
+  var out: List<(Str, List<StepLine>)> = []
   for cells in sc.rows {
     var lines: List<StepLine> = []
     for s in sc.steps {
@@ -612,9 +632,9 @@ fn expand(sc: ScenarioAst) -> List<List<StepLine>> {
       for i in 0..min(sc.header.len(), cells.len()) {
         text = text.replace("<" + sc.header[i] + ">", cells[i])
       }
-      lines.push(StepLine { keyword: s.keyword, text: text, text_span: s.text_span })
+      lines.push(StepLine { keyword: s.keyword, text: text, span: s.span, text_span: s.text_span })
     }
-    out.push(lines)
+    out.push((sc.name + " [" + cells.join(", ") + "]", lines))
   }
   return out
 }
@@ -632,8 +652,8 @@ fn Sema.bind_features(&mut self) {
       self.diags.extend(ds)
       if feature {
         for sc in scenarios {
-          for lines in expand(sc) {
-            self.bind_scenario(sc.span, lines, steps)
+          for (name, lines) in expand(sc) {
+            self.bind_scenario(p, name, sc.span, lines, steps)
           }
         }
       }
@@ -751,8 +771,15 @@ fn Sema.step_defs(&mut self, p: Int) -> List<StepDef> {
   return out
 }
 
-fn Sema.bind_scenario(&mut self, span: syntax.Span, lines: List<StepLine>, steps: List<StepDef>) {
-  var calls: List<Int> = []
+fn Sema.bind_scenario(
+  &mut self,
+  pkg: Int,
+  name: Str,
+  span: syntax.Span,
+  lines: List<StepLine>,
+  steps: List<StepDef>,
+) {
+  var calls: List<StepCall> = []
   var world: Option<Int> = None
   var ok = true
   for line in lines {
@@ -777,6 +804,7 @@ fn Sema.bind_scenario(&mut self, span: syntax.Span, lines: List<StepLine>, steps
     }
     let (s, caps) = matched[0]
     let holes = holes_of(s.pieces)
+    var args: List<Const> = []
     for (pn, pt) in s.params {
       var text = ""
       var found = false
@@ -787,7 +815,9 @@ fn Sema.bind_scenario(&mut self, span: syntax.Span, lines: List<StepLine>, steps
         }
       }
       let e = self.convert_error(text, pt)
-      if !e.is_empty() {
+      if e.is_empty() {
+        args.push(self.step_arg(text, pt))
+      } else {
         self.diags.push(
           diag(
             "E0804",
@@ -818,7 +848,9 @@ fn Sema.bind_scenario(&mut self, span: syntax.Span, lines: List<StepLine>, steps
       }
       None => {}
     }
-    calls.push(s.f)
+    calls.push(
+      StepCall { f: s.f, args: args, span: line.span, text: line.keyword + " " + line.text },
+    )
   }
   var new_fn: Option<Int> = None
   match world {
@@ -849,13 +881,59 @@ fn Sema.bind_scenario(&mut self, span: syntax.Span, lines: List<StepLine>, steps
     None => {}
   }
   if ok {
-    for f in calls {
-      self.scenario_steps.insert(f)
-      self.scenario_roots.push(f)
+    for c in calls {
+      self.scenario_steps.insert(c.f)
+      self.scenario_roots.push(c.f)
     }
-    match new_fn {
-      Some(f) => self.scenario_roots.push(f)
-      None => {}
+    let w = match (world, new_fn) {
+      (Some(t), Some(f)) => {
+        self.scenario_roots.push(f)
+        Some((t, f))
+      }
+      _ => None
+    }
+    self.scenarios.push(ScenarioDef { pkg: pkg, name: name, span: span, world: w, steps: calls })
+  }
+}
+
+/// A placeholder's text (which `convert_error` accepted) as a value of type `t`.
+fn Sema.step_arg(self, text: Str, t: Int) -> Const {
+  match self.tys.kinds[t] {
+    Str => {
+      return Const.Str(unquote(text))
+    }
+    Int(k, _) => {
+      let (neg, digits) = parse_int_text(text.replace("_", "")).unwrap_or((false, "0"))
+      var mag: U64 = 0
+      for b in digits.bytes() {
+        mag = mag * 10 + (b - 48) as U64
+      }
+      return Const.Int(neg, mag, k)
+    }
+    Float(_) => {
+      return Const.Float(text.to_float().unwrap_or(0.0))
+    }
+    _ => {
+      return Const.Bool(text == "true")
     }
   }
+}
+
+/// A quoted placeholder's text: `\n` and `\t` are escapes, `\` keeps the next character.
+fn unquote(s: Str) -> Str {
+  var out: List<Char> = []
+  var esc = false
+  let cs = s.chars()
+  for i in 1..cs.len() - 1 {
+    let c = cs[i]
+    if esc {
+      out.push(if c == 'n' { '\n' } else if c == 't' { '\t' } else { c })
+      esc = false
+    } else if c == '\\' {
+      esc = true
+    } else {
+      out.push(c)
+    }
+  }
+  return Str.from_chars(out)
 }

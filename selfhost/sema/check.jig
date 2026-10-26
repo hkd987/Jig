@@ -66,6 +66,7 @@ struct Sema {
   /// (roots of the dead-code check).
   scenario_steps: Set<Int>
   scenario_roots: List<Int>
+  scenarios: List<ScenarioDef>
   // ---- the item being checked ----
   pkg: Int
   file: Int
@@ -140,6 +141,7 @@ fn new_sema(ld: Loaded) -> Sema {
     imports_used: []
     scenario_steps: Set.new()
     scenario_roots: []
+    scenarios: []
     pkg: 0
     file: 0
     ast: empty_ast()

@@ -1,0 +1,1030 @@
+// The interpreter's built-in operations, ported from `Interp::intrinsic` in the bootstrap
+// compiler's `mir/interp.rs`. Strings, characters and numbers go through the language's own
+// operations, which native builds share.
+
+import "std/math"
+import "syntax"
+
+fn some_v(v: Value) -> Value {
+  return Value.Variant(0, [v])
+}
+
+fn none_v() -> Value {
+  return Value.Variant(1, [])
+}
+
+fn ok_v(v: Value) -> Value {
+  return Value.Variant(0, [v])
+}
+
+fn err_v(msg: Str) -> Value {
+  return Value.Variant(1, [Value.Str(msg)])
+}
+
+fn option_v(o: Option<Value>) -> Value {
+  return match o {
+    Some(v) => some_v(v)
+    None => none_v()
+  }
+}
+
+fn int_v(v: Value) -> Int {
+  return match v {
+    Int(i) => i
+    UInt(u) => if u > 9223372036854775807 { 9223372036854775807 } else { u as Int }
+    Char(c) => c
+    Bool(b) => if b { 1 } else { 0 }
+    _ => 0
+  }
+}
+
+fn flt_v(v: Value) -> Float {
+  return match v {
+    Float(f) => f
+    _ => 0.0
+  }
+}
+
+fn list_v(v: Value) -> List<Value> {
+  return match v {
+    List(xs) => xs
+    _ => []
+  }
+}
+
+fn omap_v(v: Value) -> OMap {
+  return match v {
+    Map(m) | Set(m) => m
+    _ => new_omap()
+  }
+}
+
+fn str_v(v: Value) -> Str {
+  return match v {
+    Str(s) => s
+    _ => ""
+  }
+}
+
+fn char_v(v: Value) -> Char {
+  let c = match v {
+    Char(c) => c
+    _ => 0
+  }
+  let valid = c >= 0 && c <= 1114111 && (c < 55296 || c > 57343)
+  return if valid { c as Char } else { '\0' }
+}
+
+fn strs_v(xs: List<Str>) -> Value {
+  var out: List<Value> = []
+  for x in xs {
+    out.push(Value.Str(x))
+  }
+  return Value.List(out)
+}
+
+/// A string's byte `i` starts a character (or is its end).
+fn on_boundary(s: Str, i: Int) -> Bool {
+  if i <= 0 || i >= s.len() {
+    return true
+  }
+  let b = s[i] as Int
+  return b < 128 || b >= 192
+}
+
+/// Order-preserving maps between Int and U64.
+fn bias(x: Int) -> U64 {
+  return if x >= 0 {
+    (x as U64) + 9223372036854775808
+  } else {
+    (x + 9223372036854775807 + 1) as U64
+  }
+}
+
+fn unbias(u: U64) -> Int {
+  return if u >= 9223372036854775808 {
+    (u - 9223372036854775808) as Int
+  } else {
+    (u as Int) - 9223372036854775807 - 1
+  }
+}
+
+fn ret_v(v: Value) -> Result<(Value, List<Value>), Trap> {
+  return Ok((v, []))
+}
+
+/// `x.pow(y)` as the bootstrap interpreter computes it in 128 bits: multiply up to 200 times,
+/// saturating, and stop once the value is far out of the 64-bit range.
+fn pow_wide(x: Int, y: Int) -> (Bool, Str) {
+  var r = 1
+  var i = 0
+  let n = min(y, 200)
+  for i < n {
+    let p = r.wrapping_mul(x)
+    let over = if r == -1 {
+      x == -9223372036854775807 - 1
+    } else if x == -1 {
+      r == -9223372036854775807 - 1
+    } else {
+      r != 0 && p / r != x
+    }
+    if over {
+      break
+    }
+    r = p
+    i += 1
+  }
+  if i == n {
+    return (r < 0, wide_of(Value.Int(r)).1.str())
+  }
+  // Wider than 64 bits: carry on in decimal.
+  var neg = r < 0
+  var mag = wide_of(Value.Int(r)).1.str()
+  let xmag = wide_of(Value.Int(x)).1.str()
+  let xneg = x < 0
+  let i128_max = "170141183460469231731687303715884105727"
+  let i128_min = "170141183460469231731687303715884105728"
+  for i < n {
+    mag = dec_mul_mag(mag, xmag)
+    neg = neg != xneg && mag != "0"
+    // Saturating at the 128-bit bounds.
+    if neg && dec_cmp_mag(mag, i128_min) > 0 {
+      mag = i128_min
+    } else if !neg && dec_cmp_mag(mag, i128_max) > 0 {
+      mag = i128_max
+    }
+    i += 1
+    let limit = if neg { "36893488147419103232" } else { "36893488147419103228" }
+    if dec_cmp_mag(mag, limit) > 0 {
+      break
+    }
+  }
+  return (neg, mag)
+}
+
+fn Interp.intrinsic(
+  &mut self,
+  intr: Intrinsic,
+  a: List<Value>,
+  span: syntax.Span,
+) -> Result<(Value, List<Value>), Trap> {
+  match intr.op {
+    Panic => {
+      return Err(self.panic(str_v(a[0]), span))
+    }
+    Assert => {
+      let ok = match a[0] {
+        Bool(b) => b
+        _ => false
+      }
+      if !ok {
+        return Err(self.panic("assertion failed", span))
+      }
+      return ret_v(Value.Unit)
+    }
+    IntAbs | IntMin | IntMax | IntPow | WrappingAdd | WrappingSub | WrappingMul => {
+      return self.int_method(intr, a, span)
+    }
+    FloatAbs => {
+      return ret_v(Value.Float(flt_v(a[0]).abs()))
+    }
+    Sqrt => {
+      return ret_v(Value.Float(flt_v(a[0]).sqrt()))
+    }
+    Floor => {
+      return ret_v(Value.Float(flt_v(a[0]).floor()))
+    }
+    Ceil => {
+      return ret_v(Value.Float(flt_v(a[0]).ceil()))
+    }
+    Round => {
+      return ret_v(Value.Float(flt_v(a[0]).round()))
+    }
+    FloatMin => {
+      return ret_v(Value.Float(flt_v(a[0]).min(flt_v(a[1]))))
+    }
+    FloatMax => {
+      return ret_v(Value.Float(flt_v(a[0]).max(flt_v(a[1]))))
+    }
+    IsNan => {
+      return ret_v(Value.Bool(flt_v(a[0]).is_nan()))
+    }
+    IsDigit => {
+      return ret_v(Value.Bool(char_v(a[0]).is_digit()))
+    }
+    IsAlpha => {
+      return ret_v(Value.Bool(char_v(a[0]).is_alpha()))
+    }
+    IsAlnum => {
+      return ret_v(Value.Bool(char_v(a[0]).is_alnum()))
+    }
+    IsSpace => {
+      return ret_v(Value.Bool(char_v(a[0]).is_space()))
+    }
+    IsUpper => {
+      return ret_v(Value.Bool(char_v(a[0]).is_upper()))
+    }
+    IsLower => {
+      return ret_v(Value.Bool(char_v(a[0]).is_lower()))
+    }
+    CharToUpper => {
+      return ret_v(Value.Char(char_v(a[0]).to_upper() as Int))
+    }
+    CharToLower => {
+      return ret_v(Value.Char(char_v(a[0]).to_lower() as Int))
+    }
+    StrLen => {
+      return ret_v(Value.Int(str_v(a[0]).len()))
+    }
+    StrIsEmpty => {
+      return ret_v(Value.Bool(str_v(a[0]).is_empty()))
+    }
+    StrContains => {
+      return ret_v(Value.Bool(str_v(a[0]).contains(str_v(a[1]))))
+    }
+    StartsWith => {
+      return ret_v(Value.Bool(str_v(a[0]).starts_with(str_v(a[1]))))
+    }
+    EndsWith => {
+      return ret_v(Value.Bool(str_v(a[0]).ends_with(str_v(a[1]))))
+    }
+    StrFind => {
+      return ret_v(
+        match str_v(a[0]).find(str_v(a[1])) {
+          Some(i) => some_v(Value.Int(i))
+          None => none_v()
+        },
+      )
+    }
+    Split => {
+      let s = str_v(a[0])
+      let t = str_v(a[1])
+      if t.is_empty() {
+        var parts: List<Value> = []
+        for c in s.chars() {
+          parts.push(Value.Str(Str.from_chars([c])))
+        }
+        return ret_v(Value.List(parts))
+      }
+      return ret_v(strs_v(s.split(t)))
+    }
+    SplitNext => {
+      let s = str_v(a[0])
+      let t = str_v(a[1])
+      let pos = int_v(a[2])
+      let rest = s[pos..s.len()]
+      return match rest.find(t) {
+        Some(k) => Ok((Value.Str(rest[0..k]), [Value.Int(pos + k + t.len())]))
+        None => Ok((Value.Str(rest), [Value.Int(-1)]))
+      }
+    }
+    Lines => {
+      return ret_v(strs_v(str_v(a[0]).lines()))
+    }
+    Trim => {
+      return ret_v(Value.Str(str_v(a[0]).trim()))
+    }
+    Replace => {
+      let f = str_v(a[1])
+      if f.is_empty() {
+        return ret_v(a[0])
+      }
+      return ret_v(Value.Str(str_v(a[0]).replace(f, str_v(a[2]))))
+    }
+    Repeat => {
+      let n = int_v(a[1])
+      if n < 0 {
+        return Err(self.panic("repeat count " + n.str() + " is negative", span))
+      }
+      return ret_v(Value.Str(str_v(a[0]).repeat(n)))
+    }
+    StrToUpper => {
+      return ret_v(Value.Str(str_v(a[0]).to_upper()))
+    }
+    StrToLower => {
+      return ret_v(Value.Str(str_v(a[0]).to_lower()))
+    }
+    ToInt => {
+      return ret_v(
+        match str_v(a[0]).to_int() {
+          Some(v) => some_v(Value.Int(v))
+          None => none_v()
+        },
+      )
+    }
+    ToFloat => {
+      return ret_v(
+        match str_v(a[0]).to_float() {
+          Some(v) => some_v(Value.Float(v))
+          None => none_v()
+        },
+      )
+    }
+    Bytes => {
+      var out: List<Value> = []
+      for b in str_v(a[0]).bytes() {
+        out.push(Value.Int(b as Int))
+      }
+      return ret_v(Value.List(out))
+    }
+    Chars => {
+      var out: List<Value> = []
+      for c in str_v(a[0]).chars() {
+        out.push(Value.Char(c as Int))
+      }
+      return ret_v(Value.List(out))
+    }
+    FromChars => {
+      var cs: List<Char> = []
+      for v in list_v(a[0]) {
+        match v {
+          Char(c) => if c >= 0 && c <= 1114111 && (c < 55296 || c > 57343) { cs.push(c as Char) }
+          _ => {}
+        }
+      }
+      return ret_v(Value.Str(Str.from_chars(cs)))
+    }
+    FromBytes => {
+      var bs: List<U8> = []
+      for v in list_v(a[0]) {
+        bs.push((int_v(v) & 255) as U8)
+      }
+      return ret_v(
+        match Str.from_bytes(bs) {
+          Some(s) => some_v(Value.Str(s))
+          None => none_v()
+        },
+      )
+    }
+    StrConcat => {
+      return ret_v(Value.Str(str_v(a[0]) + str_v(a[1])))
+    }
+    StrConcatN => {
+      var out = ""
+      for x in a {
+        out += str_v(x)
+      }
+      return ret_v(Value.Str(out))
+    }
+    StrByte => {
+      let s = str_v(a[0])
+      let i = int_v(a[1])
+      if i < 0 || i >= s.len() {
+        return Err(self.panic(oob(i, s.len()), span))
+      }
+      return ret_v(Value.Int(s[i] as Int))
+    }
+    StrSlice => {
+      let s = str_v(a[0])
+      let lo = int_v(a[1])
+      let hi = int_v(a[2])
+      if lo < 0 || hi < lo || hi > s.len() {
+        let msg = "slice " +
+          lo.str() +
+          ".." +
+          hi.str() +
+          " is out of bounds for a string of length " +
+          s.len().str()
+        return Err(self.panic(msg, span))
+      }
+      if !on_boundary(s, lo) || !on_boundary(s, hi) {
+        return Err(
+          self.panic(
+            "slice " + lo.str() + ".." + hi.str() + " does not fall on character boundaries",
+            span,
+          ),
+        )
+      }
+      return ret_v(Value.Str(s[lo..hi]))
+    }
+    ListSlice => {
+      let xs = list_v(a[0])
+      let lo = int_v(a[1])
+      let hi = int_v(a[2])
+      if lo < 0 || hi < lo || hi > xs.len() {
+        let msg = "slice " +
+          lo.str() +
+          ".." +
+          hi.str() +
+          " is out of bounds for a list of length " +
+          xs.len().str()
+        return Err(self.panic(msg, span))
+      }
+      return ret_v(Value.List(xs[lo..hi]))
+    }
+    ListRepeat => {
+      let xs = list_v(a[0])
+      let n = int_v(a[1])
+      if n < 0 {
+        return Err(self.panic("repeat count " + n.str() + " is negative", span))
+      }
+      if xs.len() > 0 && n > 9223372036854775807 / xs.len() {
+        return Err(self.panic("the repeated list is too long", span))
+      }
+      return ret_v(Value.List(xs.repeat(n)))
+    }
+    ListNew => {
+      return ret_v(Value.List([]))
+    }
+    ListLen => {
+      return ret_v(Value.Int(list_v(a[0]).len()))
+    }
+    ListIsEmpty => {
+      return ret_v(Value.Bool(list_v(a[0]).is_empty()))
+    }
+    Get => {
+      let xs = list_v(a[0])
+      let i = int_v(a[1])
+      return ret_v(if i >= 0 && i < xs.len() { some_v(xs[i]) } else { none_v() })
+    }
+    Push => {
+      var xs = list_v(a[0])
+      xs.push(a[1])
+      return Ok((Value.Unit, [Value.List(xs)]))
+    }
+    Pop => {
+      var xs = list_v(a[0])
+      let v = option_v(xs.pop())
+      return Ok((v, [Value.List(xs)]))
+    }
+    Insert => {
+      var xs = list_v(a[0])
+      let i = int_v(a[1])
+      if i < 0 || i > xs.len() {
+        return Err(
+          self.panic(
+            "insert index " + i.str() + " is out of bounds for length " + xs.len().str(),
+            span,
+          ),
+        )
+      }
+      xs.insert(i, a[2])
+      return Ok((Value.Unit, [Value.List(xs)]))
+    }
+    Remove => {
+      var xs = list_v(a[0])
+      let i = int_v(a[1])
+      if i < 0 || i >= xs.len() {
+        return Err(
+          self.panic(
+            "remove index " + i.str() + " is out of bounds for length " + xs.len().str(),
+            span,
+          ),
+        )
+      }
+      let v = xs.remove(i)
+      return Ok((v, [Value.List(xs)]))
+    }
+    Clear => {
+      return Ok((Value.Unit, [Value.List([])]))
+    }
+    Extend => {
+      var xs = list_v(a[0])
+      xs.extend(list_v(a[1]))
+      return Ok((Value.Unit, [Value.List(xs)]))
+    }
+    Reverse => {
+      var xs = list_v(a[0])
+      xs.reverse()
+      return Ok((Value.Unit, [Value.List(xs)]))
+    }
+    Swap => {
+      var xs = list_v(a[0])
+      let i = int_v(a[1])
+      let j = int_v(a[2])
+      let n = xs.len()
+      if i < 0 || j < 0 || i >= n || j >= n {
+        return Err(
+          self.panic(
+            "swap(" + i.str() + ", " + j.str() + ") is out of bounds for length " + n.str(),
+            span,
+          ),
+        )
+      }
+      xs.swap(i, j)
+      return Ok((Value.Unit, [Value.List(xs)]))
+    }
+    Truncate => {
+      var xs = list_v(a[0])
+      let n = int_v(a[1])
+      if n < 0 {
+        return Err(self.panic("truncate length " + n.str() + " is negative", span))
+      }
+      if n < xs.len() {
+        xs = xs[0..n]
+      }
+      return Ok((Value.Unit, [Value.List(xs)]))
+    }
+    Sort => {
+      var xs = list_v(a[0])
+      sort_values(&mut xs)
+      return Ok((Value.Unit, [Value.List(xs)]))
+    }
+    // Tasks are pure, so running them one after another in order is a faithful,
+    // deterministic simulation of running them in parallel.
+    TaskAll => {
+      var out: List<Value> = []
+      for j in list_v(a[0]) {
+        out.push(self.call_value(j, [], span)?)
+      }
+      return ret_v(Value.List(out))
+    }
+    TaskMap => {
+      var out: List<Value> = []
+      for x in list_v(a[0]) {
+        out.push(self.call_value(a[1], [x], span)?)
+      }
+      return ret_v(Value.List(out))
+    }
+    TaskBoth => {
+      let x = self.call_value(a[0], [], span)?
+      let y = self.call_value(a[1], [], span)?
+      return ret_v(Value.Tuple([x, y]))
+    }
+    SortBy => {
+      var xs = list_v(a[0])
+      self.merge_sort(&mut xs, a[1], span)?
+      return Ok((Value.Unit, [Value.List(xs)]))
+    }
+    MapNew => {
+      return ret_v(Value.Map(new_omap()))
+    }
+    SetNew => {
+      return ret_v(Value.Set(new_omap()))
+    }
+    MapLen | SetLen => {
+      return ret_v(Value.Int(omap_v(a[0]).keys.len()))
+    }
+    MapIsEmpty | SetIsEmpty => {
+      return ret_v(Value.Bool(omap_v(a[0]).keys.is_empty()))
+    }
+    MapGet => {
+      return ret_v(option_v(omap_v(a[0]).get(a[1])))
+    }
+    MapContains | SetContains => {
+      return ret_v(Value.Bool(omap_v(a[0]).contains(a[1])))
+    }
+    MapInsert => {
+      var m = omap_v(a[0])
+      m.insert(a[1], a[2])
+      return Ok((Value.Unit, [Value.Map(m)]))
+    }
+    SetInsert => {
+      var m = omap_v(a[0])
+      m.insert(a[1], Value.Unit)
+      return Ok((Value.Unit, [Value.Set(m)]))
+    }
+    MapRemove => {
+      var m = omap_v(a[0])
+      let r = option_v(m.remove(a[1]))
+      return Ok((r, [Value.Map(m)]))
+    }
+    SetRemove => {
+      var m = omap_v(a[0])
+      let r = m.remove(a[1]).is_some()
+      return Ok((Value.Bool(r), [Value.Set(m)]))
+    }
+    Keys | Items => {
+      return ret_v(Value.List(omap_v(a[0]).keys))
+    }
+    Values => {
+      return ret_v(Value.List(omap_v(a[0]).vals))
+    }
+    Entries => {
+      let m = omap_v(a[0])
+      var es: List<Value> = []
+      for i in 0..m.keys.len() {
+        es.push(Value.Tuple([m.keys[i], m.vals[i]]))
+      }
+      return ret_v(Value.List(es))
+    }
+    Show => {
+      return ret_v(Value.Str(self.show(a[0], intr.tys[0], false)?))
+    }
+    Print => {
+      self.fx.stdout += str_v(a[0])
+      return ret_v(Value.Unit)
+    }
+    Println => {
+      self.fx.stdout += str_v(a[0]) + "\n"
+      return ret_v(Value.Unit)
+    }
+    Eprintln => {
+      self.fx.stderr += str_v(a[0]) + "\n"
+      return ret_v(Value.Unit)
+    }
+    ReadLine => {
+      if self.fx.stdin_pos < self.fx.stdin.len() {
+        let l = self.fx.stdin[self.fx.stdin_pos]
+        self.fx.stdin_pos += 1
+        return ret_v(some_v(Value.Str(l)))
+      }
+      return ret_v(none_v())
+    }
+    ReadAll => {
+      let from = min(self.fx.stdin_pos, self.fx.stdin.len())
+      let rest = self.fx.stdin[from..self.fx.stdin.len()].join("\n")
+      self.fx.stdin_pos = self.fx.stdin.len()
+      return ret_v(Value.Str(rest))
+    }
+    FsRead => {
+      let p = str_v(a[0])
+      return ret_v(
+        match self.fx.files.get(p) {
+          Some(c) => ok_v(Value.Str(c))
+          None => err_v(p + ": no such file")
+        },
+      )
+    }
+    FsWrite => {
+      self.fx.files.insert(str_v(a[0]), str_v(a[1]))
+      return ret_v(ok_v(Value.Unit))
+    }
+    FsExists => {
+      return ret_v(Value.Bool(self.fx.files.contains(str_v(a[0]))))
+    }
+    FsList => {
+      var dir = str_v(a[0])
+      for dir.ends_with("/") {
+        dir = dir[0..dir.len() - 1]
+      }
+      let prefix = dir + "/"
+      var names: List<Str> = []
+      for (k, _) in self.fx.files {
+        if k.starts_with(prefix) {
+          let r = k[prefix.len()..k.len()]
+          names.push(
+            match r.find("/") {
+              Some(i) => r[0..i]
+              None => r
+            },
+          )
+        }
+      }
+      names.sort()
+      var unique: List<Str> = []
+      for n in names {
+        if unique.is_empty() || unique[unique.len() - 1] != n {
+          unique.push(n)
+        }
+      }
+      return ret_v(ok_v(strs_v(unique)))
+    }
+    Args => {
+      return ret_v(strs_v(self.fx.args))
+    }
+    EnvVar => {
+      return ret_v(
+        match self.fx.env.get(str_v(a[0])) {
+          Some(v) => some_v(Value.Str(v))
+          None => none_v()
+        },
+      )
+    }
+    Exit => {
+      return Err(Trap.Exit(int_v(a[0])))
+    }
+    NowMs => {
+      self.fx.clock_ms += 1
+      return ret_v(Value.Int(self.fx.clock_ms))
+    }
+    NowNs => {
+      self.fx.clock_ms += 1
+      return ret_v(Value.Int(self.fx.clock_ms * 1000000))
+    }
+    Sleep => {
+      let ms = int_v(a[0])
+      if ms < 0 {
+        return Err(self.panic("precondition failed: ms >= 0\n  ms = " + ms.str(), span))
+      }
+      self.fx.clock_ms += ms
+      return ret_v(Value.Unit)
+    }
+    NetRequest => {
+      let addr = str_v(a[0])
+      var reqs = self.fx.net_requests.get(addr).unwrap_or([])
+      reqs.push(str_v(a[1]))
+      self.fx.net_requests.insert(addr, reqs)
+      var replies = self.fx.net_replies.get(addr).unwrap_or([])
+      if replies.is_empty() {
+        return ret_v(err_v(addr + ": Connection refused"))
+      }
+      let r = replies.remove(0)
+      self.fx.net_replies.insert(addr, replies)
+      return ret_v(ok_v(Value.Str(r)))
+    }
+    NetServe => {
+      let addr = str_v(a[0])
+      var state = a[1]
+      let limit = int_v(a[3])
+      if limit < 0 {
+        return Err(self.panic("precondition failed: limit >= 0\n  limit = " + limit.str(), span))
+      }
+      var served = 0
+      for limit == 0 || served < limit {
+        var incoming = self.fx.net_incoming.get(addr).unwrap_or([])
+        if incoming.is_empty() {
+          break
+        }
+        let req = incoming.remove(0)
+        self.fx.net_incoming.insert(addr, incoming)
+        let (s2, reply) = self.serve_one(a[2], state, req, span)?
+        state = s2
+        var answers = self.fx.net_answers.get(addr).unwrap_or([])
+        answers.push(reply)
+        self.fx.net_answers.insert(addr, answers)
+        served += 1
+      }
+      return ret_v(ok_v(state))
+    }
+    SimStdout => {
+      return ret_v(Value.Str(self.fx.stdout))
+    }
+    SimStderr => {
+      return ret_v(Value.Str(self.fx.stderr))
+    }
+    SimSetStdin => {
+      self.fx.stdin = str_v(a[0]).lines()
+      self.fx.stdin_pos = 0
+      return ret_v(Value.Unit)
+    }
+    SimSetArgs => {
+      var args: List<Str> = []
+      for v in list_v(a[0]) {
+        args.push(str_v(v))
+      }
+      self.fx.args = args
+      return ret_v(Value.Unit)
+    }
+    SimSetEnv => {
+      self.fx.env.insert(str_v(a[0]), str_v(a[1]))
+      return ret_v(Value.Unit)
+    }
+    SimSetFile => {
+      self.fx.files.insert(str_v(a[0]), str_v(a[1]))
+      return ret_v(Value.Unit)
+    }
+    SimFile => {
+      return ret_v(
+        match self.fx.files.get(str_v(a[0])) {
+          Some(c) => some_v(Value.Str(c))
+          None => none_v()
+        },
+      )
+    }
+    SimRemoveFile => {
+      let _ = self.fx.files.remove(str_v(a[0]))
+      return ret_v(Value.Unit)
+    }
+    SimSetTime => {
+      // Each reading moves the clock 1 ms first: the next reading is `ms`.
+      self.fx.clock_ms = int_v(a[0]) - 1
+      return ret_v(Value.Unit)
+    }
+    SimAdvance => {
+      let ms = int_v(a[0])
+      if ms < 0 {
+        return Err(self.panic("precondition failed: ms >= 0\n  ms = " + ms.str(), span))
+      }
+      self.fx.clock_ms += ms
+      return ret_v(Value.Unit)
+    }
+    SimReply => {
+      var q = self.fx.net_replies.get(str_v(a[0])).unwrap_or([])
+      q.push(str_v(a[1]))
+      self.fx.net_replies.insert(str_v(a[0]), q)
+      return ret_v(Value.Unit)
+    }
+    SimConnect => {
+      var q = self.fx.net_incoming.get(str_v(a[0])).unwrap_or([])
+      q.push(str_v(a[1]))
+      self.fx.net_incoming.insert(str_v(a[0]), q)
+      return ret_v(Value.Unit)
+    }
+    SimRequests => {
+      return ret_v(strs_v(self.fx.net_requests.get(str_v(a[0])).unwrap_or([])))
+    }
+    SimAnswers => {
+      return ret_v(strs_v(self.fx.net_answers.get(str_v(a[0])).unwrap_or([])))
+    }
+    SimSeed => {
+      self.fx.rng = bias(int_v(a[0])) ^ 9223372036854775808 | 1
+      return ret_v(Value.Unit)
+    }
+    RandInt => {
+      let lo = int_v(a[0])
+      let hi = int_v(a[1])
+      if lo >= hi {
+        return Err(
+          self.panic(
+            "precondition failed: lo < hi\n  lo = " + lo.str() + "\n  hi = " + hi.str(),
+            span,
+          ),
+        )
+      }
+      let width = bias(hi) - bias(lo)
+      let r = self.fx.next_rand() % width
+      return ret_v(Value.Int(unbias(bias(lo) + r)))
+    }
+    RandFloat => {
+      let r = (self.fx.next_rand() >> 11) as Float / 9007199254740992.0
+      return ret_v(Value.Float(r))
+    }
+    Sin => {
+      return ret_v(Value.Float(math.sin(flt_v(a[0]))))
+    }
+    Cos => {
+      return ret_v(Value.Float(math.cos(flt_v(a[0]))))
+    }
+    Tan => {
+      return ret_v(Value.Float(math.tan(flt_v(a[0]))))
+    }
+    Atan2 => {
+      return ret_v(Value.Float(math.atan2(flt_v(a[0]), flt_v(a[1]))))
+    }
+    Exp => {
+      return ret_v(Value.Float(math.exp(flt_v(a[0]))))
+    }
+    Ln => {
+      return ret_v(Value.Float(math.ln(flt_v(a[0]))))
+    }
+    Log10 => {
+      return ret_v(Value.Float(math.log10(flt_v(a[0]))))
+    }
+    Pow => {
+      return ret_v(Value.Float(math.pow(flt_v(a[0]), flt_v(a[1]))))
+    }
+  }
+}
+
+/// `abs`, `min`, `max`, `pow` and the wrapping operations of an integer type.
+fn Interp.int_method(
+  self,
+  intr: Intrinsic,
+  a: List<Value>,
+  span: syntax.Span,
+) -> Result<(Value, List<Value>), Trap> {
+  let k = intr.int.unwrap_or(IntTy.I64)
+  let x = a[0]
+  let y = if a.len() > 1 { a[1] } else { Value.Int(0) }
+  if k == IntTy.U64 {
+    let u = wide_of(x).1
+    let v = wide_of(y).1
+    return match intr.op {
+      IntAbs => Ok((Value.UInt(u), []))
+      IntMin => Ok((Value.UInt(if u < v { u } else { v }), []))
+      IntMax => Ok((Value.UInt(if u > v { u } else { v }), []))
+      WrappingAdd => Ok((Value.UInt(u.wrapping_add(v)), []))
+      WrappingSub => Ok((Value.UInt(u.wrapping_sub(v)), []))
+      WrappingMul => Ok((Value.UInt(u.wrapping_mul(v)), []))
+      _ => {
+        let (neg, mag) = pow_wide(int_v(x), int_v(y))
+        Err(self.overflow(int_text(x) + ".pow(" + int_text(y) + ")", dec_text((neg, mag)), k, span))
+      }
+    }
+  }
+  let i = int_v(x)
+  let j = int_v(y)
+  match intr.op {
+    IntAbs => {
+      let w = if i < 0 { (false, neg_mag(i)) } else { (false, i as U64) }
+      return Ok((self.fit(w, k, span, "abs(" + i.str() + ")")?, []))
+    }
+    IntMin => {
+      return Ok((self.fit(wide_of(Value.Int(min(i, j))), k, span, "min")?, []))
+    }
+    IntMax => {
+      return Ok((self.fit(wide_of(Value.Int(max(i, j))), k, span, "max")?, []))
+    }
+    IntPow => {
+      if j < 0 {
+        return Err(self.panic("negative exponent " + j.str(), span))
+      }
+      let (neg, mag) = pow_wide(i, j)
+      let small = dec_cmp_mag(mag, "18446744073709551615") <= 0
+      if small {
+        let w = (neg, mag.to_int().unwrap_or(0) as U64)
+        if mag.len() < 19 || dec_cmp_mag(mag, "9223372036854775808") <= 0 {
+          let exact = if mag == "9223372036854775808" { (neg, 9223372036854775808) } else { w }
+          if wide_fits(exact, k) {
+            return Ok((wide_value(exact, k), []))
+          }
+        }
+      }
+      return Err(self.overflow(i.str() + ".pow(" + j.str() + ")", dec_text((neg, mag)), k, span))
+    }
+    WrappingAdd => {
+      return Ok((wrap_int(i.wrapping_add(j), k), []))
+    }
+    WrappingSub => {
+      return Ok((wrap_int(i.wrapping_sub(j), k), []))
+    }
+    _ => {
+      return Ok((wrap_int(i.wrapping_mul(j), k), []))
+    }
+  }
+}
+
+/// Values in `val_cmp` order; stable.
+fn sort_values(xs: &mut List<Value>) {
+  if xs.len() <= 1 {
+    return
+  }
+  let mid = xs.len() / 2
+  var left = xs[0..mid]
+  var right = xs[mid..xs.len()]
+  sort_values(&mut left)
+  sort_values(&mut right)
+  var out: List<Value> = []
+  var i = 0
+  var j = 0
+  for i < left.len() && j < right.len() {
+    if val_cmp(right[j], left[i]) < 0 {
+      out.push(right[j])
+      j += 1
+    } else {
+      out.push(left[i])
+      i += 1
+    }
+  }
+  out.extend(left[i..left.len()])
+  out.extend(right[j..right.len()])
+  xs = out
+}
+
+/// One request through a `net.serve` handler: the new state and the reply.
+fn Interp.serve_one(
+  &mut self,
+  handle: Value,
+  state: Value,
+  req: Str,
+  span: syntax.Span,
+) -> Result<(Value, Str), Trap> {
+  match self.call_value(handle, [state, Value.Str(req)], span)? {
+    Tuple(t) => if t.len() == 2 {
+      return Ok((t[0], str_v(t[1])))
+    }
+    _ => {}
+  }
+  return Err(self.panic("internal error: a handler returned something else", span))
+}
+
+fn Interp.call_value(
+  &mut self,
+  f: Value,
+  args: List<Value>,
+  span: syntax.Span,
+) -> Result<Value, Trap> {
+  match f {
+    Fn(m) => {
+      return Ok(self.call(m, args)?.0)
+    }
+    Closure(m, env) => {
+      var all = env
+      all.extend(args)
+      return Ok(self.call(m, all)?.0)
+    }
+    _ => {
+      return Err(self.panic("internal error: calling a value that is not a function", span))
+    }
+  }
+}
+
+/// A stable merge sort calling the comparator `less` (which may trap).
+fn Interp.merge_sort(
+  &mut self,
+  xs: &mut List<Value>,
+  less: Value,
+  span: syntax.Span,
+) -> Result<(), Trap> {
+  let n = xs.len()
+  if n <= 1 {
+    return Ok(())
+  }
+  let mid = n / 2
+  var left = xs[0..mid]
+  var right = xs[mid..n]
+  self.merge_sort(&mut left, less, span)?
+  self.merge_sort(&mut right, less, span)?
+  var out: List<Value> = []
+  var i = 0
+  var j = 0
+  for i < left.len() && j < right.len() {
+    // Take from the right only if right < left (stability).
+    let take_right = match self.call_value(less, [right[j], left[i]], span)? {
+      Bool(b) => b
+      _ => false
+    }
+    if take_right {
+      out.push(right[j])
+      j += 1
+    } else {
+      out.push(left[i])
+      i += 1
+    }
+  }
+  out.extend(left[i..left.len()])
+  out.extend(right[j..right.len()])
+  xs = out
+  return Ok(())
+}
