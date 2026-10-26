@@ -933,6 +933,18 @@ impl Printer<'_> {
         }
         s.push_str(" => ");
         let c = end_col(ind, &s);
+        // `Open => open += 1`: a brace-less assignment arm stays one statement.
+        if let ExprKind::Block(stmts) = self.ast.expr(a.body).kind {
+            let ids = self.ast.stmt_lists.get(stmts);
+            if ids.len() == 1
+                && self.ast.stmts[ids[0]].span.lo == self.ast.expr(a.body).span.lo
+                && matches!(self.ast.stmts[ids[0]].kind, StmtKind::Assign { .. })
+                && !self.has(Key::Expr(a.body))
+            {
+                s += &self.stmt(ids[0], ind);
+                return s;
+            }
+        }
         if let ExprKind::Block(_) = self.ast.expr(a.body).kind {
             let mut f = String::new();
             if self.flat_block_into(a.body, &mut f) && c + width(&f) <= self.width {

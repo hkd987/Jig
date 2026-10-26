@@ -13,7 +13,7 @@ pub fn check_dead_code(prog: &mut Program) {
     if prog.diags.has_errors() {
         return;
     }
-    let Program { defs, bodies, test_bodies, pkgs, tables, tys, diags, root, .. } = prog;
+    let Program { defs, bodies, test_bodies, pkgs, tables, tys, diags, root, sm, .. } = prog;
     let is_user = |pkg: PkgId| !pkgs[pkg].is_std;
     let library = defs.main.is_none();
 
@@ -37,6 +37,7 @@ pub fn check_dead_code(prog: &mut Program) {
     let mut fields_read: FxHashSet<(AdtId, u32)> = FxHashSet::default();
     let mut variants_built: FxHashSet<(AdtId, u32)> = FxHashSet::default();
     let mut consts_used: FxHashSet<ConstId> = FxHashSet::default();
+    let mut consts_cross: FxHashSet<ConstId> = FxHashSet::default();
     let mut derived: Vec<Ty> = Vec::new();
     loop {
         while let Some(f) = stack.pop() {
@@ -57,6 +58,7 @@ pub fn check_dead_code(prog: &mut Program) {
             fields_read.extend(body.fields_read.iter().copied());
             variants_built.extend(body.variants_built.iter().copied());
             consts_used.extend(body.consts_used.iter().copied());
+            consts_cross.extend(body.consts_used.iter().copied().filter(|&c| defs.consts[c].pkg != fpkg));
             for &e in &body.derived_exprs {
                 derived.push(tables[fpkg].expr_ty[e.0 as usize]);
             }
@@ -109,6 +111,24 @@ pub fn check_dead_code(prog: &mut Program) {
     }
 
     let test_refs: FxHashSet<FnId> = test_bodies.iter().flatten().flat_map(|b| b.refs.iter().copied()).collect();
+    // Test helpers: functions in `*_test.jig` files, reached from tests.
+    let in_test_file = |f: FnId| {
+        let fd = &defs.fns[f];
+        let pkg = &pkgs[fd.pkg];
+        let item = pkg.ast.items[fd.item];
+        let file = pkg.ast.files[item.file as usize].file;
+        sm.file(file).path.to_string_lossy().ends_with("_test.jig")
+    };
+    let mut test_reachable: FxHashSet<FnId> = FxHashSet::default();
+    let mut work: Vec<FnId> = test_refs.iter().copied().collect();
+    while let Some(f) = work.pop() {
+        if !test_reachable.insert(f) {
+            continue;
+        }
+        if let Some(b) = bodies[f].as_ref() {
+            work.extend(b.refs.iter().copied());
+        }
+    }
 
     // Unreachable functions.
     for (fid, fd) in defs.fns.iter_enumerated() {
@@ -118,11 +138,16 @@ pub fn check_dead_code(prog: &mut Program) {
         if fd.step.is_some() {
             continue; // checked against scenarios
         }
+        if test_reachable.contains(&fid) && in_test_file(fid) {
+            continue; // a test helper
+        }
         let name = fd.display_name(defs, tys);
         let mut d =
             Diagnostic::error(codes::E0601, fd.name_span, format!("`{name}` is never reached from an entrypoint"));
         if test_refs.contains(&fid) {
-            d = d.note("only tests use it; tests do not justify code");
+            d = d.note(
+                "only tests use it; tests do not justify code. Move it to a `_test.jig` file to make it a test helper",
+            );
         } else if library {
             d = d.note("in a library, only `pub` functions of the root package and what they call are entrypoints");
         } else {
@@ -144,6 +169,51 @@ pub fn check_dead_code(prog: &mut Program) {
             Diagnostic::error(codes::E0603, fd.name_span, format!("`{name}` is exported but no other package uses it"))
                 .note("remove `pub`"),
         );
+    }
+
+    // Unused exports of types, interfaces and constants: `pub` items of non-root packages
+    // that no other package names or handles.
+    let (adts_cross, ifaces_cross) = cross_package_types(defs, pkgs, tables, tys);
+    let exported = |pkg: PkgId, is_pub: bool| is_user(pkg) && pkg != *root && is_pub;
+    for (aid, ad) in defs.adts.iter_enumerated() {
+        if exported(ad.pkg, ad.is_pub) && !adts_cross.contains(&aid) {
+            let span = pkgs[ad.pkg].ast.items[ad.item].name.span;
+            let what = if ad.is_enum() { "enum" } else { "struct" };
+            diags.push(
+                Diagnostic::error(
+                    codes::E0603,
+                    span,
+                    format!("{what} `{}` is exported but no other package uses it", ad.name),
+                )
+                .note("remove `pub`"),
+            );
+        }
+    }
+    for (iid, id) in defs.ifaces.iter_enumerated() {
+        if exported(id.pkg, id.is_pub) && !ifaces_cross.contains(&iid) {
+            let span = pkgs[id.pkg].ast.items[id.item].name.span;
+            diags.push(
+                Diagnostic::error(
+                    codes::E0603,
+                    span,
+                    format!("interface `{}` is exported but no other package uses it", id.name),
+                )
+                .note("remove `pub`"),
+            );
+        }
+    }
+    for (cid, cd) in defs.consts.iter_enumerated() {
+        if exported(cd.pkg, cd.is_pub) && consts_used.contains(&cid) && !consts_cross.contains(&cid) {
+            let span = pkgs[cd.pkg].ast.items[cd.item].name.span;
+            diags.push(
+                Diagnostic::error(
+                    codes::E0603,
+                    span,
+                    format!("constant `{}` is exported but no other package uses it", cd.name),
+                )
+                .note("remove `pub`"),
+            );
+        }
     }
 
     // Fields and variants.
@@ -200,6 +270,70 @@ pub fn check_dead_code(prog: &mut Program) {
         );
     }
     diags.sort();
+}
+
+/// ADTs and interfaces that some package other than their own mentions: in any expression or
+/// pattern type, a signature, a field, an alias or a generic bound.
+fn cross_package_types(
+    defs: &Defs,
+    pkgs: &crate::util::IndexVec<PkgId, Package>,
+    tables: &crate::util::IndexVec<PkgId, Tables>,
+    tys: &TyCtx,
+) -> (FxHashSet<AdtId>, FxHashSet<IfaceId>) {
+    let mut adts = FxHashSet::default();
+    let mut ifaces = FxHashSet::default();
+    for (pid, pkg) in pkgs.iter_enumerated() {
+        if pkg.is_std {
+            continue;
+        }
+        let mut seen: FxHashSet<Ty> = FxHashSet::default();
+        let mut work: Vec<Ty> = Vec::new();
+        work.extend(tables[pid].expr_ty.iter().copied());
+        work.extend(tables[pid].pat_ty.iter().copied());
+        for fd in defs.fns.iter().filter(|f| f.pkg == pid) {
+            work.extend(fd.params.iter().map(|p| p.ty));
+            work.push(fd.ret);
+            for g in &fd.generics {
+                for b in &g.bounds {
+                    if let Bound::Iface(i) = b {
+                        if defs.ifaces[*i].pkg != pid {
+                            ifaces.insert(*i);
+                        }
+                    }
+                }
+            }
+        }
+        for ad in defs.adts.iter().filter(|a| a.pkg == pid) {
+            work.extend(ad.fields().iter().map(|f| f.ty));
+            work.extend(ad.variants().iter().flat_map(|v| v.fields.iter().map(|f| f.ty)));
+        }
+        work.extend(defs.aliases.iter().filter(|a| a.pkg == pid).map(|a| a.ty));
+        while let Some(t) = work.pop() {
+            if !seen.insert(t) {
+                continue;
+            }
+            match tys.kind(t) {
+                TyKind::Adt(a, args) => {
+                    if defs.adts[*a].pkg != pid {
+                        adts.insert(*a);
+                    }
+                    work.extend(args.iter().copied());
+                }
+                TyKind::Tuple(ts) => work.extend(ts.iter().copied()),
+                TyKind::List(x) | TyKind::Set(x) => work.push(*x),
+                TyKind::Map(k, v) => {
+                    work.push(*k);
+                    work.push(*v);
+                }
+                TyKind::Fn(ps, r, _) => {
+                    work.extend(ps.iter().copied());
+                    work.push(*r);
+                }
+                _ => {}
+            }
+        }
+    }
+    (adts, ifaces)
 }
 
 fn struct_invariant_mentions(pkgs: &crate::util::IndexVec<PkgId, Package>, ad: &AdtDef, field: Symbol) -> bool {

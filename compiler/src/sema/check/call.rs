@@ -767,7 +767,8 @@ impl Cx<'_> {
                     );
                     return self.tys.error;
                 }
-                if !fd.is_pub && fd.pkg != self.pkg {
+                // A custom `str` customizes `Show` everywhere, like the derived one it replaces.
+                if !fd.is_pub && fd.pkg != self.pkg && name.sym != sym::STR_METHOD {
                     self.err(codes::E0205, name.span, format!("method `{}` is private", name.sym));
                 }
                 let recv_place = if fd.self_mode == Some(Mode::MutRef) {

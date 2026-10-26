@@ -22,3 +22,25 @@ fn secret() -> Int {
 pub fn uses_secret() -> Int {
   return secret()
 }
+
+pub const ORIGIN_X: Int = 0 //~ E0603
+
+pub struct Hidden { //~ E0603
+  n: Int
+}
+
+pub interface Sized { //~ E0603
+  fn size(self) -> Int
+}
+
+fn Hidden.size(self) -> Int {
+  return self.n
+}
+
+fn measure<T: Sized>(x: T) -> Int {
+  return x.size()
+}
+
+pub fn hidden_size() -> Int {
+  return measure(Hidden { n: ORIGIN_X })
+}

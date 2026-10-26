@@ -403,8 +403,86 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
             _ => self.expr(cond),
         };
         let span = self.cur_span;
-        self.push(Stmt::Check { cond: op, kind, msg: Symbol::intern(&text), values, span });
+        // The variables, fields, `result` and `old(...)` values the condition mentions,
+        // read only when it fails.
+        let mut atoms = Vec::new();
+        self.atoms(cond, &mut atoms);
+        let shown: Vec<String> = values.iter().map(|(n, _, _)| n.as_str().to_string()).collect();
+        let mut texts: Vec<String> = Vec::new();
+        atoms.retain(|&a| {
+            let t = self.src(a);
+            if shown.contains(&t) || texts.contains(&t) {
+                return false;
+            }
+            texts.push(t);
+            true
+        });
+        atoms.truncate(8);
+        if atoms.is_empty() {
+            self.push(Stmt::Check { cond: op, kind, msg: Symbol::intern(&text), values, span });
+        } else {
+            let ok_bb = self.new_block();
+            let fail_bb = self.new_block();
+            self.terminate(Terminator::If(op, ok_bb, fail_bb));
+            self.cur = fail_bb;
+            for a in atoms {
+                let t = self.ty(a);
+                let l = self.expr_to_temp(a);
+                values.push((Symbol::intern(&self.src(a)), Operand::local(l), t));
+            }
+            self.cur_span = span;
+            self.push(Stmt::Check { cond: Operand::bool(false), kind, msg: Symbol::intern(&text), values, span });
+            self.goto(ok_bb);
+            self.cur = ok_bb;
+        }
         self.cur_span = saved;
+    }
+
+    /// Side-effect-free leaves of a condition worth showing: locals, field paths, `result`
+    /// and `old(...)`. Indexing is left out (it could trap again).
+    fn atoms(&self, e: ExprId, out: &mut Vec<ExprId>) {
+        let k = self.ast.exprs[e].kind;
+        match k {
+            ExprKind::Name(_) => {
+                if matches!(self.tables.expr_res[e.0 as usize], Res::Local(_) | Res::ResultVal) {
+                    out.push(e);
+                }
+                return;
+            }
+            ExprKind::Field { base, .. } => {
+                if matches!(self.tables.expr_res[e.0 as usize], Res::Field(_)) && self.field_chain(base) {
+                    out.push(e);
+                    return;
+                }
+            }
+            ExprKind::TupleField { base, .. } if self.field_chain(base) => {
+                out.push(e);
+                return;
+            }
+            ExprKind::Call { callee, .. } if self.tables.expr_res[callee.0 as usize] == Res::Old => {
+                out.push(e);
+                return;
+            }
+            ExprKind::Closure { .. } | ExprKind::Quant { .. } => return,
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Char(_) => return,
+            _ => {}
+        }
+        let mut kids = Vec::new();
+        visit_children(self.ast, e, &mut kids);
+        for c in kids {
+            self.atoms(c, out);
+        }
+    }
+
+    fn field_chain(&self, e: ExprId) -> bool {
+        match self.ast.exprs[e].kind {
+            ExprKind::Name(_) => matches!(self.tables.expr_res[e.0 as usize], Res::Local(_) | Res::ResultVal),
+            ExprKind::Field { base, .. } => {
+                matches!(self.tables.expr_res[e.0 as usize], Res::Field(_)) && self.field_chain(base)
+            }
+            ExprKind::TupleField { base, .. } | ExprKind::Paren(base) => self.field_chain(base),
+            _ => false,
+        }
     }
 
     fn snapshot_olds(&mut self, e: ExprId) {

@@ -1119,6 +1119,14 @@ impl<'l, 'a> CGen<'l, 'a> {
             Stmt::Assign(p, rv) => {
                 let t = self.place_ty(mf, p);
                 let c = self.cty(t);
+                if let Rvalue::Call(_, _, ret) = rv {
+                    if self.lw.tys.is_never(*ret) {
+                        // Never returns: evaluate for its effect; nothing is stored.
+                        let val = self.rvalue(mf, cx, rv, t, span);
+                        let _ = writeln!(cx.out, "    (void)({val});");
+                        return;
+                    }
+                }
                 let val = self.rvalue(mf, cx, rv, t, span);
                 let rc = self.needs_rc(t);
                 if p.proj.is_empty() {
@@ -1395,7 +1403,11 @@ impl<'l, 'a> CGen<'l, 'a> {
             (TyKind::Int(..), TyKind::Float(_)) | (TyKind::Char, TyKind::Float(_)) => format!("((double)({x}))"),
             (TyKind::Float(_), TyKind::Int(k, _)) => {
                 let (lo, hi) = (k.min() as f64, k.max() as f64);
-                format!("({{ double cf = trunc({x}); if (isnan(cf) || cf < {lo:e} || cf > {hi:e}) jig_cast_range({loc}); ({})cf; }})", int_cty(k))
+                format!(
+                    "({{ double cf = trunc({x}); if (isnan(cf) || cf < {lo:e} || cf > {hi:e}) jig_cast_range_f({x}, \"{}\", {loc}); ({})cf; }})",
+                    k.name(),
+                    int_cty(k)
+                )
             }
             (TyKind::Int(a, _), TyKind::Int(b, _)) => {
                 if a == b {
@@ -1407,13 +1419,19 @@ impl<'l, 'a> CGen<'l, 'a> {
                     format!("(({})({x}))", int_cty(b))
                 } else if a == IntTy::U64 {
                     format!(
-                        "({{ uint64_t cv = {x}; if (cv > (uint64_t){}) jig_cast_range({loc}); ({})cv; }})",
+                        "({{ uint64_t cv = {x}; if (cv > (uint64_t){}) jig_cast_range_u(cv, \"{}\", {loc}); ({})cv; }})",
                         b.max(),
+                        b.name(),
                         int_cty(b)
                     )
                 } else {
                     let max = if b == IntTy::U64 { "INT64_MAX".to_string() } else { format!("INT64_C({})", b.max()) };
-                    format!("({{ int64_t cv = (int64_t)({x}); if (cv < INT64_C({}) || cv > {max}) jig_cast_range({loc}); ({})cv; }})", b.min(), int_cty(b))
+                    format!(
+                        "({{ int64_t cv = (int64_t)({x}); if (cv < INT64_C({}) || cv > {max}) jig_cast_range_i(cv, \"{}\", {loc}); ({})cv; }})",
+                        b.min(),
+                        b.name(),
+                        int_cty(b)
+                    )
                 }
             }
             (TyKind::Char, TyKind::Int(b, _)) => {
@@ -1421,8 +1439,9 @@ impl<'l, 'a> CGen<'l, 'a> {
                     format!("(({})({x}))", int_cty(b))
                 } else {
                     format!(
-                        "({{ uint32_t cv = {x}; if (cv > {}u) jig_cast_range({loc}); ({})cv; }})",
+                        "({{ uint32_t cv = {x}; if (cv > {}u) jig_cast_range_i(cv, \"{}\", {loc}); ({})cv; }})",
                         b.max(),
+                        b.name(),
                         int_cty(b)
                     )
                 }

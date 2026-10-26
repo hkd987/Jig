@@ -191,7 +191,9 @@ static inline void jig_fn_release(jig_fn *f) {
 void jig_overflow(const char *op, const char *loc) __attribute__((noreturn));
 void jig_div_zero(const char *loc) __attribute__((noreturn));
 void jig_shift_range(int64_t amount, const char *loc) __attribute__((noreturn));
-void jig_cast_range(const char *loc) __attribute__((noreturn));
+void jig_cast_range_i(int64_t v, const char *ty, const char *loc) __attribute__((noreturn));
+void jig_cast_range_u(uint64_t v, const char *ty, const char *loc) __attribute__((noreturn));
+void jig_cast_range_f(double v, const char *ty, const char *loc) __attribute__((noreturn));
 void jig_index_oob(int64_t i, int64_t len, const char *loc) __attribute__((noreturn));
 int64_t jig_ipow(int64_t base, int64_t exp, const char *loc);
 

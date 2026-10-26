@@ -1,0 +1,24 @@
+import "std/io"
+
+enum St {
+  Open
+  Shipped
+  Cancelled
+}
+
+fn count(xs: List<St>) -> Int {
+  var open = 0
+  var shipped = 0
+  for o in xs {
+    match o {
+      Open => open + = 1 //~ E0105
+      Shipped => shipped += 1
+      Cancelled => {}
+    }
+  }
+  return open + shipped
+}
+
+fn main() effects {io} {
+  io.println(count([St.Open]).str())
+}

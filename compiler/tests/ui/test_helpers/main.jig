@@ -1,0 +1,13 @@
+import "std/io"
+
+fn double(x: Int) -> Int {
+  return x * 2
+}
+
+fn only_tests_use_me() -> Int { //~ E0601
+  return 3
+}
+
+fn main() effects {io} {
+  io.println(double(2).str())
+}

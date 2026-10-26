@@ -408,6 +408,7 @@ impl Collector<'_> {
                         self.err(codes::E0201, p.span, format!("cannot find package `{}`", p.sym));
                         return self.tys.error;
                     };
+                    self.defs.sig_imports_used.insert((sc.pkg, sc.file, p.sym));
                     let Some(def) = self.lookup_in(target, name, sc.pkg) else {
                         self.err(
                             codes::E0201,

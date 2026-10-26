@@ -130,7 +130,9 @@ pub fn check_bodies(prog: &mut Program) {
         }
         for (fi, imports) in pkg.imports.iter().enumerate() {
             for (name, &(_, item)) in imports {
-                if !imports_used[pi.0 as usize].contains(&(fi, *name)) {
+                if !imports_used[pi.0 as usize].contains(&(fi, *name))
+                    && !defs.sig_imports_used.contains(&(pi, fi, *name))
+                {
                     let span = pkg.ast.items[item].span;
                     diags.push(
                         Diagnostic::error(

@@ -5,6 +5,7 @@ pub mod codegen;
 pub mod diag;
 pub mod fmt;
 pub mod mir;
+pub mod proptest;
 pub mod runner;
 pub mod sema;
 pub mod syntax;

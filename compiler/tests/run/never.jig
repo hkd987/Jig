@@ -1,0 +1,20 @@
+import "std/io"
+
+// `Never` (panic, unwrap of None) converts to any type, including structs and tuples.
+
+struct P {
+  x: Int
+}
+
+fn pick(o: Option<P>) -> P {
+  return o.unwrap()
+}
+
+fn fail() -> (Int, Int) {
+  return panic("no pair")
+}
+
+fn main() effects {io} {
+  io.println(pick(Some(P { x: 1 })).x.str())
+  io.println(fail().0.str())
+}

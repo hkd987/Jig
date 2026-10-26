@@ -1,0 +1,24 @@
+import "std/io"
+
+// Assignments as match arm bodies, and `-> T where pred` as a postcondition.
+
+enum St {
+  Open
+  Shipped
+}
+
+fn count(xs: List<St>) -> Int where result >= 0 {
+  var open = 0
+  var shipped = 0
+  for x in xs {
+    match x {
+      Open => open += 1
+      Shipped => shipped = shipped + 1
+    }
+  }
+  return open + shipped
+}
+
+fn main() effects {io} {
+  io.println(count([St.Open, St.Shipped]).str())
+}

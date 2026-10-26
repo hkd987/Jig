@@ -1,0 +1,13 @@
+import "std/io"
+
+// Conversions trap with the same message on every back end.
+
+fn to_u8(x: Int) -> U8 {
+  return x as U8
+}
+
+fn main() effects {io} {
+  io.println((2.75 as Int).str() + " " + to_u8(200).str() + " " + (-3.5 as Int).str())
+  let big = 1.0e300
+  io.println((big as Int).str())
+}

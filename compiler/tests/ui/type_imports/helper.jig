@@ -1,0 +1,14 @@
+// A package used only in signatures and aliases is a used import.
+import "shapes"
+
+type Err2 = shapes.E
+
+fn area(s: shapes.Sq) -> Int {
+  return s.side * s.side
+}
+
+fn kind(e: Err2) -> Int {
+  return match e {
+    A => 1
+  }
+}

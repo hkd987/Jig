@@ -1,0 +1,12 @@
+// Helpers in `_test.jig` files may be used only by tests.
+
+fn fixture() -> List<Int> {
+  return [1, 2, 3]
+}
+
+test "double doubles" {
+  for x in fixture() {
+    assert(double(x) == x + x)
+  }
+  assert(only_tests_use_me() == 3)
+}

@@ -1,0 +1,16 @@
+pub struct Sq {
+  pub side: Int
+}
+
+pub enum E {
+  A
+}
+
+pub fn make(n: Int) -> Sq {
+  return Sq { side: n }
+}
+
+// Private, but it still customizes `Show` for other packages.
+fn Sq.str(self) -> Str {
+  return "Sq(" + self.side.str() + ")"
+}

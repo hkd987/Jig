@@ -475,11 +475,16 @@ impl<'a> Parser<'a> {
         };
         let (self_param, params) = self.parse_params(true)?;
         let mut ret = None;
+        // `-> T where pred` refines the result: the same as `ensures pred`.
+        let mut ret_preds = Vec::new();
         if self.eat(T::Arrow) {
             ret = Some(self.parse_type()?);
+            if self.eat(T::Where) {
+                ret_preds.push(self.with_no_struct(|p| p.parse_expr())?);
+            }
         }
         let sig_span = self.span_from(lo);
-        let (requires, ensures, effects, effects_span) = self.parse_clauses()?;
+        let (requires, ensures, effects, effects_span) = self.parse_clauses(ret_preds)?;
         let mut body = None;
         if self.skip_semis_before(T::LBrace) {
             body = Some(self.parse_block()?);
@@ -517,10 +522,10 @@ impl<'a> Parser<'a> {
     }
 
     #[allow(clippy::type_complexity)]
-    fn parse_clauses(&mut self) -> PResult<(List<ExprId>, List<ExprId>, Option<List<Name>>, Span)> {
+    fn parse_clauses(&mut self, ens: Vec<ExprId>) -> PResult<(List<ExprId>, List<ExprId>, Option<List<Name>>, Span)> {
         let rm = self.ast.expr_lists.mark();
         let mut req: Vec<ExprId> = Vec::new();
-        let mut ens: Vec<ExprId> = Vec::new();
+        let mut ens = ens;
         let mut effects = None;
         let mut effects_span = Span::DUMMY;
         loop {
@@ -1015,21 +1020,7 @@ impl<'a> Parser<'a> {
             T::For => self.parse_for(),
             _ => {
                 let e = self.parse_expr()?;
-                let op = match self.peek() {
-                    T::Eq => Some(None),
-                    T::PlusEq => Some(Some(BinOp::Add)),
-                    T::MinusEq => Some(Some(BinOp::Sub)),
-                    T::StarEq => Some(Some(BinOp::Mul)),
-                    T::SlashEq => Some(Some(BinOp::Div)),
-                    T::PercentEq => Some(Some(BinOp::Rem)),
-                    T::AmpEq => Some(Some(BinOp::BitAnd)),
-                    T::PipeEq => Some(Some(BinOp::BitOr)),
-                    T::CaretEq => Some(Some(BinOp::BitXor)),
-                    T::ShlEq => Some(Some(BinOp::Shl)),
-                    T::ShrEq => Some(Some(BinOp::Shr)),
-                    _ => None,
-                };
-                if let Some(op) = op {
+                if let Some(op) = self.assign_op() {
                     self.bump();
                     let value = self.parse_expr()?;
                     return Ok(self.mk_stmt(StmtKind::Assign { target: e, op, value }, self.span_from(lo)));
@@ -1037,6 +1028,73 @@ impl<'a> Parser<'a> {
                 Ok(self.mk_stmt(StmtKind::Expr(e), self.span_from(lo)))
             }
         }
+    }
+
+    fn parse_arm(&mut self) -> PResult<Arm> {
+        let lo = self.tok().lo;
+        let pat = self.parse_pat()?;
+        let mut guard = None;
+        if self.eat(T::If) {
+            guard = Some(self.with_no_struct(|p| p.parse_expr())?);
+        }
+        self.expect(T::FatArrow)?;
+        let body = self.parse_arm_body()?;
+        Ok(Arm { pat, guard, body, span: self.span_from(lo) })
+    }
+
+    /// After a bad match arm: skip to the end of its line (outside any brackets). Returns
+    /// false at end of file.
+    fn skip_to_arm_end(&mut self) -> bool {
+        let mut depth = 0i32;
+        loop {
+            match self.peek() {
+                T::Eof => return false,
+                T::LParen | T::LBracket | T::LBrace => depth += 1,
+                T::RParen | T::RBracket => depth -= 1,
+                T::RBrace => {
+                    if depth == 0 {
+                        return true;
+                    }
+                    depth -= 1;
+                }
+                T::Semi if depth <= 0 => {
+                    self.bump();
+                    return true;
+                }
+                _ => {}
+            }
+            self.bump();
+        }
+    }
+
+    /// A match arm body: an expression, or an assignment (`Open => open += 1`), which is
+    /// shorthand for a block holding it.
+    fn parse_arm_body(&mut self) -> PResult<ExprId> {
+        let lo = self.tok().lo;
+        let e = self.parse_expr()?;
+        let Some(op) = self.assign_op() else { return Ok(e) };
+        self.bump();
+        let value = self.parse_expr()?;
+        let s = self.mk_stmt(StmtKind::Assign { target: e, op, value }, self.span_from(lo));
+        let stmts = self.ast.stmt_lists.alloc(&[s]);
+        Ok(self.mk_expr(ExprKind::Block(stmts), self.span_from(lo)))
+    }
+
+    fn assign_op(&self) -> Option<Option<BinOp>> {
+        Some(match self.peek() {
+            T::Eq => None,
+            T::PlusEq => Some(BinOp::Add),
+            T::MinusEq => Some(BinOp::Sub),
+            T::StarEq => Some(BinOp::Mul),
+            T::SlashEq => Some(BinOp::Div),
+            T::PercentEq => Some(BinOp::Rem),
+            T::AmpEq => Some(BinOp::BitAnd),
+            T::PipeEq => Some(BinOp::BitOr),
+            T::CaretEq => Some(BinOp::BitXor),
+            T::ShlEq => Some(BinOp::Shl),
+            T::ShrEq => Some(BinOp::Shr),
+            _ => return None,
+        })
     }
 
     fn is_for_in(&self) -> bool {
@@ -1704,14 +1762,16 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 let alo = self.tok().lo;
-                let pat = self.parse_pat()?;
-                let mut guard = None;
-                if self.eat(T::If) {
-                    guard = Some(self.with_no_struct(|p| p.parse_expr())?);
+                match self.parse_arm() {
+                    Ok(arm) => arms.push(Arm { span: self.span_from(alo), ..arm }),
+                    Err(()) => {
+                        // Skip to the next arm so one bad arm is one error.
+                        if !self.skip_to_arm_end() {
+                            return Err(());
+                        }
+                        continue;
+                    }
                 }
-                self.expect(T::FatArrow)?;
-                let body = self.parse_expr()?;
-                arms.push(Arm { pat, guard, body, span: self.span_from(alo) });
                 if self.eat(T::Comma) || self.at(T::Semi) {
                     continue;
                 }
@@ -1719,7 +1779,9 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 self.expected("a line break or `}` after the match arm");
-                return Err(());
+                if !self.skip_to_arm_end() {
+                    return Err(());
+                }
             }
             Ok(())
         })();

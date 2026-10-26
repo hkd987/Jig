@@ -284,6 +284,8 @@ pub struct Defs {
     pub option: Option<AdtId>,
     pub result: Option<AdtId>,
     pub main: Option<FnId>,
+    /// Imports used by signatures, fields and aliases: (package, file, import name).
+    pub sig_imports_used: crate::util::FxHashSet<(PkgId, usize, Symbol)>,
 }
 
 impl Defs {

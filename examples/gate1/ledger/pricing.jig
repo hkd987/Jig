@@ -3,22 +3,22 @@
 import "model"
 
 /// Lines of at least this many units get the bulk discount.
-pub const BULK_QTY: Int = 10
+const BULK_QTY: Int = 10
 /// Percent off a line that qualifies for the bulk discount.
-pub const BULK_PERCENT: Int = 5
+const BULK_PERCENT: Int = 5
 /// Orders whose discounted subtotal reaches this ship free.
-pub const FREE_SHIPPING_FROM: Int = 10_000
+const FREE_SHIPPING_FROM: Int = 10_000
 /// Flat handling fee for orders that do not ship free.
-pub const BASE_SHIPPING: Int = 300
+const BASE_SHIPPING: Int = 300
 /// Weight-based part of the shipping fee.
 const RATE_PER_KG: Float<cent/kg> = 150.0
 /// Credit limit for customers who have not been given one.
-pub const DEFAULT_LIMIT: Int = 50_000
+const DEFAULT_LIMIT: Int = 50_000
 /// Items with fewer units than this are flagged in reports.
-pub const LOW_STOCK: Int = 5
+const LOW_STOCK: Int = 5
 
 /// Anything with a value in cents: items on the shelf, order lines, orders.
-pub interface Valued {
+interface Valued {
   fn value(self) -> Int
 }
 

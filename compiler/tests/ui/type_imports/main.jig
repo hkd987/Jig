@@ -1,0 +1,7 @@
+import "std/io"
+import "shapes"
+
+fn main() effects {io} {
+  io.println((area(shapes.make(3)) + kind(shapes.E.A)).str())
+  io.println(shapes.make(2).str())
+}

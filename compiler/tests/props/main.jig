@@ -1,0 +1,39 @@
+import "std/io"
+
+fn add(a: Int, b: Int) -> Int {
+  return a + b
+}
+
+fn clamp(x: Int) -> Int {
+  if x > 100 {
+    return 100
+  }
+  return x
+}
+
+test "add commutes"(x: Int, y: Int) requires x < 1000, y < 1000, x > -1000, y > -1000 {
+  assert(add(x, y) == add(y, x))
+}
+
+test "no requires"(x: Int) {
+  assert(x + 0 == x)
+}
+
+test "clamp is at most 50"(x: Int) {
+  assert(clamp(x) <= 50)
+}
+
+test "lists"(xs: List<Int>, s: Str) {
+  assert(xs.len() < 3 || s.len() >= 0)
+}
+
+test "reverse twice"(xs: List<Int>) {
+  var ys = xs
+  ys.reverse()
+  ys.reverse()
+  assert(ys == xs)
+}
+
+fn main() effects {io} {
+  io.println((add(1, 2) + clamp(3)).str())
+}

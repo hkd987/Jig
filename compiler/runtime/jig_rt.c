@@ -905,7 +905,27 @@ void jig_shift_range(int64_t amount, const char *loc) {
     jig_panic(msg, loc);
 }
 
-void jig_cast_range(const char *loc) { jig_panic("numeric conversion out of range", loc); }
+void jig_cast_range_i(int64_t v, const char *ty, const char *loc) {
+    char msg[128];
+    snprintf(msg, sizeof msg, "cannot convert %lld to `%s`: out of range", (long long)v, ty);
+    jig_panic(msg, loc);
+}
+
+void jig_cast_range_u(uint64_t v, const char *ty, const char *loc) {
+    char msg[128];
+    snprintf(msg, sizeof msg, "cannot convert %llu to `%s`: out of range", (unsigned long long)v, ty);
+    jig_panic(msg, loc);
+}
+
+void jig_cast_range_f(double v, const char *ty, const char *loc) {
+    jig_buf b = {0};
+    jig_buf_push_cstr(&b, "cannot convert ");
+    jig_show_f64(&b, v);
+    jig_buf_push_cstr(&b, " to `");
+    jig_buf_push_cstr(&b, ty);
+    jig_buf_push_cstr(&b, "`: out of range");
+    jig_panic_buf(&b, loc);
+}
 
 void jig_index_oob(int64_t i, int64_t len, const char *loc) {
     char msg[128];

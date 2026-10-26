@@ -869,7 +869,7 @@ impl<'l, 'a> Interp<'l, 'a> {
         match intr.op {
             Panic => {
                 let s = self.str_arg(&a[0], span)?;
-                Err(self.panic(format!("panic: {s}"), span))
+                Err(self.panic(s.to_string(), span))
             }
             Assert => {
                 if !matches!(a[0], Value::Bool(true)) {
