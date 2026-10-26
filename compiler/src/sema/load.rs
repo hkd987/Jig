@@ -2,7 +2,7 @@
 
 use super::defs::*;
 use super::ty::*;
-use crate::diag::{codes, Diagnostic, Diags, SourceMap, Span};
+use crate::diag::{codes, Diagnostic, Diags, FileId, SourceMap, Span};
 use crate::syntax::ast::{Ast, ItemKind};
 use crate::syntax::parser;
 use crate::util::intern::LocalInterner;
@@ -80,16 +80,17 @@ struct Loader<'a> {
     sm: SourceMap,
     pkgs: IndexVec<PkgId, Package>,
     by_path: FxHashMap<Symbol, PkgId>,
-    /// Packages currently being loaded (for cycle detection), with the import span that led
-    /// to each.
-    stack: Vec<PkgId>,
-    done: Vec<bool>,
+    /// Packages found but not parsed yet, with their `.jig` files (already in `sm`).
+    queue: Vec<(PkgId, Vec<FileId>)>,
+    /// Each package's imports in source order: (target, import path span), for cycle detection.
+    edges: Vec<Vec<(PkgId, Span)>>,
     diags: Diags,
-    interner: LocalInterner,
     project_root: Option<PathBuf>,
 }
 
-/// Load the package in `dir` and everything it imports.
+/// Load the package in `dir` and everything it imports. Packages are parsed in waves: every
+/// package found so far is parsed (in parallel when there is enough source), then their
+/// imports name the next wave.
 pub fn load_program(sources: &Sources, dir: &Path) -> Program {
     let dir = if matches!(sources, Sources::Disk) {
         std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
@@ -102,13 +103,12 @@ pub fn load_program(sources: &Sources, dir: &Path) -> Program {
         sm: SourceMap::new(),
         pkgs: IndexVec::new(),
         by_path: FxHashMap::default(),
-        stack: Vec::new(),
-        done: Vec::new(),
+        queue: Vec::new(),
+        edges: Vec::new(),
         diags: Diags::default(),
-        interner: LocalInterner::default(),
         project_root: project_root.clone(),
     };
-    let prelude = ld.load_embedded(PRELUDE_PATH, "prelude.jig", PRELUDE_SOURCE);
+    let prelude = ld.add_embedded(PRELUDE_PATH, "prelude.jig", PRELUDE_SOURCE);
     let root_path = match &project_root {
         Some(r) => {
             let rel = dir.strip_prefix(r).unwrap_or(Path::new(""));
@@ -121,7 +121,18 @@ pub fn load_program(sources: &Sources, dir: &Path) -> Program {
         }
         None => "main".to_string(),
     };
-    let root = ld.load_dir_package(&root_path, &dir, None);
+    let root = ld.add_dir_package(&root_path, &dir, None);
+    loop {
+        let wave = std::mem::take(&mut ld.queue);
+        if wave.is_empty() {
+            break;
+        }
+        ld.parse_wave(&wave);
+        for (pid, _) in &wave {
+            ld.resolve_imports(*pid);
+        }
+    }
+    ld.report_cycles(&[Some(prelude), root]);
     let root = root.unwrap_or(prelude);
     let n = ld.pkgs.len();
     let mut tys = TyCtx::new();
@@ -146,6 +157,17 @@ pub fn load_program(sources: &Sources, dir: &Path) -> Program {
     }
 }
 
+/// Parse one package's files into its AST.
+fn parse_package(sm: &SourceMap, ast: &mut Ast, files: &[FileId]) -> Vec<Diagnostic> {
+    let mut interner = LocalInterner::default();
+    let mut diags = Vec::new();
+    for &fid in files {
+        let file = sm.file(fid);
+        diags.extend(parser::parse_file(ast, fid, &file.text, file.base, &mut interner).diags);
+    }
+    diags
+}
+
 impl Loader<'_> {
     fn new_package(&mut self, path: &str, dir: Option<PathBuf>, is_std: bool) -> PkgId {
         let name = path.rsplit('/').next().unwrap_or(path).trim_start_matches('<').trim_end_matches('>');
@@ -162,31 +184,19 @@ impl Loader<'_> {
         };
         let id = self.pkgs.push(pkg);
         self.by_path.insert(Symbol::intern(path), id);
-        self.done.push(false);
+        self.edges.push(Vec::new());
         id
     }
 
-    fn parse_into(&mut self, pid: PkgId, path: PathBuf, text: String) {
-        let fid = self.sm.add(path, text);
-        let Loader { sm, pkgs, interner, .. } = self;
-        let file = sm.file(fid);
-        let out = parser::parse_file(&mut pkgs[pid].ast, fid, &file.text, file.base, interner);
-        for d in out.diags {
-            self.diags.push(d);
-        }
-    }
-
-    fn load_embedded(&mut self, path: &str, file: &str, src: &str) -> PkgId {
+    fn add_embedded(&mut self, path: &str, file: &str, src: &str) -> PkgId {
         let pid = self.new_package(path, None, true);
-        self.parse_into(pid, PathBuf::from(format!("<std>/{file}")), src.to_string());
-        self.stack.push(pid);
-        self.resolve_imports(pid);
-        self.stack.pop();
-        self.done[pid.0 as usize] = true;
+        let fid = self.sm.add(PathBuf::from(format!("<std>/{file}")), src.to_string());
+        self.queue.push((pid, vec![fid]));
         pid
     }
 
-    fn load_dir_package(&mut self, path: &str, dir: &Path, import_span: Option<Span>) -> Option<PkgId> {
+    /// Register the package in `dir` and read its files; it is parsed with the next wave.
+    fn add_dir_package(&mut self, path: &str, dir: &Path, import_span: Option<Span>) -> Option<PkgId> {
         let files = match self.sources.list_dir(dir) {
             Some(f) => f,
             None => {
@@ -210,6 +220,7 @@ impl Loader<'_> {
             return None;
         }
         let pid = self.new_package(path, Some(dir.to_path_buf()), false);
+        let mut sources = Vec::new();
         for f in &files {
             let ext = f.extension().and_then(|e| e.to_str()).unwrap_or("");
             if ext != "jig" && ext != "feature" {
@@ -219,18 +230,74 @@ impl Loader<'_> {
                 self.diags.push(Diagnostic::error(codes::E0902, Span::DUMMY, format!("cannot read {}", f.display())));
                 continue;
             };
+            let fid = self.sm.add(f.clone(), text);
             if ext == "jig" {
-                self.parse_into(pid, f.clone(), text);
+                sources.push(fid);
             } else {
-                let fid = self.sm.add(f.clone(), text);
                 self.pkgs[pid].feature_files.push(fid);
             }
         }
-        self.stack.push(pid);
-        self.resolve_imports(pid);
-        self.stack.pop();
-        self.done[pid.0 as usize] = true;
+        self.queue.push((pid, sources));
         Some(pid)
+    }
+
+    /// Parse a wave of packages, spread over threads when there is enough source to pay for
+    /// them. Diagnostics are reported in wave order either way.
+    fn parse_wave(&mut self, wave: &[(PkgId, Vec<FileId>)]) {
+        let size = |files: &[FileId]| files.iter().map(|&f| self.sm.file(f).text.len()).sum::<usize>();
+        let total: usize = wave.iter().map(|(_, fs)| size(fs)).sum();
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(wave.len());
+        let mut results: Vec<Vec<Diagnostic>> = Vec::with_capacity(wave.len());
+        if threads <= 1 || total < 256 * 1024 {
+            for (pid, files) in wave {
+                let d = parse_package(&self.sm, &mut self.pkgs[*pid].ast, files);
+                results.push(d);
+            }
+        } else {
+            // Largest packages first, each to the least loaded thread.
+            let mut order: Vec<usize> = (0..wave.len()).collect();
+            order.sort_by_key(|&i| std::cmp::Reverse(size(&wave[i].1)));
+            let mut load = vec![0usize; threads];
+            let mut jobs: Vec<Vec<usize>> = vec![Vec::new(); threads];
+            for i in order {
+                let t = (0..threads).min_by_key(|&t| load[t]).unwrap_or(0);
+                load[t] += size(&wave[i].1);
+                jobs[t].push(i);
+            }
+            // Move each wave package's AST out so threads own what they fill.
+            let mut asts: Vec<Option<Ast>> =
+                wave.iter().map(|(pid, _)| Some(std::mem::take(&mut self.pkgs[*pid].ast))).collect();
+            let mut slots: Vec<Option<(Ast, Vec<Diagnostic>)>> = (0..wave.len()).map(|_| None).collect();
+            let sm = &self.sm;
+            std::thread::scope(|sc| {
+                let mut handles = Vec::new();
+                for job in &jobs {
+                    let mine: Vec<(usize, Ast)> =
+                        job.iter().map(|&i| (i, asts[i].take().unwrap_or_default())).collect();
+                    handles.push(sc.spawn(move || {
+                        mine.into_iter()
+                            .map(|(i, mut ast)| {
+                                let d = parse_package(sm, &mut ast, &wave[i].1);
+                                (i, ast, d)
+                            })
+                            .collect::<Vec<_>>()
+                    }));
+                }
+                for h in handles {
+                    for (i, ast, d) in h.join().unwrap_or_default() {
+                        slots[i] = Some((ast, d));
+                    }
+                }
+            });
+            for (k, slot) in slots.into_iter().enumerate() {
+                let (ast, d) = slot.unwrap_or_default();
+                self.pkgs[wave[k].0].ast = ast;
+                results.push(d);
+            }
+        }
+        for d in results.into_iter().flatten() {
+            self.diags.push(d);
+        }
     }
 
     fn resolve_imports(&mut self, pid: PkgId) {
@@ -251,6 +318,7 @@ impl Loader<'_> {
                     self.diags.push(Diagnostic::error(codes::E0204, path_span, "a package cannot import itself"));
                     continue;
                 }
+                self.edges[pid.0 as usize].push((target, path_span));
                 if let Some(&(_, prev)) = map.get(&item.name.sym) {
                     let prev_span = self.pkgs[pid].ast.items[prev].span;
                     self.diags.push(
@@ -270,24 +338,53 @@ impl Loader<'_> {
         self.pkgs[pid].deps = deps;
     }
 
+    /// Import cycles, found by walking imports depth first from `roots`: an import of a
+    /// package still being walked closes a cycle.
+    fn report_cycles(&mut self, roots: &[Option<PkgId>]) {
+        let n = self.pkgs.len();
+        let mut done = vec![false; n];
+        let mut stack: Vec<PkgId> = Vec::new();
+        // Explicit stack of (package, next edge index).
+        for &root in roots.iter().flatten() {
+            if done[root.0 as usize] {
+                continue;
+            }
+            let mut work: Vec<(PkgId, usize)> = vec![(root, 0)];
+            stack.push(root);
+            while let Some(&mut (p, ref mut next)) = work.last_mut() {
+                let Some(&(target, span)) = self.edges[p.0 as usize].get(*next) else {
+                    done[p.0 as usize] = true;
+                    stack.pop();
+                    work.pop();
+                    continue;
+                };
+                *next += 1;
+                if done[target.0 as usize] {
+                    continue;
+                }
+                if stack.contains(&target) {
+                    let mut chain: Vec<String> =
+                        stack.iter().skip_while(|&&q| q != target).map(|&q| self.pkgs[q].path.to_string()).collect();
+                    chain.push(self.pkgs[target].path.to_string());
+                    self.diags.push(
+                        Diagnostic::error(codes::E0204, span, format!("import cycle: {}", chain.join(" -> ")))
+                            .note("move the shared code into a package that both can import"),
+                    );
+                    continue;
+                }
+                stack.push(target);
+                work.push((target, 0));
+            }
+        }
+    }
+
     fn import(&mut self, path: &str, span: Span) -> Option<PkgId> {
         let key = Symbol::intern(path);
         if let Some(&p) = self.by_path.get(&key) {
-            if !self.done[p.0 as usize] && self.stack.contains(&p) {
-                let mut chain: Vec<String> =
-                    self.stack.iter().skip_while(|&&q| q != p).map(|&q| self.pkgs[q].path.to_string()).collect();
-                chain.push(path.to_string());
-                self.diags.push(
-                    Diagnostic::error(codes::E0204, span, format!("import cycle: {}", chain.join(" -> ")))
-                        .note("move the shared code into a package that both can import"),
-                );
-                // Keep the binding so the rest of the package still resolves.
-                return Some(p);
-            }
             return Some(p);
         }
         if let Some(&(p, file, src)) = STD_SOURCES.iter().find(|(p, _, _)| *p == path) {
-            return Some(self.load_embedded(p, file, src));
+            return Some(self.add_embedded(p, file, src));
         }
         if path.starts_with("std/") || path == "std" {
             let known: Vec<&str> = STD_SOURCES.iter().map(|(p, _, _)| *p).collect();
@@ -313,6 +410,6 @@ impl Loader<'_> {
             return None;
         }
         let dir = root.join(path);
-        self.load_dir_package(path, &dir, Some(span))
+        self.add_dir_package(path, &dir, Some(span))
     }
 }

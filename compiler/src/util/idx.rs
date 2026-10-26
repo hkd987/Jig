@@ -67,6 +67,9 @@ impl<I: Idx, T> IndexVec<I, T> {
     pub fn next_idx(&self) -> I {
         I::new(self.raw.len())
     }
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
+        self.raw.iter_mut()
+    }
     pub fn iter(&self) -> std::slice::Iter<'_, T> {
         self.raw.iter()
     }

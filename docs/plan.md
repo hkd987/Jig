@@ -85,8 +85,11 @@ structured diagnostics and a working agent plugin.
 - [x] Benchmark corpus (examples + generated 100k-line project).
 - [x] Instruction-count benchmarks (Valgrind) in CI; >2% regression blocks merge without
       a `perf-signoff` label (or a `[perf-signoff]` tag on a direct push to `main`).
-- [ ] Incremental check: per-package results cached by content hash. (A full check of the
-      98k-line benchmark corpus takes about 100 ms on 4 cores, at the edit-loop target.)
+- [x] Check under 100 ms on the 98k-line benchmark corpus (4 cores): packages are parsed in
+      parallel waves and bodies checked on several threads (D25), 63–80 ms for a full check,
+      down from 110–137 ms. `compiler/tests/parallel.rs` checks every example, the
+      self-hosted compiler and every UI and run test on one and four threads and requires
+      identical results. Per-package caching by content hash remains possible on top.
 
 ### 1.7 Gate
 - [x] Agent-written 1,000-line program built with only the plugin reference

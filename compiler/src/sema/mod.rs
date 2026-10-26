@@ -37,13 +37,22 @@ fn quiet_after_syntax_errors(prog: &mut defs::Program) {
 }
 
 pub fn analyze(sources: &Sources, dir: &Path) -> Program {
+    analyze_on(sources, dir, None)
+}
+
+/// `analyze`, checking bodies on `threads` threads (`None`: decide from the program's size and
+/// `JIG_THREADS`). The result does not depend on it.
+pub fn analyze_on(sources: &Sources, dir: &Path, threads: Option<usize>) -> Program {
     let timing = std::env::var_os("JIG_TIME").is_some();
     let t0 = std::time::Instant::now();
     let mut prog = load::load_program(sources, dir);
     let t1 = std::time::Instant::now();
     collect::collect(&mut prog);
     let t2 = std::time::Instant::now();
-    check::check_bodies(&mut prog);
+    match threads {
+        Some(n) => check::check_bodies_on(&mut prog, n),
+        None => check::check_bodies(&mut prog),
+    }
     prog.scenarios = crate::feature::bind::bind(&mut prog);
     let t3 = std::time::Instant::now();
     quiet_after_syntax_errors(&mut prog);

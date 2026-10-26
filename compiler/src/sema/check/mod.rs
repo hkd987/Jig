@@ -77,51 +77,109 @@ pub struct Cx<'a> {
     errors_at_start: usize,
     /// Span of the item being checked (signature included).
     item_span: Span,
+    /// Diagnostics reported before body checking, when `diags` holds only this item's (bodies
+    /// checked on several threads).
+    prior: &'a [Diagnostic],
 }
 
+/// One unit of body checking, in the order the checker visits them.
+#[derive(Clone, Copy)]
+enum Item {
+    Fn(FnId),
+    Test(TestId),
+    Adt(AdtId),
+    Alias(AliasId),
+}
+
+/// What checking one item produced.
+enum Checked {
+    Body(Body),
+    TestBody(Body),
+    Nothing,
+}
+
+fn check_items(defs: &Defs) -> Vec<(Item, PkgId)> {
+    let mut items = Vec::new();
+    for (fid, fd) in defs.fns.iter_enumerated() {
+        if fd.iface.is_none() {
+            items.push((Item::Fn(fid), fd.pkg));
+        }
+    }
+    for (tid, t) in defs.tests.iter_enumerated() {
+        items.push((Item::Test(tid), t.pkg));
+    }
+    for (aid, a) in defs.adts.iter_enumerated() {
+        items.push((Item::Adt(aid), a.pkg));
+    }
+    for (al, a) in defs.aliases.iter_enumerated() {
+        items.push((Item::Alias(al), a.pkg));
+    }
+    items
+}
+
+impl Cx<'_> {
+    fn check_item(&mut self, item: Item) -> Checked {
+        match item {
+            Item::Fn(f) => Checked::Body(self.check_fn(f)),
+            Item::Test(t) => Checked::TestBody(self.check_test(t)),
+            Item::Adt(a) => {
+                self.check_adt_predicates(a);
+                Checked::Nothing
+            }
+            Item::Alias(a) => {
+                self.check_alias_predicate(a);
+                Checked::Nothing
+            }
+        }
+    }
+}
+
+/// Packages whose bodies are big enough to check on several threads.
+const PARALLEL_EXPRS: usize = 20_000;
+
 pub fn check_bodies(prog: &mut Program) {
+    let exprs: usize = prog.pkgs.iter().map(|p| p.ast.exprs.len()).sum();
+    let threads = match std::env::var("JIG_THREADS").ok().and_then(|v| v.parse().ok()) {
+        Some(n) => n,
+        None if exprs >= PARALLEL_EXPRS => std::thread::available_parallelism().map_or(1, |n| n.get()),
+        None => 1,
+    };
+    check_bodies_on(prog, threads);
+}
+
+/// Check every body on `threads` threads (1: on this one). The results are the same either way.
+pub fn check_bodies_on(prog: &mut Program, threads: usize) {
     let Program { sm, pkgs, tables, defs, tys, diags, bodies, test_bodies, prelude, .. } = prog;
     let mut imports_used: Vec<FxHashSet<(usize, Symbol)>> = (0..pkgs.len()).map(|_| FxHashSet::default()).collect();
-    // Functions.
-    for i in 0..defs.fns.len() {
-        let fid = FnId(i as u32);
-        let fd = &defs.fns[fid];
-        if fd.iface.is_some() {
-            continue;
+    let items = check_items(defs);
+    let threads = threads.min(pkgs.len());
+    let results: Vec<Checked> = if threads > 1 {
+        check_parallel(sm, pkgs, defs, tys, tables, diags, *prelude, &mut imports_used, &items, threads)
+    } else {
+        items
+            .iter()
+            .map(|&(item, pid)| {
+                let mut cx = Cx::new(
+                    sm,
+                    pkgs,
+                    defs,
+                    tys,
+                    &mut tables[pid],
+                    diags,
+                    *prelude,
+                    pid,
+                    &mut imports_used[pid.0 as usize],
+                );
+                cx.check_item(item)
+            })
+            .collect()
+    };
+    for ((item, _), r) in items.iter().zip(results) {
+        match (*item, r) {
+            (Item::Fn(f), Checked::Body(b)) => bodies[f] = Some(b),
+            (Item::Test(t), Checked::TestBody(b)) => test_bodies[t] = Some(b),
+            _ => {}
         }
-        let pid = fd.pkg;
-        let body = {
-            let mut cx =
-                Cx::new(sm, pkgs, defs, tys, &mut tables[pid], diags, *prelude, pid, &mut imports_used[pid.0 as usize]);
-            cx.check_fn(fid)
-        };
-        bodies[fid] = Some(body);
-    }
-    // Tests.
-    for i in 0..defs.tests.len() {
-        let tid = TestId(i as u32);
-        let pid = defs.tests[tid].pkg;
-        let body = {
-            let mut cx =
-                Cx::new(sm, pkgs, defs, tys, &mut tables[pid], diags, *prelude, pid, &mut imports_used[pid.0 as usize]);
-            cx.check_test(tid)
-        };
-        test_bodies[tid] = Some(body);
-    }
-    // Struct invariants, field refinements and alias refinements.
-    for i in 0..defs.adts.len() {
-        let aid = AdtId(i as u32);
-        let pid = defs.adts[aid].pkg;
-        let mut cx =
-            Cx::new(sm, pkgs, defs, tys, &mut tables[pid], diags, *prelude, pid, &mut imports_used[pid.0 as usize]);
-        cx.check_adt_predicates(aid);
-    }
-    for i in 0..defs.aliases.len() {
-        let al = AliasId(i as u32);
-        let pid = defs.aliases[al].pkg;
-        let mut cx =
-            Cx::new(sm, pkgs, defs, tys, &mut tables[pid], diags, *prelude, pid, &mut imports_used[pid.0 as usize]);
-        cx.check_alias_predicate(al);
     }
     // Unused imports.
     for (pi, pkg) in pkgs.iter_enumerated() {
@@ -144,6 +202,226 @@ pub fn check_bodies(prog: &mut Program) {
                     );
                 }
             }
+        }
+    }
+}
+
+/// Check bodies on `threads` threads, each owning whole packages and a copy of the type
+/// context that records the types it creates. A thread checks its items in the sequential
+/// order, so a type it already has was created by an earlier item; replaying every item's
+/// creations in the sequential order therefore gives every type the id a sequential check
+/// would, and everything after the checker sees the same types. Diagnostics come out in the
+/// sequential order too.
+#[allow(clippy::too_many_arguments)]
+fn check_parallel(
+    sm: &crate::diag::SourceMap,
+    pkgs: &IndexVec<PkgId, Package>,
+    defs: &Defs,
+    tys: &mut TyCtx,
+    tables: &mut IndexVec<PkgId, Tables>,
+    diags: &mut Diags,
+    prelude: PkgId,
+    imports_used: &mut [FxHashSet<(usize, Symbol)>],
+    items: &[(Item, PkgId)],
+    threads: usize,
+) -> Vec<Checked> {
+    // Packages to threads, largest first, each to the least loaded.
+    let mut order: Vec<PkgId> = pkgs.indices().collect();
+    order.sort_by_key(|&p| std::cmp::Reverse(pkgs[p].ast.exprs.len()));
+    let mut load = vec![0usize; threads];
+    let mut owner = vec![0usize; pkgs.len()];
+    for p in order {
+        let t = (0..threads).min_by_key(|&t| load[t]).unwrap_or(0);
+        load[t] += pkgs[p].ast.exprs.len() + 1;
+        owner[p.0 as usize] = t;
+    }
+    let base = tys.sizes();
+    // Each thread gets its packages' tables and import sets.
+    let mut shares: Vec<Vec<Share>> = (0..threads).map(|_| Vec::new()).collect();
+    for p in pkgs.indices() {
+        let t = owner[p.0 as usize];
+        shares[t].push((p, std::mem::take(&mut tables[p]), std::mem::take(&mut imports_used[p.0 as usize])));
+    }
+    struct Done {
+        tys: TyCtx,
+        share: Vec<Share>,
+        /// Per item of this thread (in item order): index into `items`, log range, diagnostics,
+        /// result.
+        items: Vec<(usize, std::ops::Range<usize>, Vec<Diagnostic>, Checked)>,
+    }
+    let base_tys = &*tys;
+    let prior: &[Diagnostic] = &diags.list;
+    let done: Vec<Done> = std::thread::scope(|sc| {
+        let handles: Vec<_> = shares
+            .into_iter()
+            .enumerate()
+            .map(|(t, mut share)| {
+                let owner = &owner;
+                sc.spawn(move || {
+                    let mut local = base_tys.clone();
+                    local.log = Some(Vec::new());
+                    let mut out = Vec::new();
+                    for (k, &(item, pid)) in items.iter().enumerate() {
+                        if owner[pid.0 as usize] != t {
+                            continue;
+                        }
+                        let slot = share.iter().position(|(p, _, _)| *p == pid).unwrap_or(0);
+                        let (_, tbl, used) = &mut share[slot];
+                        let start = local.log.as_ref().map_or(0, |l| l.len());
+                        let mut d = Diags::default();
+                        let mut cx = Cx::new(sm, pkgs, defs, &mut local, tbl, &mut d, prelude, pid, used);
+                        cx.prior = prior;
+                        let r = cx.check_item(item);
+                        let end = local.log.as_ref().map_or(0, |l| l.len());
+                        out.push((k, start..end, d.list, r));
+                    }
+                    Done { tys: local, share, items: out }
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().expect("checker thread")).collect()
+    });
+    // Replay every item's interns in item order, then translate what each thread stored.
+    let (ctxs, rest): (Vec<TyCtx>, Vec<_>) = done.into_iter().map(|d| (d.tys, (d.share, d.items))).unzip();
+    let mut merges: Vec<Merge> = ctxs.iter().map(|c| Merge::new(c, base)).collect();
+    let mut by_item: Vec<Option<(usize, usize)>> = vec![None; items.len()];
+    for (t, (_, its)) in rest.iter().enumerate() {
+        for (j, (k, _, _, _)) in its.iter().enumerate() {
+            by_item[*k] = Some((t, j));
+        }
+    }
+    for &(t, j) in by_item.iter().flatten() {
+        let range = rest[t].1[j].1.clone();
+        let log = ctxs[t].log.as_deref().unwrap_or(&[]);
+        for &e in &log[range] {
+            match e {
+                Interned::Ty(x) => {
+                    merges[t].ty(tys, x);
+                }
+                Interned::Unit(u) => {
+                    merges[t].unit(tys, u);
+                }
+            }
+        }
+    }
+    let mut results: Vec<Option<Checked>> = (0..items.len()).map(|_| None).collect();
+    let mut item_diags: Vec<Vec<Diagnostic>> = (0..items.len()).map(|_| Vec::new()).collect();
+    for (t, (share, its)) in rest.into_iter().enumerate() {
+        let m = &mut merges[t];
+        for (p, mut tbl, used) in share {
+            m.tables(tys, &mut tbl);
+            tables[p] = tbl;
+            imports_used[p.0 as usize] = used;
+        }
+        for (k, _, ds, r) in its {
+            let r = match r {
+                Checked::Body(mut b) => {
+                    m.body(tys, &mut b);
+                    Checked::Body(b)
+                }
+                Checked::TestBody(mut b) => {
+                    m.body(tys, &mut b);
+                    Checked::TestBody(b)
+                }
+                Checked::Nothing => Checked::Nothing,
+            };
+            results[k] = Some(r);
+            item_diags[k] = ds;
+        }
+    }
+    for ds in item_diags {
+        for d in ds {
+            diags.push(d);
+        }
+    }
+    results.into_iter().map(|r| r.unwrap_or(Checked::Nothing)).collect()
+}
+
+/// A package's tables and used imports, owned by the thread checking it.
+type Share = (PkgId, Tables, FxHashSet<(usize, Symbol)>);
+
+/// Translates one thread's types (and units) into the shared context.
+struct Merge<'a> {
+    local: &'a TyCtx,
+    base: (usize, usize),
+    tys: Vec<Option<Ty>>,
+    units: Vec<Option<UnitId>>,
+}
+
+impl<'a> Merge<'a> {
+    fn new(local: &'a TyCtx, base: (usize, usize)) -> Merge<'a> {
+        let (nt, nu) = local.sizes();
+        Merge { local, base, tys: vec![None; nt - base.0], units: vec![None; nu - base.1] }
+    }
+
+    fn unit(&mut self, global: &mut TyCtx, u: UnitId) -> UnitId {
+        let i = u.0 as usize;
+        if i < self.base.1 {
+            return u;
+        }
+        if let Some(g) = self.units[i - self.base.1] {
+            return g;
+        }
+        let g = global.intern_unit(self.local.unit_factors(u).to_vec().into_boxed_slice());
+        self.units[i - self.base.1] = Some(g);
+        g
+    }
+
+    fn ty(&mut self, global: &mut TyCtx, t: Ty) -> Ty {
+        let i = t.0 as usize;
+        if i < self.base.0 {
+            return t;
+        }
+        if let Some(g) = self.tys[i - self.base.0] {
+            return g;
+        }
+        let mut list = |m: &mut Self, xs: &[Ty]| -> Box<[Ty]> { xs.iter().map(|&x| m.ty(global, x)).collect() };
+        let k = match self.local.kind(t).clone() {
+            TyKind::Int(k, u) => TyKind::Int(k, self.unit(global, u)),
+            TyKind::Float(u) => TyKind::Float(self.unit(global, u)),
+            TyKind::Tuple(xs) => TyKind::Tuple(list(self, &xs)),
+            TyKind::Adt(a, xs) => TyKind::Adt(a, list(self, &xs)),
+            TyKind::List(x) => TyKind::List(self.ty(global, x)),
+            TyKind::Map(a, b) => TyKind::Map(self.ty(global, a), self.ty(global, b)),
+            TyKind::Set(x) => TyKind::Set(self.ty(global, x)),
+            TyKind::Fn(ps, r, e) => {
+                let ps = list(self, &ps);
+                TyKind::Fn(ps, self.ty(global, r), e)
+            }
+            k => k,
+        };
+        let g = global.intern(k);
+        self.tys[i - self.base.0] = Some(g);
+        g
+    }
+
+    /// `ty` for a stored type: most predate the check and stay as they are.
+    #[inline]
+    fn stored(&mut self, global: &mut TyCtx, x: &mut Ty) {
+        if x.0 as usize >= self.base.0 {
+            *x = self.ty(global, *x);
+        }
+    }
+
+    fn tables(&mut self, global: &mut TyCtx, t: &mut Tables) {
+        for x in t.expr_ty.iter_mut().chain(t.pat_ty.iter_mut()) {
+            self.stored(global, x);
+        }
+        for xs in t.expr_inst.values_mut() {
+            for x in xs.iter_mut() {
+                self.stored(global, x);
+            }
+        }
+        for r in t.expr_res.iter_mut() {
+            if let Res::Type(x) = r {
+                self.stored(global, x);
+            }
+        }
+    }
+
+    fn body(&mut self, global: &mut TyCtx, b: &mut Body) {
+        for l in b.locals.iter_mut() {
+            self.stored(global, &mut l.ty);
         }
     }
 }
@@ -196,6 +474,7 @@ impl<'a> Cx<'a> {
             reported_vars: FxHashSet::default(),
             errors_at_start,
             item_span: Span::DUMMY,
+            prior: &[],
         }
     }
 
@@ -762,7 +1041,11 @@ impl<'a> Cx<'a> {
             return true;
         }
         let s = self.item_span;
-        self.diags.list.iter().any(|d| d.is_error() && d.span.lo >= s.lo && d.span.hi <= s.hi && !s.is_dummy())
+        self.diags
+            .list
+            .iter()
+            .chain(self.prior)
+            .any(|d| d.is_error() && d.span.lo >= s.lo && d.span.hi <= s.hi && !s.is_dummy())
     }
 
     fn first_var(&self, t: Ty) -> Ty {

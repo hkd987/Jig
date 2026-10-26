@@ -115,6 +115,15 @@ pub enum TyKind {
 /// A unit of measure: product of base units with integer exponents, sorted by symbol.
 pub type UnitFactors = Box<[(Symbol, i8)]>;
 
+/// One result of interning, recorded while a body is checked on a copy of the context (see
+/// `check::check_bodies`).
+#[derive(Clone, Copy)]
+pub enum Interned {
+    Ty(Ty),
+    Unit(UnitId),
+}
+
+#[derive(Clone)]
 pub struct TyCtx {
     kinds: Vec<TyKind>,
     map: FxHashMap<TyKind, Ty>,
@@ -134,6 +143,8 @@ pub struct TyCtx {
     pub unit: Ty,
     pub never: Ty,
     pub error: Ty,
+    /// When set, every type and unit created is recorded, in order.
+    pub log: Option<Vec<Interned>>,
 }
 
 pub const NO_UNIT: UnitId = UnitId(0);
@@ -164,6 +175,7 @@ impl TyCtx {
             unit: Ty(0),
             never: Ty(0),
             error: Ty(0),
+            log: None,
         };
         t.unit_id(&[]);
         t.int = t.intern(TyKind::Int(IntTy::I64, NO_UNIT));
@@ -188,7 +200,26 @@ impl TyCtx {
         let t = Ty(self.kinds.len() as u32);
         self.kinds.push(k.clone());
         self.map.insert(k, t);
+        if let Some(log) = &mut self.log {
+            log.push(Interned::Ty(t));
+        }
         t
+    }
+
+    /// How many types and units exist.
+    pub fn sizes(&self) -> (usize, usize) {
+        (self.kinds.len(), self.units.len())
+    }
+
+    /// Intern a unit's factors as they are (already normalized).
+    pub fn intern_unit(&mut self, key: UnitFactors) -> UnitId {
+        if let Some(&u) = self.unit_map.get(&key) {
+            return u;
+        }
+        let u = UnitId(self.units.len() as u32);
+        self.units.push(key.clone());
+        self.unit_map.insert(key, u);
+        u
     }
 
     #[inline]
@@ -247,13 +278,13 @@ impl TyCtx {
         }
         v.retain(|&(_, e)| e != 0);
         v.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
-        let key: UnitFactors = v.into_boxed_slice();
-        if let Some(&u) = self.unit_map.get(&key) {
-            return u;
+        let n = self.units.len();
+        let u = self.intern_unit(v.into_boxed_slice());
+        if let Some(log) = &mut self.log {
+            if self.units.len() > n {
+                log.push(Interned::Unit(u));
+            }
         }
-        let u = UnitId(self.units.len() as u32);
-        self.units.push(key.clone());
-        self.unit_map.insert(key, u);
         u
     }
     pub fn unit_factors(&self, u: UnitId) -> &[(Symbol, i8)] {
