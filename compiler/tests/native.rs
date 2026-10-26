@@ -36,7 +36,7 @@ fn run_one(src: &Path, work: &Path, release: bool) -> Result<(), String> {
         return Err("check failed".into());
     }
     let exe = dir.join(if release { "release" } else { "debug" });
-    let opts = BuildOpts { release, build_dir: dir.join("build"), out: exe.clone() };
+    let opts = BuildOpts { release, build_dir: dir.join("build"), out: exe.clone(), proven: Default::default() };
     build(&mut prog, &opts)?;
     // JIG_MEMCHECK=1 runs debug builds under valgrind: reference counting must neither leak
     // nor touch freed memory.

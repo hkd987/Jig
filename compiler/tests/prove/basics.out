@@ -4,13 +4,16 @@ may trap overflow in `transfer` at tests/prove/basics/main.jig:14:11: `from.bal 
   counterexample: from.name.len() = 0, from.bal = 9223372036854775807, to.name.len() = 0, to.bal = 1, amt = 1
 FAILED postcondition in `wrong_max` at tests/prove/basics/main.jig:34:11: result >= a
   counterexample: a = 0, b = -1
+  hint: If the counterexample can happen, fix the code or the contract. Otherwise the prover is missing a fact (it sees only this body, its `requires` and its callees' contracts): add it as a `requires`, an `ensures` on a callee, or a loop `invariant`.
 FAILED postcondition in `wrong_max` at tests/prove/basics/main.jig:34:24: result >= b
   counterexample: a = -2, b = -1
+  hint: If the counterexample can happen, fix the code or the contract. Otherwise the prover is missing a fact (it sees only this body, its `requires` and its callees' contracts): add it as a `requires`, an `ensures` on a callee, or a loop `invariant`.
 may trap overflow in `sum_to` at tests/prove/basics/main.jig:48:5: `total += i` does not overflow Int
   counterexample: n = 2
 may trap bounds in `last` at tests/prove/basics/main.jig:61:10: index in bounds: xs[xs.len() - 1]
   counterexample: xs.len() = 0
 FAILED precondition in `caller` at tests/prove/basics/main.jig:73:25: `halve` requires x != 0
+  hint: Establish it before the call (an `if`, or an `assert` that is proved), or add it to this function's `requires` so callers must.
 may trap overflow in `main` at tests/prove/basics/main.jig:81:15: `first_or_zero([1]) + last([2])` does not overflow Int
 may trap overflow in `main` at tests/prove/basics/main.jig:81:15: `first_or_zero([1]) + last([2]) + caller()` does not overflow Int
 proved 31 of 34 contract obligations and 8 of 14 safety obligations in 9 functions (0 from cache)

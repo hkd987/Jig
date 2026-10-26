@@ -155,7 +155,11 @@ impl<'a> Lowerer<'a> {
             b.ret_refine = fd.ret_refine;
             for (i, al) in refined {
                 let l = b.params[i].0;
+                // At the parameter: the caller's obligation, never removed by the callee's proofs.
+                let saved = b.cur_span;
+                b.cur_span = b.lw.defs.fns[f].params[i - offset].span;
                 b.check_alias(al, Place::local(l));
+                b.cur_span = saved;
             }
             for &r in b.ast.expr_lists.get(decl.requires).to_vec().iter() {
                 b.check(r, CheckKind::Precondition);
@@ -338,6 +342,8 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
             // The exit block checks then returns; re-route: exit -> checks -> return.
             let ret_block = body_start;
             self.blocks[ret_block].term = Terminator::Return;
+            // Return checks are reported at the function (where the prover records them).
+            self.cur_span = self.lw.mir.fns[self.mfn].span;
             if let Some(al) = ret_refine {
                 self.check_alias(al, Place::local(Local(0)));
             }
@@ -374,8 +380,16 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
 
     /// Emit a runtime check of a boolean expression, showing operand values on failure.
     fn check(&mut self, cond: ExprId, kind: CheckKind) {
+        let cspan = self.ast.exprs[cond].span;
+        if kind != CheckKind::Precondition && self.lw.mir.elide.contract.contains(&cspan) {
+            // Proved: contracts are pure, but an assert's condition may have effects.
+            if kind == CheckKind::Assert {
+                let _ = self.expr(cond);
+            }
+            return;
+        }
         let saved = self.cur_span;
-        self.cur_span = self.ast.exprs[cond].span;
+        self.cur_span = cspan;
         let text = self.src(cond);
         let mut values = Vec::new();
         let op = match self.ast.exprs[cond].kind {
@@ -1480,6 +1494,9 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
     fn check_with_names(&mut self, pred: ExprId, names: &[(Symbol, Local)], kind: CheckKind, owner: Symbol) {
         let text = self.src(pred);
         let span = self.cur_span;
+        if self.lw.mir.elide.contract.contains(&span) {
+            return;
+        }
         let c = self.temp(self.lw.tys.bool);
         let ok = self.eval_pred_names(pred, names, Place::local(c));
         if ok {

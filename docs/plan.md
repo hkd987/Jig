@@ -87,8 +87,10 @@ structured diagnostics and a working agent plugin.
 - [ ] Incremental check: per-package results cached by content hash.
 
 ### 1.7 Gate
-- [ ] Agent-written 1,000-line program built with only the plugin reference
-      (`examples/gate1/`), with the transcript summary in `docs/gates/phase1.md`.
+- [x] Agent-written 1,000-line program built with only the plugin reference
+      (`examples/gate1/`, 1,096 lines plus 35 tests), with the report in
+      `docs/gates/phase1.md`. Passed; its compiler bugs are fixed and its reference gaps
+      closed (status table in the report).
 
 ## Phase 2 · Verification
 
@@ -97,20 +99,24 @@ tests; generated property and fuzz tests for whatever isn't proved.
 
 **Gate:** re-proof under 1 s after a one-function change.
 
-- [ ] VC generation from the typed AST: `requires`, `ensures` (`result`, `old`), loop
+- [x] VC generation from the typed AST: `requires`, `ensures` (`result`, `old`), loop
       `invariant`, struct `invariant`, refinements, `assert`, safety obligations (overflow,
-      bounds, division, `unwrap`, `panic` reachability).
-- [ ] Modular proofs: callers see callees' contracts, never bodies.
-- [ ] SMT-LIB backend over a pinned Z3 process (solver-agnostic text interface, so cvc5
-      stays an option); timeouts; minimal counterexamples mapped back to source values.
-- [ ] Proof cache keyed by body + own contract + callee contracts + solver version;
-      local directory, shareable via CI cache.
-- [ ] Proven obligations elide their runtime checks; unproven ones keep a debug check and
-      get a generated property test.
-- [ ] `test` blocks with parameters as property tests; generated property/fuzz tests from
-      unproven contracts; counterexample replay.
-- [ ] Plugin: `prove` and `explain counterexample` tools; proof-hint library skill.
-- [ ] Gate measurement in CI (`bench/reprove`).
+      bounds, division, `unwrap`, `panic` reachability). Encoding in D21.
+- [x] Modular proofs: callers see callees' contracts, never bodies.
+- [x] SMT-LIB backend over a pinned Z3 process (solver-agnostic text interface, so cvc5
+      stays an option); timeouts; counterexamples mapped back to source values; one solver
+      per core, reset per function so results are deterministic.
+- [x] Proof cache keyed by body + own contract + callee contracts + type predicates + std +
+      solver version; `.jig/proofs`, shareable via CI cache.
+- [x] Proven obligations elide their runtime checks in builds (contract checks and
+      arithmetic traps); unproven ones keep their debug check.
+- [x] `test` blocks with parameters as property tests: generation by type, `requires` as a
+      filter, shrinking.
+- [ ] Generated property tests from unproven contracts; replaying counterexamples on the
+      interpreter to tell real failures from missing facts.
+- [x] Plugin: `prove` MCP tool with per-obligation hints; `jig-proofs` skill.
+- [x] Gate measurement in CI (`bench/reprove.py`): 0.21 s re-proof of a 20k-line project
+      after a one-function change (limit 1 s); `docs/gates/phase2.md`.
 
 ## Phase 3 · Features and performance
 

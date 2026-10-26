@@ -96,3 +96,47 @@ fn cache_reproves_only_the_changed_function() {
     assert_eq!(redone, vec!["clamp"]);
     assert_eq!(strip(&normalize(&first, &work)).len(), strip(&normalize(&third, &work)).len());
 }
+
+/// Proofs remove runtime checks from native builds without changing behavior; unproven
+/// checks stay and still fire.
+#[test]
+fn proofs_remove_checks_from_builds() {
+    let cc = jig::codegen::build::c_compiler(false);
+    let have_cc = std::process::Command::new(&cc).arg("--version").output().is_ok_and(|o| o.status.success());
+    if !have_solver() || !have_cc {
+        eprintln!("skipping: needs an SMT solver and a C compiler");
+        return;
+    }
+    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("prove-elide");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/prove/semantics/main.jig");
+    std::fs::copy(&src, work.join("main.jig")).unwrap();
+    let cache = work.join(".jig/proofs");
+    let build = |name: &str, proven: jig::verify::Proven| -> (String, String) {
+        let mut prog = jig::sema::analyze(&Sources::Disk, &work);
+        let dir = work.join(format!("build-{name}"));
+        let opts =
+            jig::codegen::build::BuildOpts { release: false, build_dir: dir.clone(), out: work.join(name), proven };
+        jig::codegen::build::build(&mut prog, &opts).expect("build");
+        let out = std::process::Command::new(work.join(name)).output().unwrap();
+        let c: String = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "c") && !p.ends_with("jig_rt.c"))
+            .map(|p| std::fs::read_to_string(p).unwrap())
+            .collect();
+        (format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)), c)
+    };
+    let (plain_out, plain_c) = build("plain", Default::default());
+    let _ = report_for(&work, Some(cache.clone()));
+    let prog = jig::sema::analyze(&Sources::Disk, &work);
+    let proven = jig::verify::cached_proven(&prog, &cache);
+    assert!(!proven.contract.is_empty() && !proven.safety.is_empty());
+    let (proved_out, proved_c) = build("proved", proven);
+    assert_eq!(plain_out, proved_out);
+    assert!(proved_out.contains("`Span` requires lo <= hi"), "the unproven invariant still fires: {proved_out}");
+    let count = |c: &str, pat: &str| c.matches(pat).count();
+    assert!(count(&proved_c, "failed: ") < count(&plain_c, "failed: "));
+    assert!(count(&proved_c, "jig_add_i64") < count(&plain_c, "jig_add_i64"));
+}

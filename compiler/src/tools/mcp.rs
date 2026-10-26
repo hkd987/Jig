@@ -1,6 +1,6 @@
 //! `jig mcp`: a Model Context Protocol server over stdio (newline-delimited JSON-RPC).
 //!
-//! Tools: check, test, run, fmt, explain, search, reference. Paths are relative to the
+//! Tools: check, test, prove, run, fmt, explain, search, reference. Paths are relative to the
 //! server's working directory (the project).
 
 use crate::util::json::Json;
@@ -46,6 +46,15 @@ fn tools() -> Json {
                 .with("path", prop("string", "Package directory with `fn main`."))
                 .with("stdin", prop("string", "Text for standard input."))
                 .with("args", Json::obj().with("type", "array").with("items", Json::obj().with("type", "string")).with("description", "Command-line arguments.")),
+            &[],
+        ),
+        tool(
+            "prove",
+            "Prove a Jig project's contracts (requires, ensures, invariants, refinements, asserts) and the absence of runtime traps (overflow, division by zero, bounds, unwrap) with an SMT solver, one function at a time against its callees' contracts. Results are cached per function. Returns each failed or unknown obligation with a counterexample in source terms and a hint; proven ones are only counted.",
+            Json::obj()
+                .with("path", prop("string", "A file or package directory; the whole project is proved. Defaults to the working directory."))
+                .with("filter", prop("string", "Only functions whose name contains this text."))
+                .with("all", Json::obj().with("type", "boolean").with("description", "Also list unproven safety obligations (traps that keep their runtime check).")),
             &[],
         ),
         tool(
@@ -121,6 +130,43 @@ pub fn call_tool(name: &str, args: &Json) -> Json {
                 .with("errors", n)
                 .with("diagnostics", Json::Arr(report.diags.iter().map(|d| d.json.clone()).collect()));
             text_result(text, Some(structured), false)
+        }
+        "prove" => {
+            let dir = pkg_dir(arg_path(args));
+            let filter = args.get("filter").and_then(|f| f.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+            let all = args.get("all").and_then(|a| a.as_bool()).unwrap_or(false);
+            let mut prog = crate::sema::analyze(&crate::sema::load::Sources::Disk, &dir);
+            if prog.diags.has_errors() {
+                return text_result(
+                    "the project does not check; run `check` and fix the errors first".into(),
+                    None,
+                    true,
+                );
+            }
+            let root =
+                crate::sema::load::find_project_root(&crate::sema::load::Sources::Disk, &dir).unwrap_or(dir.clone());
+            let opts = crate::verify::ProveOpts { cache_dir: Some(root.join(".jig/proofs")), timeout_ms: 2000, filter };
+            match crate::verify::prove(&mut prog, &opts) {
+                Ok(r) => {
+                    let text = crate::verify::render(&prog, &r, all);
+                    let obs: Vec<Json> = r
+                        .fns
+                        .iter()
+                        .flat_map(|f| f.obligations.iter().map(move |o| (f, o)))
+                        .filter(|(_, o)| o.status != crate::verify::Status::Proved && (all || o.kind.is_contract()))
+                        .map(|(f, o)| crate::verify::obligation_json(&prog, f, o))
+                        .collect();
+                    let (cp, ct, sp, st) = r.counts();
+                    let structured = Json::obj()
+                        .with("contracts_proved", cp as i64)
+                        .with("contracts", ct as i64)
+                        .with("safety_proved", sp as i64)
+                        .with("safety", st as i64)
+                        .with("obligations", Json::Arr(obs));
+                    text_result(text, Some(structured), false)
+                }
+                Err(e) => text_result(format!("error: {e}"), None, true),
+            }
         }
         "test" => {
             let dir = pkg_dir(arg_path(args));
@@ -318,7 +364,7 @@ pub fn serve() -> i32 {
             "tools/call" => {
                 let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(Json::obj());
-                if !["check", "test", "run", "fmt", "explain", "search", "reference"].contains(&name) {
+                if !["check", "test", "prove", "run", "fmt", "explain", "search", "reference"].contains(&name) {
                     respond_err(&mut out, &id, -32602, &format!("unknown tool: {name}"));
                     continue;
                 }

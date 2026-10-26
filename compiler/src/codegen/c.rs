@@ -1236,6 +1236,9 @@ impl<'l, 'a> CGen<'l, 'a> {
                 match (op, self.kind(*ty)) {
                     (UnOp::Not, _) => format!("(!{x})"),
                     (UnOp::Neg, TyKind::Float(_)) => format!("(-{x})"),
+                    (UnOp::Neg, TyKind::Int(k, _)) if self.lw.mir.elide.safety.contains(&span) => {
+                        format!("(({})(-(uint64_t)({x})))", int_cty(k))
+                    }
                     (UnOp::Neg, TyKind::Int(k, _)) => {
                         let loc = self.loc(span);
                         format!("jig_neg_{}({x}, {loc})", int_suffix(k))
@@ -1376,6 +1379,15 @@ impl<'l, 'a> CGen<'l, 'a> {
             TyKind::Int(ik, _) => {
                 let s = int_suffix(ik);
                 let ct = int_cty(ik);
+                if self.lw.mir.elide.safety.contains(&span) && matches!(op, Add | Sub | Mul | Div | Shl | Shr) {
+                    // Proved not to trap. Unsigned arithmetic sidesteps C's signed-overflow
+                    // rules; the proof says the result is in range anyway.
+                    return match op {
+                        Div => format!("(({ct})({x} / {y}))"),
+                        Shl | Shr => format!("(({ct})({x} {} {y}))", op.as_str()),
+                        _ => format!("(({ct})((uint64_t)({x}) {} (uint64_t)({y})))", op.as_str()),
+                    };
+                }
                 let loc = self.loc(span);
                 match op {
                     Add => format!("jig_add_{s}({x}, {y}, {loc})"),

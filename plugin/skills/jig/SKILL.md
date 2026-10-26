@@ -15,11 +15,14 @@ code; it is short and complete. [cookbook.md](cookbook.md) has idioms for common
    code. Fix all of them before moving on.
 2. Run the tests with the `test` tool (or `jig test`). Tests run with faked console, clock,
    randomness and files, so they are deterministic.
-3. Run `jig fmt` (or the `fmt` tool) before committing. Commits are blocked until the project
+3. When the code has contracts, run the `prove` tool (or `jig prove`). Every FAILED contract
+   needs a fix: see the `jig-proofs` skill for how to read counterexamples.
+4. Run `jig fmt` (or the `fmt` tool) before committing. Commits are blocked until the project
    checks, tests pass and files are formatted.
 
-Use the MCP tools: `check`, `test`, `run`, `fmt`, `explain <code>` for any diagnostic code,
-`search` to find a function by type (`Str -> Option<Int>`), and `reference`.
+Use the MCP tools: `check`, `test`, `prove`, `run`, `fmt`, `explain <code>` for any
+diagnostic code, `search` to find a function by type (`Str -> Option<Int>`), and
+`reference`.
 
 ## What trips up newcomers
 
@@ -38,7 +41,8 @@ Use the MCP tools: `check`, `test`, `run`, `fmt`, `explain <code>` for any diagn
   `Ok`, `Err` never need a qualifier.
 - `match` must be exhaustive and has no unreachable arms.
 - Everything must be reachable from `main` (or from the `pub` API of a library). Code used
-  only by tests is dead code. Fields must be read; variants must be constructed.
+  only by tests is dead code, unless it lives in a `*_test.jig` file. Fields must be read;
+  variants must be constructed. A `pub` item no other package uses is an error.
 - Empty collections need a type: `let xs: List<Int> = []`, `var m: Map<Str, Int> = Map.new()`.
 - `for` is the only loop: `for i in 0..n`, `for x in xs`, `for (k, v) in m`, `for cond`, `for`.
 

@@ -1,22 +1,31 @@
 FAILED assertion in `bad_loop_havoc` at tests/prove/semantics/main.jig:38:10: x == 0
   counterexample: n = 1
+  hint: If the counterexample can happen, the code is wrong; otherwise add the missing fact as a `requires`, an `ensures` on a callee or a loop `invariant`.
 FAILED postcondition in `bad_area` at tests/prove/semantics/main.jig:81:11: result > 0
+  hint: If the counterexample can happen, fix the code or the contract. Otherwise the prover is missing a fact (it sees only this body, its `requires` and its callees' contracts): add it as a `requires`, an `ensures` on a callee, or a loop `invariant`.
 FAILED assertion in `bad_mut` at tests/prove/semantics/main.jig:122:10: c == 1
+  hint: If the counterexample can happen, the code is wrong; otherwise add the missing fact as a `requires`, an `ensures` on a callee or a loop `invariant`.
 may trap overflow in `bad_span` at tests/prove/semantics/main.jig:127:10: `s.hi + 1` does not overflow Int
   counterexample: s.lo = 0, s.hi = 9223372036854775807
 FAILED struct invariant in `bad_span` at tests/prove/semantics/main.jig:127:3: `Span` requires lo <= hi
   counterexample: s.lo = 0, s.hi = 9223372036854775806
+  hint: Show the new value satisfies the predicate: check it first, or require it of the inputs it is computed from.
 FAILED struct invariant in `bad_list_span` at tests/prove/semantics/main.jig:133:3: `Span` requires lo <= hi
   counterexample: xs.len() = 1
+  hint: Show the new value satisfies the predicate: check it first, or require it of the inputs it is computed from.
 may trap overflow in `ok_span` at tests/prove/semantics/main.jig:144:10: `s.hi - s.lo` does not overflow Int
   counterexample: s.lo = -9223372036854775808, s.hi = 0
 may trap overflow in `ok_strings` at tests/prove/semantics/main.jig:184:29: `s.len() + 1` does not overflow Int
   counterexample: s.len() = 9223372036854775807
 FAILED assertion in `bad_strings` at tests/prove/semantics/main.jig:189:10: s == t
   counterexample: s.len() = 0, t.len() = 0
+  hint: If the counterexample can happen, the code is wrong; otherwise add the missing fact as a `requires`, an `ensures` on a callee or a loop `invariant`.
 FAILED precondition in `main` at tests/prove/semantics/main.jig:201:3: `bad_list_span` requires xs[0].hi < 1000
+  hint: Establish it before the call (an `if`, or an `assert` that is proved), or add it to this function's `requires` so callers must.
 FAILED precondition in `main` at tests/prove/semantics/main.jig:202:3: `ok_list_span` requires xs.len() > 0
+  hint: Establish it before the call (an `if`, or an `assert` that is proved), or add it to this function's `requires` so callers must.
 FAILED precondition in `main` at tests/prove/semantics/main.jig:202:3: `ok_list_span` requires xs[0].lo > -1000
+  hint: Establish it before the call (an `if`, or an `assert` that is proved), or add it to this function's `requires` so callers must.
 may trap overflow in `main` at tests/prove/semantics/main.jig:203:15: `ok_loop_exit(3) + bad_loop_havoc(2)` does not overflow Int
 may trap overflow in `main` at tests/prove/semantics/main.jig:203:15: `ok_loop_exit(3) + bad_loop_havoc(2) + ok_countdown(4)` does not overflow Int
 may trap overflow in `main` at tests/prove/semantics/main.jig:203:15: `ok_loop_exit(3) + bad_loop_havoc(2) + ok_countdown(4) + area(Shape.Empty)` does not overflow Int

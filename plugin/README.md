@@ -7,8 +7,10 @@ The official agent plugin for the Jig language.
   errors are fed back to the agent.
 - **Commit gate:** `git commit` is blocked until the project checks, its tests pass and every
   file is formatted.
-- **MCP tools** (`jig mcp`): `check`, `test`, `run`, `fmt`, `explain`, `search` (by type
-  signature) and `reference`.
+- **Skill `jig-proofs`:** how to read `jig prove` counterexamples and add the facts the prover
+  needs (requires, callee ensures, loop invariants).
+- **MCP tools** (`jig mcp`): `check`, `test`, `prove`, `run`, `fmt`, `explain`, `search` (by
+  type signature) and `reference`.
 
 ## Install
 

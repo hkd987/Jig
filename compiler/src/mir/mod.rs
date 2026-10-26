@@ -209,6 +209,8 @@ pub struct Mir {
     /// Instances requested but not yet lowered.
     pub pending: Vec<MFnId>,
     pub opts: LowerOpts,
+    /// Checks that proofs discharged (empty unless a build supplies cached proofs).
+    pub elide: crate::verify::Proven,
 }
 
 impl Mir {
@@ -219,6 +221,7 @@ impl Mir {
             tests: FxHashMap::default(),
             pending: Vec::new(),
             opts,
+            elide: Default::default(),
         }
     }
 }

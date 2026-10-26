@@ -17,6 +17,7 @@ pub struct Solver {
     stdout: BufReader<ChildStdout>,
     /// The last `(error ...)` the solver printed, if any.
     pub last_error: Option<String>,
+    timeout_ms: u32,
 }
 
 /// The solver command: `$JIG_Z3`, else `z3` on the path.
@@ -44,11 +45,19 @@ impl Solver {
             .map_err(|e| format!("cannot start the SMT solver `{}`: {e} (install z3 or set JIG_Z3)", solver_path()))?;
         let stdin = child.stdin.take().ok_or("no solver stdin")?;
         let stdout = BufReader::new(child.stdout.take().ok_or("no solver stdout")?);
-        let mut s = Solver { child, stdin, stdout, last_error: None };
-        s.send("(set-option :produce-models true)");
-        s.send(&format!("(set-option :timeout {timeout_ms})"));
-        s.send("(set-logic ALL)");
+        let mut s = Solver { child, stdin, stdout, last_error: None, timeout_ms };
+        s.reset();
         Ok(s)
+    }
+
+    /// Forget everything, so each function's answers (and counterexamples) depend only on
+    /// its own queries, not on what this process solved before.
+    pub fn reset(&mut self) {
+        self.send("(reset)");
+        self.send("(set-option :produce-models true)");
+        self.send(&format!("(set-option :timeout {})", self.timeout_ms));
+        self.send("(set-option :random-seed 0)");
+        self.send("(set-logic ALL)");
     }
 
     pub fn send(&mut self, cmd: &str) {

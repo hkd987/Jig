@@ -177,7 +177,16 @@ fn native_build(
         .unwrap_or_else(|| "main".into());
     let build_dir = root.join(".jig").join("build").join(mode);
     let out = out.unwrap_or_else(|| build_dir.join(&name));
-    crate::codegen::build::build(prog, &crate::codegen::build::BuildOpts { release, build_dir, out })
+    // Proofs from `jig prove` that still match the code remove their runtime checks.
+    let proven = crate::verify::cached_proven(prog, &root.join(".jig").join("proofs"));
+    if !proven.is_empty() && std::env::var_os("JIG_QUIET").is_none() {
+        eprintln!(
+            "using proofs: {} contract checks and {} arithmetic checks removed",
+            proven.contract.len(),
+            proven.safety.len()
+        );
+    }
+    crate::codegen::build::build(prog, &crate::codegen::build::BuildOpts { release, build_dir, out, proven })
 }
 
 fn cmd_build(args: &[String]) -> i32 {
@@ -234,6 +243,7 @@ fn cmd_prove(args: &[String]) -> i32 {
             .with("safety_proved", sp as i64)
             .with("safety", stot as i64)
             .with("functions", report.fns.len() as i64)
+            .with("cached", report.fns.iter().filter(|f| f.cached).count() as i64)
             .with("millis", report.millis as i64);
         println!("{}", summary.to_string_compact());
     } else {

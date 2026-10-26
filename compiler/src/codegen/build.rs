@@ -20,6 +20,8 @@ pub struct BuildOpts {
     pub build_dir: PathBuf,
     /// The executable to write.
     pub out: PathBuf,
+    /// Checks discharged by cached proofs (`jig prove`), removed from the build.
+    pub proven: crate::verify::Proven,
 }
 
 /// The C compiler for a mode: `$JIG_CC`, else `clang` for release builds when present, else `cc`.
@@ -162,6 +164,7 @@ fn compile_units(
 pub fn build(prog: &mut Program, opts: &BuildOpts) -> Result<PathBuf, String> {
     let c = {
         let mut lw = Lowerer::new(prog, LowerOpts { check_contracts: !opts.release });
+        lw.mir.elide = opts.proven.clone();
         super::c::generate(&mut lw)?
     };
     std::fs::create_dir_all(&opts.build_dir).map_err(|e| format!("cannot create {}: {e}", opts.build_dir.display()))?;

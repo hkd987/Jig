@@ -8,7 +8,6 @@ pub mod vc;
 use crate::diag::Span;
 use crate::sema::defs::Program;
 use crate::sema::ty::FnId;
-use crate::sema::ty::IntTy;
 use crate::syntax::ast::{self, ExprKind};
 use crate::util::fx::{hash_hex, StableHasher};
 use crate::util::json::Json;
@@ -83,34 +82,40 @@ impl Report {
             .count()
     }
 
-    /// Spans whose runtime checks are fully discharged, by kind.
+    /// Spans whose runtime checks are fully discharged: every obligation recorded there is
+    /// proved. Preconditions are never removed (they are checked in the callee, which must
+    /// stay safe for every caller).
     pub fn proven(&self) -> Proven {
-        let mut all: FxHashMap<(Span, ObKind), bool> = FxHashMap::default();
+        let mut contract: FxHashMap<Span, bool> = FxHashMap::default();
+        let mut safety: FxHashMap<Span, bool> = FxHashMap::default();
         for f in &self.fns {
             for o in &f.obligations {
-                let e = all.entry((o.span, o.kind)).or_insert(true);
-                *e &= o.elidable && o.status == Status::Proved;
+                let ok = o.elidable && o.status == Status::Proved;
+                match o.kind {
+                    ObKind::Precondition => {}
+                    k if k.is_contract() => *contract.entry(o.span).or_insert(true) &= ok,
+                    ObKind::Overflow | ObKind::DivZero | ObKind::Shift => *safety.entry(o.span).or_insert(true) &= ok,
+                    _ => {}
+                }
             }
         }
-        Proven { set: all.into_iter().filter(|(_, ok)| *ok).map(|(k, _)| k).collect() }
+        let keep = |m: FxHashMap<Span, bool>| m.into_iter().filter(|(_, ok)| *ok).map(|(s, _)| s).collect();
+        Proven { contract: keep(contract), safety: keep(safety) }
     }
 }
 
-/// Discharged obligations, consulted by lowering to drop runtime checks.
-#[derive(Default, Clone)]
+/// Discharged obligations, consulted by lowering and code generation to drop runtime checks.
+#[derive(Default, Clone, Debug)]
 pub struct Proven {
-    set: FxHashSet<(Span, ObKind)>,
+    /// Contract checks (asserts, postconditions, invariants, refinements) at these spans.
+    pub contract: FxHashSet<Span>,
+    /// Arithmetic traps (overflow, division by zero, shift range) at these spans.
+    pub safety: FxHashSet<Span>,
 }
 
 impl Proven {
-    pub fn contains(&self, span: Span, kind: ObKind) -> bool {
-        self.set.contains(&(span, kind))
-    }
     pub fn is_empty(&self) -> bool {
-        self.set.is_empty()
-    }
-    pub fn len(&self) -> usize {
-        self.set.len()
+        self.contract.is_empty() && self.safety.is_empty()
     }
 }
 
@@ -322,87 +327,148 @@ pub fn prove(prog: &mut Program, opts: &ProveOpts) -> Result<Report, String> {
         plan.push((f, key, base, name, cached));
     }
     let debug = std::env::var_os("JIG_PROVE_DEBUG").is_some();
-    let mut solver: Option<Solver> = None;
-    let mut reports = Vec::new();
-    let mut gen = vc::Gen::new(prog);
-    for (f, key, base, name, cached) in plan {
-        if let Some(obs) = cached {
-            reports.push(FnReport { fid: f, name, obligations: obs, cached: true });
-            continue;
-        }
-        let Some(vcs) = gen.function(f) else { continue };
-        if solver.is_none() {
-            solver = Some(Solver::start(opts.timeout_ms)?);
-        }
-        let s = solver.as_mut().unwrap();
-        s.send("(push 1)");
-        for d in &vcs.decls {
-            s.send(d);
-        }
-        if debug {
-            eprintln!(";; ---- {name} ----");
-            for d in &vcs.decls {
-                eprintln!("{d}");
+    // Generate every uncached function's conditions (needs the program), then solve them on
+    // one solver process per core.
+    let mut reports: Vec<Option<FnReport>> = Vec::new();
+    let mut work: Vec<(usize, String, u32, vc::FnVcs)> = Vec::new();
+    {
+        let mut gen = vc::Gen::new(prog);
+        for (f, key, base, name, cached) in plan {
+            if let Some(obs) = cached {
+                reports.push(Some(FnReport { fid: f, name, obligations: obs, cached: true }));
+                continue;
             }
+            let Some(vcs) = gen.function(f) else { continue };
+            work.push((reports.len(), key, base, vcs));
+            reports.push(Some(FnReport { fid: f, name, obligations: Vec::new(), cached: false }));
         }
-        let mut obs = Vec::new();
-        for ob in vcs.obligations {
-            let status = if ob.goal == "true" || ob.pc.iter().any(|p| p == "false") {
-                Status::Proved
-            } else {
-                s.last_error = None;
-                s.send("(push 1)");
-                for p in &ob.pc {
-                    s.send(&format!("(assert {p})"));
-                }
-                s.send(&format!("(assert (not {}))", ob.goal));
-                if debug {
-                    eprintln!(
-                        ";; {} {}\n{}\n(assert (not {}))",
-                        ob.kind.name(),
-                        ob.msg,
-                        ob.pc.iter().map(|p| format!("(assert {p})")).collect::<Vec<_>>().join("\n"),
-                        ob.goal
-                    );
-                }
-                let r = s.check();
-                let st = match r {
-                    Sat::Unsat => Status::Proved,
-                    Sat::Sat => {
-                        let terms: Vec<String> = vcs.show.iter().map(|(_, t, _)| t.clone()).collect();
-                        let vals = s.values(&terms);
-                        let mut cex = Vec::new();
-                        for ((label, _, b), v) in vcs.show.iter().zip(vals) {
-                            if let Some(v) = v {
-                                cex.push((label.clone(), show_value(&v, b)));
-                            }
-                        }
-                        Status::Failed(cex)
-                    }
-                    Sat::Unknown => Status::Unknown(match s.last_error.take() {
-                        Some(e) => format!("solver error: {e}"),
-                        None => "timeout".into(),
-                    }),
-                };
-                if debug {
-                    eprintln!(";; => {st:?}");
-                }
-                s.send("(pop 1)");
-                st
-            };
-            obs.push(ObResult { kind: ob.kind, span: ob.span, msg: ob.msg, status, elidable: ob.elidable });
-        }
-        s.send("(pop 1)");
-        if let Some(dir) = &opts.cache_dir {
-            // Timeouts are not cached: a faster machine (or a longer timeout) may prove them.
-            if !obs.iter().any(|o| matches!(&o.status, Status::Unknown(r) if r == "timeout")) {
-                store_cached(&dir.join(format!("{key}.json")), base, &obs);
-            }
-        }
-        reports.push(FnReport { fid: f, name, obligations: obs, cached: false });
     }
-    let _ = IntTy::I64;
+    let jobs =
+        if debug { 1 } else { std::thread::available_parallelism().map_or(1, |n| n.get()).min(work.len().max(1)) };
+    // Deal functions round-robin so every worker gets a similar mix.
+    let mut buckets: Vec<Vec<(usize, String, u32, vc::FnVcs)>> = (0..jobs).map(|_| Vec::new()).collect();
+    for (i, w) in work.into_iter().enumerate() {
+        buckets[i % jobs].push(w);
+    }
+    let names: Vec<String> = reports.iter().map(|r| r.as_ref().map(|r| r.name.clone()).unwrap_or_default()).collect();
+    let results: Vec<Result<Vec<Solved>, String>> = std::thread::scope(|sc| {
+        let handles: Vec<_> = buckets
+            .into_iter()
+            .filter(|b| !b.is_empty())
+            .map(|bucket| {
+                let names = &names;
+                sc.spawn(move || -> Result<Vec<Solved>, String> {
+                    let mut s = Solver::start(opts.timeout_ms)?;
+                    let mut out = Vec::new();
+                    for (idx, key, base, vcs) in bucket {
+                        if debug {
+                            eprintln!(";; ---- {} ----", names[idx]);
+                        }
+                        out.push((idx, key, base, solve_fn(&mut s, vcs, debug)));
+                    }
+                    Ok(out)
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("solver worker panicked".into()))).collect()
+    });
+    for r in results {
+        for (idx, key, base, obs) in r? {
+            if let Some(dir) = &opts.cache_dir {
+                // Timeouts are not cached: a faster machine (or a longer timeout) may prove them.
+                if !obs.iter().any(|o| matches!(&o.status, Status::Unknown(r) if r == "timeout")) {
+                    store_cached(&dir.join(format!("{key}.json")), base, &obs);
+                }
+            }
+            if let Some(rep) = reports[idx].as_mut() {
+                rep.obligations = obs;
+            }
+        }
+    }
+    let reports: Vec<FnReport> = reports.into_iter().flatten().collect();
     Ok(Report { fns: reports, solver: solver_name, millis: start.elapsed().as_millis() })
+}
+
+/// A solved function: (report index, cache key, span base, results).
+type Solved = (usize, String, u32, Vec<ObResult>);
+
+/// Discharge one function's obligations on a solver.
+fn solve_fn(s: &mut Solver, vcs: vc::FnVcs, debug: bool) -> Vec<ObResult> {
+    s.reset();
+    s.send("(push 1)");
+    for d in &vcs.decls {
+        s.send(d);
+        if debug {
+            eprintln!("{d}");
+        }
+    }
+    let mut obs = Vec::new();
+    for ob in vcs.obligations {
+        let status = if ob.goal == "true" || ob.pc.iter().any(|p| p == "false") {
+            Status::Proved
+        } else {
+            s.last_error = None;
+            s.send("(push 1)");
+            for p in &ob.pc {
+                s.send(&format!("(assert {p})"));
+            }
+            s.send(&format!("(assert (not {}))", ob.goal));
+            if debug {
+                let pcs: Vec<String> = ob.pc.iter().map(|p| format!("(assert {p})")).collect();
+                eprintln!(";; {} {}\n{}\n(assert (not {}))", ob.kind.name(), ob.msg, pcs.join("\n"), ob.goal);
+            }
+            let st = match s.check() {
+                Sat::Unsat => Status::Proved,
+                Sat::Sat => {
+                    let terms: Vec<String> = vcs.show.iter().map(|(_, t, _)| t.clone()).collect();
+                    let vals = s.values(&terms);
+                    let mut cex = Vec::new();
+                    for ((label, _, b), v) in vcs.show.iter().zip(vals) {
+                        if let Some(v) = v {
+                            cex.push((label.clone(), show_value(&v, b)));
+                        }
+                    }
+                    Status::Failed(cex)
+                }
+                Sat::Unknown => Status::Unknown(match s.last_error.take() {
+                    Some(e) => format!("solver error: {e}"),
+                    None => "timeout".into(),
+                }),
+            };
+            if debug {
+                eprintln!(";; => {st:?}");
+            }
+            s.send("(pop 1)");
+            st
+        };
+        obs.push(ObResult { kind: ob.kind, span: ob.span, msg: ob.msg, status, elidable: ob.elidable });
+    }
+    s.send("(pop 1)");
+    obs
+}
+
+/// How to make a failed or unknown obligation go through.
+pub fn hint(o: &ObResult) -> &'static str {
+    let possible = "If the counterexample can happen, the code is wrong; otherwise add the missing fact as a `requires`, an `ensures` on a callee or a loop `invariant`.";
+    match o.kind {
+        ObKind::Precondition => "Establish it before the call (an `if`, or an `assert` that is proved), or add it to this function's `requires` so callers must.",
+        ObKind::Postcondition => "If the counterexample can happen, fix the code or the contract. Otherwise the prover is missing a fact (it sees only this body, its `requires` and its callees' contracts): add it as a `requires`, an `ensures` on a callee, or a loop `invariant`.",
+        ObKind::LoopInvariant => {
+            if o.msg.ends_with("(on entry)") {
+                "It must hold before the first iteration: establish it before the loop."
+            } else {
+                "The body must re-establish it. The prover knows only the invariants at the top of an iteration, so add the facts the body relies on to the invariant."
+            }
+        }
+        ObKind::StructInvariant | ObKind::Refinement => "Show the new value satisfies the predicate: check it first, or require it of the inputs it is computed from.",
+        ObKind::Assert => possible,
+        ObKind::Overflow => "Bound the operands (`requires x <= 1_000_000`, a loop invariant), or use `wrapping_add` if wrapping is intended.",
+        ObKind::DivZero => "Check the divisor first, or add `requires d != 0`.",
+        ObKind::Bounds => "Show `0 <= i < xs.len()`: loop over `0..xs.len()`, check the index first, or add it to `requires`.",
+        ObKind::Unwrap => "Match on the value instead, or have its producer `ensures` it is present.",
+        ObKind::Panic => "Show this `panic` is unreachable: the branch condition must be impossible given the `requires`.",
+        ObKind::Cast | ObKind::Shift => "Bound the value first (a check or a `requires`).",
+    }
 }
 
 pub fn location(prog: &Program, span: Span) -> String {
@@ -420,6 +486,9 @@ pub fn obligation_json(prog: &Program, f: &FnReport, o: &ObResult) -> Json {
     j.set("function", f.name.as_str());
     j.set("location", location(prog, o.span).as_str());
     j.set("message", o.msg.as_str());
+    if o.status != Status::Proved {
+        j.set("hint", hint(o));
+    }
     j
 }
 
@@ -451,6 +520,9 @@ pub fn render(prog: &Program, r: &Report, verbose: bool) -> String {
                 location(prog, o.span),
                 o.msg
             ));
+            if o.kind.is_contract() {
+                out.push_str(&format!("  hint: {}\n", hint(o)));
+            }
         }
     }
     let (cp, ct, sp, stot) = r.counts();
