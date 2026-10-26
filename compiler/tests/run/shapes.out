@@ -1,0 +1,4 @@
+rect=6.0, circle=3.0, square=4.0
+circle=3.0, square=4.0, rect=6.0
+total 1314.0
+Rect(2.0, 2.0)

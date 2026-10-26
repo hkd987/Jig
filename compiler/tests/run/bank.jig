@@ -1,0 +1,67 @@
+import "std/io"
+
+type Cents = Int where self >= 0
+
+struct Acct {
+  name: Str
+  bal: Cents
+}
+
+enum TxError {
+  Insufficient(need: Int, have: Int)
+  Unknown(name: Str)
+}
+
+fn TxError.str(self) -> Str {
+  return match self {
+    Insufficient(need, have) => "insufficient funds: need " + need.str() + ", have " + have.str()
+    Unknown(n) => "unknown account " + n
+  }
+}
+
+fn transfer(from: &mut Acct, to: &mut Acct, amt: Cents)
+  requires amt > 0, from.bal >= amt
+  ensures from.bal + to.bal == old(from.bal + to.bal)
+{
+  from.bal -= amt
+  to.bal += amt
+}
+
+fn find(accts: List<Acct>, name: Str) -> Result<Int, TxError> {
+  var i = 0
+  for a in accts {
+    if a.name == name {
+      return Ok(i)
+    }
+    i += 1
+  }
+  return Err(TxError.Unknown(name))
+}
+
+fn pay(accts: &mut List<Acct>, from: Str, to: Str, amt: Int) -> Result<(), TxError> {
+  let i = find(accts, from)?
+  let j = find(accts, to)?
+  if accts[i].bal < amt {
+    return Err(TxError.Insufficient(amt, accts[i].bal))
+  }
+  var a = accts[i]
+  var b = accts[j]
+  transfer(&mut a, &mut b, amt)
+  accts[i] = a
+  accts[j] = b
+  return Ok(())
+}
+
+fn main() effects {io} {
+  var accts = [Acct { name: "ann", bal: 100 }, Acct { name: "bob", bal: 5 }]
+  let results = [pay(&mut accts, "ann", "bob", 40), pay(&mut accts, "bob", "ann", 500), pay(&mut accts, "cat", "ann", 1)]
+  for r in results {
+    match r {
+      Ok(_) => io.println("ok")
+      Err(e) => io.println("error: " + e.str())
+    }
+  }
+  for a in accts {
+    io.println(a.name + ": " + a.bal.str())
+  }
+}

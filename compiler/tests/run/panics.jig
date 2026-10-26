@@ -1,0 +1,11 @@
+import "std/io"
+
+fn get(xs: List<Int>, i: Int) -> Int {
+  return xs[i]
+}
+
+fn main() effects {io} {
+  io.println("before")
+  io.println(get([1, 2, 3], 5).str())
+  io.println("after")
+}

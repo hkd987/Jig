@@ -1,0 +1,48 @@
+import "std/io"
+
+enum Tree {
+  Leaf
+  Node(left: Tree, key: Int, right: Tree)
+}
+
+fn insert(t: Tree, k: Int) -> Tree {
+  return match t {
+    Leaf => Tree.Node(Tree.Leaf, k, Tree.Leaf)
+    Node(l, x, r) => if k < x {
+      Tree.Node(insert(l, k), x, r)
+    } else if k > x {
+      Tree.Node(l, x, insert(r, k))
+    } else {
+      t
+    }
+  }
+}
+
+fn walk(t: Tree, out: &mut List<Int>) {
+  match t {
+    Leaf => {}
+    Node(l, x, r) => {
+      walk(l, &mut out)
+      out.push(x)
+      walk(r, &mut out)
+    }
+  }
+}
+
+fn depth(t: Tree) -> Int {
+  return match t {
+    Leaf => 0
+    Node(l, _, r) => 1 + max(depth(l), depth(r))
+  }
+}
+
+fn main() effects {io} {
+  var t = Tree.Leaf
+  for k in [5, 3, 8, 1, 4, 7, 9, 2, 6, 3] {
+    t = insert(t, k)
+  }
+  var keys: List<Int> = []
+  walk(t, &mut keys)
+  io.println(keys.str())
+  io.println("depth " + depth(t).str())
+}

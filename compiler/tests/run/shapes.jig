@@ -1,0 +1,48 @@
+import "std/io"
+import "std/math"
+
+interface Area {
+  fn area(self) -> Float
+  fn label(self) -> Str
+}
+
+enum Shape {
+  Circle(r: Float)
+  Rect(w: Float, h: Float)
+}
+
+fn Shape.area(self) -> Float {
+  return match self {
+    Circle(r) => math.PI * r * r
+    Rect(w, h) => w * h
+  }
+}
+
+fn Shape.label(self) -> Str {
+  return match self {
+    Circle(_) => "circle"
+    Rect(w, h) if w == h => "square"
+    Rect(_, _) => "rect"
+  }
+}
+
+fn total<T: Area>(xs: List<T>) -> Float {
+  return xs.fold(0.0, fn(acc, x) { acc + x.area() })
+}
+
+fn describe<T: Area>(xs: List<T>) -> List<Str> {
+  var out: List<Str> = []
+  for x in xs {
+    out.push(x.label() + "=" + x.area().round().str())
+  }
+  return out
+}
+
+fn main() effects {io} {
+  var shapes = [Shape.Rect(2.0, 3.0), Shape.Circle(1.0), Shape.Rect(2.0, 2.0)]
+  io.println(describe(shapes).join(", "))
+  shapes.sort_by(fn(a, b) { a.area() < b.area() })
+  io.println(describe(shapes).join(", "))
+  io.println("total " + (total(shapes) * 100.0).floor().str())
+  io.println(shapes[1].str())
+}

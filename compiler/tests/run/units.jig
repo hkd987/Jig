@@ -1,0 +1,28 @@
+import "std/io"
+
+unit m
+unit s
+
+struct Run {
+  dist: Float<m>
+  time: Float<s>
+}
+
+fn pace(r: Run) -> Float<m/s> {
+  return r.dist / r.time
+}
+
+fn main() effects {io} {
+  let runs = [Run { dist: 5000.0, time: 1500.0 }, Run { dist: 10000.0, time: 3200.0 }]
+  var best: Float<m/s> = 0.0
+  for r in runs {
+    let p = pace(r)
+    if p > best {
+      best = p
+    }
+  }
+  let total: Float<m> = runs.fold(0.0, fn(acc: Float<m>, r: Run) -> Float<m> { acc + r.dist })
+  io.println("best " + best.str() + " m/s over " + (total as Float).str() + " m")
+  let area: Float<m^2> = total * total * 4.0
+  io.println((area as Float).sqrt().floor().str())
+}

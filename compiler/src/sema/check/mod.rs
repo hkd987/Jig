@@ -438,13 +438,6 @@ impl<'a> Cx<'a> {
         a
     }
 
-    /// Check `actual` against `expected`, reporting a mismatch at `span`.
-    pub(crate) fn expect_ty(&mut self, span: Span, actual: Ty, expected: Ty) {
-        if !self.coerce(actual, expected) {
-            self.mismatch(span, expected, actual);
-        }
-    }
-
     // ---------- scopes and locals ----------
 
     pub(crate) fn push_scope(&mut self) {
@@ -622,7 +615,6 @@ impl<'a> Cx<'a> {
                 Ok(())
             }
             (TyKind::Infer(_), _) => Ok(()),
-            _ => Ok(()),
         }
     }
 

@@ -868,7 +868,7 @@ impl Collector<'_> {
             let cid = ConstId(i as u32);
             let (pid, item_id) = (self.defs.consts[cid].pkg, self.defs.consts[cid].item);
             let item = self.ast(pid).items[item_id];
-            let ItemKind::Const { ty, value } = item.kind else { unreachable!() };
+            let ItemKind::Const { ty, .. } = item.kind else { unreachable!() };
             let sc = TyScope { pkg: pid, file: item.file as usize, generics: Vec::new(), has_self: false };
             let t = self.resolve_type(&sc, ty);
             self.defs.consts[cid].ty = t;

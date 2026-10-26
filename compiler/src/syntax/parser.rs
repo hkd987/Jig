@@ -204,9 +204,6 @@ impl<'a> Parser<'a> {
     fn mk_stmt(&mut self, kind: StmtKind, span: Span) -> StmtId {
         self.ast.stmts.push(Stmt { kind, span })
     }
-    fn err_expr(&mut self, span: Span) -> ExprId {
-        self.mk_expr(ExprKind::Error, span)
-    }
 
     // ---------- recovery ----------
 
