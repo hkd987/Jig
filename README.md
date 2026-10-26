@@ -22,6 +22,18 @@ fn transfer(from: &mut Acct, to: &mut Acct, amt: Cents)
 - [Build plan](docs/plan.md)
 - [Decisions](docs/decisions.md)
 
+## Quick start
+
+```
+cargo build --release                         # the compiler: target/release/jig
+jig check examples/bank                       # types, effects, lints, dead code (milliseconds)
+jig test examples/bank                        # unit tests on the deterministic runner
+jig run examples/hello                        # run main on the interpreter
+jig build examples/hello --release            # native binary through C and clang -O2
+```
+
+Native builds need a C compiler (`cc`; `clang` for release builds).
+
 ## License
 
 MIT

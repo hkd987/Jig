@@ -1,0 +1,4 @@
+7
+<panic: precondition failed: amt <= bal
+  amt = 5
+  bal = 2>

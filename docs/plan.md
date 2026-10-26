@@ -23,7 +23,7 @@ in Phase 4.
                                         ▼
                                   MIR (CFG, monomorphized)
                          ┌──────────────┼───────────────┐
-                    interpreter     Cranelift          LLVM IR
+                    interpreter    C ─► cc -O0      C ─► clang -O2 (LLVM)
               (tests, scenarios,   (debug builds)   (release builds)
                property tests)
 ```
@@ -67,10 +67,12 @@ structured diagnostics and a working agent plugin.
 - [x] Canonical formatter (`jig fmt`), no options; comment-preserving.
 
 ### 1.4 Back end
-- [ ] MIR: CFG with typed locals and places, monomorphization, copy/drop glue, last-use moves.
+- [x] MIR: CFG with typed locals and places, monomorphization, copy/drop glue.
+- [ ] Last-use moves: elide the retain/release pair when a value's last use is a copy.
 - [x] MIR interpreter: the deterministic runner for tests (fake `io`, `clock`, `rand`, `fs`).
-- [ ] Fast native backend on Cranelift + small C runtime; `jig build`, `jig run`.
-- [ ] Runtime checks: overflow, bounds, division by zero, contracts in debug builds.
+- [x] Fast native backend: MIR → C + small C runtime (`compiler/runtime/`), parallel
+      per-unit compilation with an object cache; `jig build`, `jig run --native` (D20).
+- [x] Runtime checks: overflow, bounds, division by zero, casts, contracts in debug builds.
 
 ### 1.5 Agent plugin (minimal) and docs
 - [x] Language reference under 10k tokens (`docs/reference.md`), shipped as the plugin skill.
@@ -126,8 +128,8 @@ optimizing release backend.
       reachable but uncovered", "what dies if this scenario is deleted"; JSON + text.
 - [ ] Deterministic simulation for `clock`, `rand`, `net`, `fs`, `spawn`.
 - [ ] Structured concurrency under the `spawn` effect.
-- [ ] LLVM release backend (textual IR → `clang -O2`), whole-program dead-code elimination,
-      small binaries (hello world < 100 KB).
+- [x] LLVM release backend: one C unit through `clang -O2` (D20), internal linkage so unused
+      code is dropped; release hello world is 60 KB.
 - [ ] Benchmark suite vs. Rust (same programs in both languages), tracked in CI.
 - [ ] Plugin: spec-first commands (draft scenarios → draft contracts → implement), trace tools.
 

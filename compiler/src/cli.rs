@@ -10,7 +10,8 @@ const USAGE: &str = "usage: jig <command> [path] [options]
 commands:
   check [--json]          parse, types, effects, lints and dead code for the project
   test [filter] [--json]  run tests in the deterministic runner
-  run [-- args]           run main
+  run [--native] [-- args]  run main (interpreter, or a native debug build)
+  build [--release] [-o out]  compile main to a native executable (C; LLVM via clang for release)
   fmt [--check]           format .jig files in place
   explain <code>          explain a diagnostic code
   search <signature>      find functions by type, e.g. 'List<T> -> Option<T>'
@@ -119,6 +120,22 @@ fn cmd_run(args: &[String]) -> i32 {
     let (ours, prog_args) = split_dashdash(args);
     let o = parse_opts(&ours);
     let Some(mut prog) = analyze_or_report(&o) else { return 1 };
+    if o.rest.iter().any(|a| a == "--native") {
+        let exe = match native_build(&o, &mut prog, false, None) {
+            Ok(exe) => exe,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 1;
+            }
+        };
+        return match std::process::Command::new(&exe).args(&prog_args).status() {
+            Ok(s) => s.code().unwrap_or(101),
+            Err(e) => {
+                eprintln!("error: cannot run {}: {e}", exe.display());
+                1
+            }
+        };
+    }
     let mut argv = vec![o.path.display().to_string()];
     argv.extend(prog_args);
     crate::runner::with_big_stack(move || match crate::runner::run_main(&mut prog, argv) {
@@ -128,6 +145,55 @@ fn cmd_run(args: &[String]) -> i32 {
             1
         }
     })
+}
+
+/// Remove `-o <path>` from the arguments.
+fn take_out(args: &[String]) -> (Vec<String>, Option<PathBuf>) {
+    let mut rest = Vec::new();
+    let mut out = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "-o" {
+            out = it.next().map(PathBuf::from);
+        } else {
+            rest.push(a.clone());
+        }
+    }
+    (rest, out)
+}
+
+fn native_build(
+    o: &Opts,
+    prog: &mut crate::sema::defs::Program,
+    release: bool,
+    out: Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    let root = crate::sema::load::find_project_root(&Sources::Disk, &o.path).unwrap_or_else(|| o.path.clone());
+    let mode = if release { "release" } else { "debug" };
+    let name = std::fs::canonicalize(&o.path)
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "main".into());
+    let build_dir = root.join(".jig").join("build").join(mode);
+    let out = out.unwrap_or_else(|| build_dir.join(&name));
+    crate::codegen::build::build(prog, &crate::codegen::build::BuildOpts { release, build_dir, out })
+}
+
+fn cmd_build(args: &[String]) -> i32 {
+    let (args, out) = take_out(args);
+    let o = parse_opts(&args);
+    let release = o.rest.iter().any(|a| a == "--release");
+    let Some(mut prog) = analyze_or_report(&o) else { return 1 };
+    match native_build(&o, &mut prog, release, out) {
+        Ok(exe) => {
+            println!("{}", exe.display());
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
 }
 
 fn cmd_test(args: &[String]) -> i32 {
@@ -249,6 +315,7 @@ pub fn main() -> i32 {
     match args.first().map(|s| s.as_str()) {
         Some("check") => cmd_check(rest),
         Some("run") => cmd_run(rest),
+        Some("build") => cmd_build(rest),
         Some("test") => cmd_test(rest),
         Some("fmt") => cmd_fmt(rest),
         Some("mcp") => crate::tools::mcp::serve(),

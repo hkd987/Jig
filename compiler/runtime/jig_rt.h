@@ -72,6 +72,8 @@ typedef struct jig_box {
 
 /* ---- process ---- */
 void jig_init(int argc, char **argv);
+/* Run the program entry point on a large stack. */
+void jig_run_main(void (*f)(void));
 void jig_exit(int code) __attribute__((noreturn));
 void jig_panic(const char *msg, const char *loc) __attribute__((noreturn));
 void jig_panic_buf(jig_buf *b, const char *loc) __attribute__((noreturn));

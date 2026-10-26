@@ -1,0 +1,15 @@
+import "std/io"
+
+// A violated precondition stops the program in debug builds and names the values involved.
+
+fn withdraw(bal: Int, amt: Int) -> Int
+  requires amt <= bal
+  ensures result >= 0
+{
+  return bal - amt
+}
+
+fn main() effects {io} {
+  io.println(withdraw(10, 3).str())
+  io.println(withdraw(2, 5).str())
+}

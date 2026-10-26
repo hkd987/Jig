@@ -3,6 +3,7 @@
 #include "jig_rt.h"
 
 #include <dirent.h>
+#include <pthread.h>
 #include <errno.h>
 #include <math.h>
 #include <stdio.h>
@@ -35,6 +36,23 @@ void jig_init(int argc, char **argv) {
     g_rng = ((uint64_t)ts.tv_nsec * 0x9e3779b97f4a7c15ull) ^ ((uint64_t)getpid() << 32) ^ (uint64_t)ts.tv_sec;
     if (!g_rng) g_rng = 1;
     atexit(flush_out);
+}
+
+static void *run_thunk(void *f) {
+    ((void (*)(void))f)();
+    return NULL;
+}
+
+void jig_run_main(void (*f)(void)) {
+    /* Deeply recursive programs get the same headroom as under the test runner. */
+    pthread_attr_t attr;
+    pthread_t t;
+    pthread_attr_init(&attr);
+    if (pthread_attr_setstacksize(&attr, (size_t)1 << 30) != 0 || pthread_create(&t, &attr, run_thunk, (void *)f) != 0) {
+        f();
+        return;
+    }
+    pthread_join(t, NULL);
 }
 
 void jig_exit(int code) {

@@ -1,0 +1,201 @@
+import "std/io"
+
+// Value semantics, closures, generics and nested places: everything the native back end
+// must get right about ownership.
+
+struct Item {
+  name: Str
+  tags: List<Str>
+  qty: Int
+}
+
+enum Expr {
+  Num(v: Int)
+  Add(a: Expr, b: Expr)
+  Mul(a: Expr, b: Expr)
+  Neg(e: Expr)
+}
+
+enum Shape {
+  Circle(r: Float)
+  Rect(w: Float, h: Float)
+}
+
+interface Area {
+  fn area(self) -> Float
+}
+
+fn Shape.area(self) -> Float {
+  return match self {
+    Circle(r) => 3.0 * r * r
+    Rect(w, h) => w * h
+  }
+}
+
+fn Item.str(self) -> Str {
+  return self.name + "x" + self.qty.str()
+}
+
+fn eval(e: Expr) -> Int {
+  return match e {
+    Num(v) => v
+    Add(a, b) => eval(a) + eval(b)
+    Mul(a, b) => eval(a) * eval(b)
+    Neg(x) => -eval(x)
+  }
+}
+
+fn show(e: Expr) -> Str {
+  return match e {
+    Num(v) => v.str()
+    Add(a, b) => "(" + show(a) + " + " + show(b) + ")"
+    Mul(a, b) => show(a) + " * " + show(b)
+    Neg(x) => "-" + show(x)
+  }
+}
+
+fn total<T: Area>(xs: List<T>) -> Float {
+  var t = 0.0
+  for x in xs {
+    t += x.area()
+  }
+  return t
+}
+
+fn largest<T: Ord>(xs: List<T>) -> Option<T> {
+  var best: Option<T> = None
+  for x in xs {
+    best = match best {
+      None => Some(x)
+      Some(b) => if x > b { Some(x) } else { Some(b) }
+    }
+  }
+  return best
+}
+
+fn bump_all(items: &mut List<Item>, by: Int) {
+  for i in 0..items.len() {
+    items[i].qty += by
+    items[i].tags.push("b" + by.str())
+  }
+}
+
+fn make_adder(n: Int) -> fn(Int) -> Int {
+  return fn(x) { x + n }
+}
+
+fn compose(f: fn(Int) -> Int, g: fn(Int) -> Int) -> fn(Int) -> Int {
+  return fn(x) { g(f(x)) }
+}
+
+fn parse_pair(s: Str) -> Result<(Int, Int), Str> {
+  let parts = s.split(",")
+  if parts.len() != 2 {
+    return Err("want two parts: " + s)
+  }
+  let a = parts[0].trim().to_int().ok_or("bad left")?
+  let b = parts[1].trim().to_int().ok_or("bad right")?
+  return Ok((a, b))
+}
+
+fn main() effects {io} {
+  // Copies are independent.
+  let a = [1, 2, 3]
+  var b = a
+  b.push(4)
+  b[0] = 10
+  io.println(a.str() + " " + b.str())
+
+  // Nested lists and in-place updates through indices.
+  var grid: List<List<Int>> = []
+  for i in 0..3 {
+    var row: List<Int> = []
+    for j in 0..4 {
+      row.push(i * 4 + j)
+    }
+    grid.push(row)
+  }
+  let snapshot = grid
+  grid[1][2] = 99
+  grid[2].reverse()
+  io.println(grid.str())
+  io.println(snapshot[1].str())
+
+  // Structs holding heap values, mutated through &mut.
+  var items = [
+    Item { name: "nut", tags: ["small"], qty: 3 },
+    Item { name: "bolt", tags: [], qty: 1 },
+  ]
+  let before = items
+  bump_all(&mut items, 2)
+  io.println(items.str() + " " + before.str())
+  io.println(items[0].tags.str() + " " + before[0].tags.str())
+
+  // Recursive enums.
+  let e = Expr.Add(Expr.Num(2), Expr.Mul(Expr.Num(3), Expr.Neg(Expr.Num(4))))
+  io.println(show(e) + " = " + eval(e).str())
+  let e2 = e
+  io.println((e == e2).str() + " " + (e == Expr.Num(2)).str())
+
+  // Closures capture copies.
+  var words = ["pear", "fig", "apple"]
+  let n_before = words.len()
+  let count = fn() { words.len() }
+  words.push("kiwi")
+  io.println(count().str() + " " + words.len().str() + " " + n_before.str())
+  let add5 = make_adder(5)
+  let f = compose(add5, fn(x) { x * 3 })
+  io.println(f(1).str() + " " + [1, 2, 3].map(f).str())
+  let prefix = "item-"
+  let names = words.map(fn(w) { prefix + w })
+  io.println(names.join(","))
+  io.println(words.filter(fn(w) { w.len() > 3 }).str())
+  io.println([3, 1, 2].fold(0, fn(acc, x) { acc * 10 + x }).str())
+
+  // Sorting.
+  var ws = words
+  ws.sort()
+  io.println(ws.str() + " " + words.str())
+  ws.sort_by(fn(x, y) { x.len() < y.len() || (x.len() == y.len() && x > y) })
+  io.println(ws.str())
+
+  // Generics and interfaces.
+  let shapes = [Shape.Circle(1.0), Shape.Rect(2.0, 3.5)]
+  io.println(total(shapes).str())
+  io.println(largest([3, 9, 2]).str() + " " + largest(["b", "c", "a"]).str())
+  let empty: List<Int> = []
+  io.println(largest(empty).str())
+
+  // Maps and sets of structured keys.
+  var m: Map<(Int, Str), List<Int>> = Map.new()
+  m.insert((1, "a"), [1])
+  m.insert((2, "b"), [2, 2])
+  m.insert((1, "a"), [3])
+  io.println(m.str() + " " + m.len().str())
+  match m.get((2, "b")) {
+    Some(v) => io.println("got " + v.str())
+    None => io.println("missing")
+  }
+  var seen: Set<Str> = Set.new()
+  for w in ["a", "b", "a", "c", "b"] {
+    seen.insert(w)
+  }
+  io.println(seen.str() + " " + seen.contains("c").str() + " " + seen.contains("z").str())
+  let removed = m.remove((1, "a"))
+  io.println(removed.str() + " " + m.str())
+
+  // Results and `?`.
+  io.println(parse_pair("3, 4").str())
+  io.println(parse_pair("3").str())
+  io.println(parse_pair("x,4").str())
+
+  // Tuples and strings.
+  let t = (1, "two", [3.5])
+  io.println(t.str() + " " + t.1 + " " + t.2[0].str())
+  var s = ""
+  for i in 0..5 {
+    s = s + i.str()
+  }
+  io.println(s + " " + s.len().str())
+  io.println([Some(1), None].str() + " " + ['a', 'b'].str() + " " + ["q\"uote"].str())
+}

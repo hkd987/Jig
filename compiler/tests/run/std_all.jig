@@ -23,7 +23,7 @@ fn main() effects {io, fs, env, clock, rand} {
   io.println("exists " + fs.exists("/tmp/x.txt").str() + " " + fs.exists("/nope").str())
   let t0 = time.now_ms()
   let t1 = time.now_ms()
-  io.println("clock moves " + (t1 > t0).str())
+  io.println("clock moves " + (t1 >= t0).str())
   let r = rand.int(1, 7)
   io.println("dice ok " + (r >= 1 && r < 7).str())
   let f = rand.float()

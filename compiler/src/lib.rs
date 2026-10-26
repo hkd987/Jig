@@ -1,6 +1,7 @@
 //! The Jig compiler and toolchain.
 
 pub mod cli;
+pub mod codegen;
 pub mod diag;
 pub mod fmt;
 pub mod mir;

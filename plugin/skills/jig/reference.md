@@ -356,8 +356,8 @@ Prelude (no import): `assert(c)`, `panic(msg) -> Never`, `min(a, b)`, `max(a, b)
 | `jig check [--json]` | parse, types, effects, lints, dead code; milliseconds |
 | `jig prove [--json]` | SMT proofs per function, cached |
 | `jig test [--json] [filter]` | unit tests, property tests, scenarios |
-| `jig build [--release]` | native binary (Cranelift debug, LLVM release) |
-| `jig run [-- args]` | build and run |
+| `jig build [--release] [-o out]` | native binary (debug: checks on; release: `clang -O2`, contracts off) |
+| `jig run [--native] [-- args]` | run `main` (interpreter, or a native debug build) |
 | `jig fmt [--check]` | canonical formatting; no options |
 | `jig trace <query>` | traceability reports |
 | `jig explain <code>` | long explanation of a diagnostic code |

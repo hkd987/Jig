@@ -36,6 +36,18 @@ jobs:
             ./target/debug/jig test "$d"
           done
 
+  memcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust and Valgrind
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          sudo apt-get update -qq && sudo apt-get install -y -qq valgrind
+      - uses: Swatinem/rust-cache@v2
+      - name: Native programs neither leak nor touch freed memory
+        run: JIG_MEMCHECK=1 cargo test --locked --test native native_debug
+
   bench:
     runs-on: ubuntu-latest
     steps:

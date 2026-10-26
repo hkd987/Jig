@@ -1,0 +1,27 @@
+[1, 2, 3] [10, 2, 3, 4]
+[[0, 1, 2, 3], [4, 5, 99, 7], [11, 10, 9, 8]]
+[4, 5, 6, 7]
+[nutx5, boltx3] [nutx3, boltx1]
+["small", "b2"] ["small"]
+(2 + 3 * -4) = -10
+true false
+3 4 3
+18 [18, 21, 24]
+item-pear,item-fig,item-apple,item-kiwi
+["pear", "apple", "kiwi"]
+312
+["apple", "fig", "kiwi", "pear"] ["pear", "fig", "apple", "kiwi"]
+["fig", "pear", "kiwi", "apple"]
+10.0
+Some(9) Some("c")
+None
+{(1, "a"): [3], (2, "b"): [2, 2]} 2
+got [2, 2]
+{"a", "b", "c"} true false
+Some([3]) {(2, "b"): [2, 2]}
+Ok((3, 4))
+Err("want two parts: 3")
+Err("bad left")
+(1, "two", [3.5]) two 3.5
+01234 5
+[Some(1), None] ['a', 'b'] ["q\"uote"]
