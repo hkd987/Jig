@@ -228,6 +228,7 @@ fn cmd_prove(args: &[String]) -> i32 {
         cache_dir: if no_cache { None } else { Some(proof_cache_dir(&o)) },
         timeout_ms: 2000,
         filter,
+        std: o.rest.iter().any(|a| a == "--std"),
     };
     let report = match crate::verify::prove(&mut prog, &opts) {
         Ok(r) => r,
@@ -250,6 +251,8 @@ fn cmd_prove(args: &[String]) -> i32 {
             .with("safety_proved", sp as i64)
             .with("safety", stot as i64)
             .with("functions", report.fns.len() as i64)
+            .with("functions_with_contracts", report.contract_coverage(&prog).0 as i64)
+            .with("functions_with_contracts_proved", report.contract_coverage(&prog).1 as i64)
             .with("cached", report.fns.iter().filter(|f| f.cached).count() as i64)
             .with("millis", report.millis as i64);
         println!("{}", summary.to_string_compact());

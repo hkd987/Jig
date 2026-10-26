@@ -13,7 +13,7 @@ fn have_solver() -> bool {
 fn report_for(dir: &Path, cache: Option<PathBuf>) -> (String, jig::verify::Report) {
     let mut prog = jig::sema::analyze(&Sources::Disk, dir);
     assert!(!prog.diags.has_errors(), "{} does not check", dir.display());
-    let opts = ProveOpts { cache_dir: cache, timeout_ms: 5000, filter: None };
+    let opts = ProveOpts { cache_dir: cache, timeout_ms: 5000, filter: None, std: false };
     let r = prove(&mut prog, &opts).expect("prove");
     let text = render(&prog, &r, true);
     (text, r)
@@ -174,4 +174,27 @@ fn preconditions_proved_at_every_call_leave_the_callee() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("precondition failed: x >= 0"));
     let c = std::fs::read_to_string(dir.join("exe.c")).unwrap();
     assert_eq!(c.matches("precondition failed: x >= 0").count(), 2, "third and quarter keep their checks");
+}
+
+/// Builds do not check the standard library's postconditions (D22), so every one of them must
+/// prove, along with every trap in the standard library's Jig code.
+#[test]
+fn std_proves_completely() {
+    if !have_solver() {
+        eprintln!("skipping: no SMT solver");
+        return;
+    }
+    let dir = PathBuf::from("/std-proof");
+    let mut m = jig::util::FxHashMap::default();
+    m.insert(dir.join("main.jig"), "fn main() {\n}\n".to_string());
+    let mut prog = jig::sema::analyze(&Sources::Memory(m), &dir);
+    assert!(!prog.diags.has_errors());
+    let opts = ProveOpts { cache_dir: None, timeout_ms: 5000, filter: None, std: true };
+    let r = prove(&mut prog, &opts).expect("prove");
+    let text = render(&prog, &r, false);
+    let (cp, ct, sp, st) = r.counts();
+    assert!(ct > 20 && cp == ct && sp == st, "the standard library does not prove:\n{text}");
+    let (with, proved) = r.contract_coverage(&prog);
+    assert_eq!(with, proved, "{text}");
+    assert!(with * 10 >= r.fns.len() * 8, "fewer than 80% of std functions have contracts:\n{text}");
 }

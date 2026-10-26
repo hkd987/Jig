@@ -17,14 +17,18 @@ pub fn panic(msg: Str) -> Never
 /// Aborts the program if `cond` is false. Also a proof obligation.
 pub fn assert(cond: Bool)
 
-pub fn min<T: Ord>(a: T, b: T) -> T {
+pub fn min<T: Ord>(a: T, b: T) -> T
+  ensures result == a || result == b
+{
   if b < a {
     return b
   }
   return a
 }
 
-pub fn max<T: Ord>(a: T, b: T) -> T {
+pub fn max<T: Ord>(a: T, b: T) -> T
+  ensures result == a || result == b
+{
   if b > a {
     return b
   }
@@ -33,14 +37,18 @@ pub fn max<T: Ord>(a: T, b: T) -> T {
 
 // ---- Option ----
 
-pub fn Option<T>.is_some(self) -> Bool {
+pub fn Option<T>.is_some(self) -> Bool
+  ensures result != self.is_none()
+{
   return match self {
     Some(_) => true
     None => false
   }
 }
 
-pub fn Option<T>.is_none(self) -> Bool {
+pub fn Option<T>.is_none(self) -> Bool
+  ensures result != self.is_some()
+{
   return match self {
     Some(_) => false
     None => true
@@ -63,14 +71,18 @@ pub fn Option<T>.unwrap_or(self, default: T) -> T {
   }
 }
 
-pub fn Option<T>.ok_or<E>(self, err: E) -> Result<T, E> {
+pub fn Option<T>.ok_or<E>(self, err: E) -> Result<T, E>
+  ensures result.is_ok() == self.is_some()
+{
   return match self {
     Some(v) => Ok(v)
     None => Err(err)
   }
 }
 
-pub fn Option<T>.map<U>(self, f: fn(T) -> U) -> Option<U> {
+pub fn Option<T>.map<U>(self, f: fn(T) -> U) -> Option<U>
+  ensures result.is_some() == self.is_some()
+{
   return match self {
     Some(v) => Some(f(v))
     None => None
@@ -79,14 +91,18 @@ pub fn Option<T>.map<U>(self, f: fn(T) -> U) -> Option<U> {
 
 // ---- Result ----
 
-pub fn Result<T, E>.is_ok(self) -> Bool {
+pub fn Result<T, E>.is_ok(self) -> Bool
+  ensures result != self.is_err()
+{
   return match self {
     Ok(_) => true
     Err(_) => false
   }
 }
 
-pub fn Result<T, E>.is_err(self) -> Bool {
+pub fn Result<T, E>.is_err(self) -> Bool
+  ensures result != self.is_ok()
+{
   return match self {
     Ok(_) => false
     Err(_) => true
@@ -109,21 +125,27 @@ pub fn Result<T, E>.unwrap_or(self, default: T) -> T {
   }
 }
 
-pub fn Result<T, E>.ok(self) -> Option<T> {
+pub fn Result<T, E>.ok(self) -> Option<T>
+  ensures result.is_some() == self.is_ok()
+{
   return match self {
     Ok(v) => Some(v)
     Err(_) => None
   }
 }
 
-pub fn Result<T, E>.map<U>(self, f: fn(T) -> U) -> Result<U, E> {
+pub fn Result<T, E>.map<U>(self, f: fn(T) -> U) -> Result<U, E>
+  ensures result.is_ok() == self.is_ok()
+{
   return match self {
     Ok(v) => Ok(f(v))
     Err(e) => Err(e)
   }
 }
 
-pub fn Result<T, E>.map_err<F>(self, f: fn(E) -> F) -> Result<T, F> {
+pub fn Result<T, E>.map_err<F>(self, f: fn(E) -> F) -> Result<T, F>
+  ensures result.is_ok() == self.is_ok()
+{
   return match self {
     Ok(v) => Ok(v)
     Err(e) => Err(f(e))
@@ -223,15 +245,21 @@ pub fn List<T>.truncate(&mut self, len: Int)
 pub fn List<T>.repeat(self, n: Int) -> List<T>
 pub fn List<T: Ord>.sort(&mut self)
 
-pub fn List<T>.first(self) -> Option<T> {
+pub fn List<T>.first(self) -> Option<T>
+  ensures result.is_some() == !self.is_empty()
+{
   return self.get(0)
 }
 
-pub fn List<T>.last(self) -> Option<T> {
+pub fn List<T>.last(self) -> Option<T>
+  ensures result.is_some() == !self.is_empty()
+{
   return self.get(self.len() - 1)
 }
 
-pub fn List<T: Eq>.contains(self, item: T) -> Bool {
+pub fn List<T: Eq>.contains(self, item: T) -> Bool
+  ensures !result || !self.is_empty()
+{
   for x in self {
     if x == item {
       return true
@@ -240,13 +268,13 @@ pub fn List<T: Eq>.contains(self, item: T) -> Bool {
   return false
 }
 
-pub fn List<T: Eq>.index_of(self, item: T) -> Option<Int> {
-  var i = 0
-  for x in self {
-    if x == item {
+pub fn List<T: Eq>.index_of(self, item: T) -> Option<Int>
+  ensures result.is_none() || (result.unwrap() >= 0 && result.unwrap() < self.len())
+{
+  for i in 0..self.len() {
+    if self[i] == item {
       return Some(i)
     }
-    i += 1
   }
   return None
 }
@@ -254,19 +282,23 @@ pub fn List<T: Eq>.index_of(self, item: T) -> Option<Int> {
 /// Sorts by a strict "less than" comparison, stably.
 pub fn List<T>.sort_by(&mut self, less: fn(T, T) -> Bool)
 
-pub fn List<T>.map<U>(self, f: fn(T) -> U) -> List<U> {
+pub fn List<T>.map<U>(self, f: fn(T) -> U) -> List<U>
+  ensures result.len() == self.len()
+{
   var out: List<U> = []
-  for x in self {
-    out.push(f(x))
+  for i in 0..self.len() invariant out.len() == i {
+    out.push(f(self[i]))
   }
   return out
 }
 
-pub fn List<T>.filter(self, keep: fn(T) -> Bool) -> List<T> {
+pub fn List<T>.filter(self, keep: fn(T) -> Bool) -> List<T>
+  ensures result.len() <= self.len()
+{
   var out: List<T> = []
-  for x in self {
-    if keep(x) {
-      out.push(x)
+  for i in 0..self.len() invariant out.len() <= i {
+    if keep(self[i]) {
+      out.push(self[i])
     }
   }
   return out
@@ -280,7 +312,9 @@ pub fn List<T>.fold<A>(self, init: A, f: fn(A, T) -> A) -> A {
   return acc
 }
 
-pub fn List<T>.any(self, pred: fn(T) -> Bool) -> Bool {
+pub fn List<T>.any(self, pred: fn(T) -> Bool) -> Bool
+  ensures !result || !self.is_empty()
+{
   for x in self {
     if pred(x) {
       return true
@@ -289,7 +323,9 @@ pub fn List<T>.any(self, pred: fn(T) -> Bool) -> Bool {
   return false
 }
 
-pub fn List<T>.all(self, pred: fn(T) -> Bool) -> Bool {
+pub fn List<T>.all(self, pred: fn(T) -> Bool) -> Bool
+  ensures result || !self.is_empty()
+{
   for x in self {
     if !pred(x) {
       return false
@@ -298,15 +334,15 @@ pub fn List<T>.all(self, pred: fn(T) -> Bool) -> Bool {
   return true
 }
 
-pub fn List<T: Show>.join(self, sep: Str) -> Str {
+pub fn List<T: Show>.join(self, sep: Str) -> Str
+  ensures !self.is_empty() || result == ""
+{
   var out = ""
-  var first = true
-  for x in self {
-    if !first {
+  for i in 0..self.len() invariant i > 0 || out == "" {
+    if i > 0 {
       out = out + sep
     }
-    out = out + x.str()
-    first = false
+    out = out + self[i].str()
   }
   return out
 }

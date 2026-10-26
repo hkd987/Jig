@@ -20,3 +20,4 @@ FAILED precondition in `caller` at tests/prove/basics/main.jig:73:25: `halve` re
 may trap overflow in `main` at tests/prove/basics/main.jig:81:15: `first_or_zero([1]) + last([2])` does not overflow Int
 may trap overflow in `main` at tests/prove/basics/main.jig:81:15: `first_or_zero([1]) + last([2]) + caller()` does not overflow Int
 proved 31 of 34 contract obligations and 8 of 14 safety obligations in 9 functions (0 from cache)
+5 of 9 functions have contracts; 2 of those prove completely

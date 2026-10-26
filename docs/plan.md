@@ -162,7 +162,11 @@ core passes.
 
 **Gate:** the compiler compiles itself; public alpha release.
 
-- [ ] Std library completed in Jig, with > 80% proven contracts.
+- [ ] Std library completed in Jig, with > 80% proven contracts. The prelude's Jig functions
+      state contracts (22 of 25) and every obligation in them proves (`jig prove --std`,
+      enforced by `compiler/tests/prove.rs`), so builds do not check them again; the rest of
+      the library is still runtime intrinsics. Generic functions are proved with their type
+      parameters abstract.
 - [ ] C interop behind the `ffi` effect (SMT solver and LLVM called through the C ABI).
 - [ ] Package manager.
 - [ ] Self-hosted compiler: lexer, parser, checker, MIR, backends, ported pass by pass;

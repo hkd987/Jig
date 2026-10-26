@@ -68,9 +68,33 @@ pub struct ProveOpts {
     pub timeout_ms: u32,
     /// Only functions whose name contains this.
     pub filter: Option<String>,
+    /// Prove the standard library's functions instead of the program's.
+    pub std: bool,
+}
+
+/// Whether a function states a contract: `requires`, `ensures` or a refined parameter or
+/// result.
+pub fn has_contract(prog: &Program, f: FnId) -> bool {
+    let fd = &prog.defs.fns[f];
+    if fd.ret_refine.is_some() || fd.params.iter().any(|p| p.refine.is_some()) {
+        return true;
+    }
+    let pkg = &prog.pkgs[fd.pkg];
+    match pkg.ast.items[fd.item].kind {
+        ast::ItemKind::Fn(d) => !d.requires.is_empty() || !d.ensures.is_empty(),
+        _ => false,
+    }
 }
 
 impl Report {
+    /// Functions with contracts, and how many of them prove completely (every obligation in
+    /// them, contracts and traps).
+    pub fn contract_coverage(&self, prog: &Program) -> (usize, usize) {
+        let with: Vec<&FnReport> = self.fns.iter().filter(|f| has_contract(prog, f.fid)).collect();
+        let proved = with.iter().filter(|f| f.obligations.iter().all(|o| o.status == Status::Proved)).count();
+        (with.len(), proved)
+    }
+
     pub fn counts(&self) -> (usize, usize, usize, usize) {
         let mut c = (0, 0, 0, 0);
         for f in &self.fns {
@@ -145,17 +169,17 @@ fn in_test_file(prog: &Program, span: Span) -> bool {
     prog.sm.file_of(span.lo).is_some_and(|f| prog.sm.file(f).path.to_string_lossy().ends_with("_test.jig"))
 }
 
-/// The functions to prove: non-generic user functions, except test helpers (tests are not
+/// The functions to prove: the program's functions with bodies (generic ones with their type
+/// parameters left abstract), or the standard library's, except test helpers (tests are not
 /// proved; their assertions are checked when they run).
-fn targets(prog: &Program, filter: Option<&str>) -> Vec<FnId> {
+fn targets(prog: &Program, filter: Option<&str>, std: bool) -> Vec<FnId> {
     prog.defs
         .fns
         .iter_enumerated()
         .filter(|(f, fd)| {
-            !prog.pkgs[fd.pkg].is_std
+            prog.pkgs[fd.pkg].is_std == std
                 && !in_test_file(prog, fd.span)
                 && fd.has_body
-                && fd.generics.is_empty()
                 && fd.iface.is_none()
                 && prog.bodies[*f].is_some()
                 && filter.is_none_or(|q| fd.name.as_str().contains(q))
@@ -349,7 +373,7 @@ pub fn cached_proven(prog: &Program, cache_dir: &std::path::Path) -> Proven {
     let global = global_key(prog, &solver);
     let frames = frame::compute_all(prog);
     let mut fns = Vec::new();
-    for f in targets(prog, None) {
+    for f in targets(prog, None, false) {
         let key = cache_key(prog, f, &global, &frames);
         let base = prog.pkgs[prog.defs.fns[f].pkg].ast.items[prog.defs.fns[f].item].span.lo;
         if let Some(obs) = load_cached(&cache_dir.join(format!("{key}.json")), base) {
@@ -425,7 +449,7 @@ pub fn prove(prog: &mut Program, opts: &ProveOpts) -> Result<Report, String> {
     let solver_name = smt::solver_version()
         .ok_or_else(|| format!("cannot run the SMT solver `{}` (install z3 or set JIG_Z3)", smt::solver_path()))?;
     let global = global_key(prog, &solver_name);
-    let fns = targets(prog, opts.filter.as_deref());
+    let fns = targets(prog, opts.filter.as_deref(), opts.std);
     let frames = frame::compute_all(prog);
     // Keys and cached results first (needs only shared access).
     let mut plan = Vec::new();
@@ -879,5 +903,12 @@ pub fn render(prog: &Program, r: &Report, verbose: bool) -> String {
         r.fns.len(),
         r.millis as f64 / 1000.0
     ));
+    let (with, proved) = r.contract_coverage(prog);
+    if with > 0 {
+        out.push_str(&format!(
+            "{with} of {} functions have contracts; {proved} of those prove completely\n",
+            r.fns.len()
+        ));
+    }
     out
 }

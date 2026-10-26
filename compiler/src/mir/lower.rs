@@ -226,11 +226,15 @@ impl<'a> Lowerer<'a> {
             // `&mut` parameters must satisfy their struct predicates again on return.
             let mut_params: Vec<Local> = b.params.iter().filter(|(_, m)| *m == Mode::MutRef).map(|(l, _)| *l).collect();
             b.mut_params = mut_params;
-            // Snapshot `old(...)` values for the postconditions.
-            for &en in b.ast.expr_lists.get(decl.ensures).to_vec().iter() {
-                b.snapshot_olds(en);
+            // Postconditions, with `old(...)` snapshots. The standard library's are proved
+            // when the compiler is tested (`jig prove --std` must prove every one), so they
+            // are not checked again.
+            if !b.lw.pkgs[pkg].is_std {
+                for &en in b.ast.expr_lists.get(decl.ensures).to_vec().iter() {
+                    b.snapshot_olds(en);
+                }
+                b.ensures = b.ast.expr_lists.get(decl.ensures).to_vec();
             }
-            b.ensures = b.ast.expr_lists.get(decl.ensures).to_vec();
         }
         if let Some(bexpr) = decl.body {
             b.lower_body_block(bexpr);

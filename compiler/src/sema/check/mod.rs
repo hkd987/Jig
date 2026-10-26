@@ -880,7 +880,9 @@ impl<'a> Cx<'a> {
             (TyKind::Error, _) | (TyKind::Never, _) => Ok(()),
             (TyKind::Param(i, name), _) => {
                 let bounds = self.generics.get(*i as usize).map(|g| g.bounds.clone()).unwrap_or_default();
-                if bounds.contains(&b) {
+                // Every ordered or hashable type can be compared for equality.
+                let implied = b == Bound::Eq && (bounds.contains(&Bound::Ord) || bounds.contains(&Bound::Hash));
+                if bounds.contains(&b) || implied {
                     Ok(())
                 } else {
                     Err(format!("add the bound to the type parameter: `{name}: {}`", bound_name(self.defs, b)))

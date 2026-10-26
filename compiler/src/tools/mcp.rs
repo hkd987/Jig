@@ -155,7 +155,12 @@ pub fn call_tool(name: &str, args: &Json) -> Json {
             }
             let root =
                 crate::sema::load::find_project_root(&crate::sema::load::Sources::Disk, &dir).unwrap_or(dir.clone());
-            let opts = crate::verify::ProveOpts { cache_dir: Some(root.join(".jig/proofs")), timeout_ms: 2000, filter };
+            let opts = crate::verify::ProveOpts {
+                cache_dir: Some(root.join(".jig/proofs")),
+                timeout_ms: 2000,
+                filter,
+                std: false,
+            };
             match crate::verify::prove(&mut prog, &opts) {
                 Ok(r) => {
                     let text = crate::verify::render(&prog, &r, all);

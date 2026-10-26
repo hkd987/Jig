@@ -1,3 +1,4 @@
 may trap bounds in `too_far` at tests/prove/tasks/main.jig:22:10: index in bounds: ys[xs.len()]
   counterexample: xs.len() = 0
 proved 2 of 2 contract obligations and 3 of 4 safety obligations in 4 functions (0 from cache)
+1 of 4 functions have contracts; 1 of those prove completely

@@ -176,7 +176,7 @@ fn total<T: Shape>(xs: List<T>) -> Float { … }
 ```
 
 Built-in interfaces: `Eq` (`==`, `!=`), `Ord` (`<`, `<=`, `>`, `>=`), `Hash`, `Show`
-(`.str()`). Every type except functions satisfies `Eq` and `Show`; every type except
+(`.str()`); `Ord` and `Hash` imply `Eq`. Every type except functions satisfies `Eq` and `Show`; every type except
 functions and `Float` satisfies `Hash` and `Ord`. Structs and enums compare field by field
 in declaration order. Define `fn T.str(self) -> Str` to customize `Show`.
 
@@ -403,6 +403,10 @@ Prelude (no import): `assert(c)`, `panic(msg) -> Never`, `min(a, b)`, `max(a, b)
 | `Result<T, E>` | `is_ok() is_err() unwrap() unwrap_or(d) ok() map(f) map_err(f)` |
 
 `unwrap()` requires `is_some()`/`is_ok()`: it is a proof obligation like any `requires`.
+The prover knows the prelude's contracts (all proved, `jig prove --std`): `map` keeps the
+length and `filter` does not grow it, `index_of` returns an index in bounds, `first()` and
+`last()` are `Some` exactly when the list is not empty, `Option`/`Result` `map`, `ok_or` and
+`ok` keep whether a value is present, and `min`/`max` return one of their arguments.
 Also: `Char.is_upper() is_lower() is_alnum() to_upper() to_lower()` and `Set.is_empty()`.
 Behavior worth knowing: `io.read_line()` strips `\n` or `\r\n` and returns a final
 unterminated line; `"a  b".split(" ")` keeps empty pieces; `sort_by(less)` takes a strict
@@ -426,7 +430,7 @@ its position; `Str.to_int` and `to_float` ignore surrounding spaces and accept a
 | Command | Does |
 | --- | --- |
 | `jig check [--json]` | parse, types, effects, lints, dead code; milliseconds |
-| `jig prove [filter] [--json] [--verbose]` | SMT proofs per function, cached in `.jig/proofs` |
+| `jig prove [filter] [--json] [--verbose] [--std]` | SMT proofs per function, cached in `.jig/proofs` (`--std`: the standard library's) |
 | `jig test [--json] [filter]` | unit tests, property tests, scenarios |
 | `jig build [--release] [-o out]` | native binary (debug: checks on; release: `clang -O2`, contracts off) |
 | `jig run [--native] [-- args]` | run `main` (interpreter, or a native debug build) |

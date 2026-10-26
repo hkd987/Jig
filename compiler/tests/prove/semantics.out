@@ -55,4 +55,5 @@ may trap overflow in `main` at tests/prove/semantics/main.jig:277:14: `ok_divisi
 may trap overflow in `main` at tests/prove/semantics/main.jig:277:14: `ok_division() + ok_strings("q") + bad_strings("a", "b") + ok_frame() + bad_frame_field() + bad_fr…` does not overflow Int
 may trap overflow in `main` at tests/prove/semantics/main.jig:284:15: `total + more` does not overflow Int
 may trap overflow in `main` at tests/prove/semantics/main.jig:284:15: `total + more + rest` does not overflow Int
-proved 40 of 51 contract obligations and 31 of 51 safety obligations in 30 functions (0 from cache)
+proved 40 of 51 contract obligations and 31 of 51 safety obligations in 31 functions (0 from cache)
+8 of 31 functions have contracts; 6 of those prove completely
