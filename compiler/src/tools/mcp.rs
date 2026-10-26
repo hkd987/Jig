@@ -1,6 +1,6 @@
 //! `jig mcp`: a Model Context Protocol server over stdio (newline-delimited JSON-RPC).
 //!
-//! Tools: check, test, prove, run, fmt, explain, search, reference. Paths are relative to the
+//! Tools: check, test, prove, trace, run, fmt, explain, search, reference. Paths are relative to the
 //! server's working directory (the project).
 
 use crate::util::json::Json;
@@ -55,6 +55,16 @@ fn tools() -> Json {
                 .with("path", prop("string", "A file or package directory; the whole project is proved. Defaults to the working directory."))
                 .with("filter", prop("string", "Only functions whose name contains this text."))
                 .with("all", Json::obj().with("type", "boolean").with("description", "Also list unproven safety obligations (traps that keep their runtime check).")),
+            &[],
+        ),
+        tool(
+            "trace",
+            "Traceability between scenarios (.feature files) and code: with no arguments, coverage per scenario and how much reachable code no scenario exercises; `function` lists the scenarios exercising matching functions; `scenario` lists what a scenario exercises and what becomes dead if it is deleted; `uncovered` lists reachable functions no scenario exercises.",
+            Json::obj()
+                .with("path", prop("string", "Package directory. Defaults to the working directory."))
+                .with("function", prop("string", "Function name (or part of one) to look up."))
+                .with("scenario", prop("string", "Scenario name (or part of one) to look up."))
+                .with("uncovered", Json::obj().with("type", "boolean").with("description", "List the reachable functions no scenario exercises.")),
             &[],
         ),
         tool(
@@ -167,6 +177,26 @@ pub fn call_tool(name: &str, args: &Json) -> Json {
                 }
                 Err(e) => text_result(format!("error: {e}"), None, true),
             }
+        }
+        "trace" => {
+            let dir = pkg_dir(arg_path(args));
+            let prog = crate::sema::analyze(&crate::sema::load::Sources::Disk, &dir);
+            if prog.diags.has_errors() {
+                return text_result("the project does not check; run `check` first".into(), None, true);
+            }
+            let s = |k: &str| args.get(k).and_then(|v| v.as_str()).filter(|v| !v.is_empty()).map(|v| v.to_string());
+            use crate::tools::trace::Query;
+            let q = if let Some(f) = s("function") {
+                Query::Function(f)
+            } else if let Some(sc) = s("scenario") {
+                Query::Scenario(sc)
+            } else if args.get("uncovered").and_then(|u| u.as_bool()).unwrap_or(false) {
+                Query::Uncovered
+            } else {
+                Query::Summary
+            };
+            let (text, json) = crate::tools::trace::run(&prog, &q);
+            text_result(text, Some(Json::obj().with("result", json)), false)
         }
         "test" => {
             let dir = pkg_dir(arg_path(args));
@@ -364,7 +394,8 @@ pub fn serve() -> i32 {
             "tools/call" => {
                 let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(Json::obj());
-                if !["check", "test", "prove", "run", "fmt", "explain", "search", "reference"].contains(&name) {
+                if !["check", "test", "prove", "trace", "run", "fmt", "explain", "search", "reference"].contains(&name)
+                {
                     respond_err(&mut out, &id, -32602, &format!("unknown tool: {name}"));
                     continue;
                 }

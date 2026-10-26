@@ -1,0 +1,23 @@
+import "std/io"
+
+struct Counter {
+  n: Int
+}
+
+fn Counter.new() -> Counter {
+  return Counter { n: 0 }
+}
+
+step "it counts"
+fn when_counts(w: &mut Counter) {
+  w.n += 1
+}
+
+step "nobody uses this step" //~ E0605
+fn then_unused(w: Counter) {
+  assert(w.n >= 0)
+}
+
+fn main() effects {io} {
+  io.println(Counter.new().n.str())
+}

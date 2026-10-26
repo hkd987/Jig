@@ -49,8 +49,41 @@ pub fn run_tests(prog: &mut Program, filter: Option<&str>) -> Vec<TestResult> {
         .iter()
         .map(|&t| (prog.defs.tests[t].label.to_string(), prog.pkgs[prog.defs.tests[t].pkg].path.to_string()))
         .collect();
+    let scenarios: Vec<crate::feature::bind::ScenarioDef> =
+        prog.scenarios.iter().filter(|s| filter.is_none_or(|f| s.name.contains(f))).cloned().collect();
     let mut lw = Lowerer::new(prog, LowerOpts { check_contracts: true });
     let mut out = Vec::new();
+    for (i, sc) in scenarios.iter().enumerate() {
+        let m = lw.scenario_fn(sc);
+        let r = match run_case(&mut lw, m, Vec::new(), 0x5ce7 ^ i as u64) {
+            Case::Pass(stdout) | Case::Discard(stdout) => TestResult {
+                name: format!("Scenario: {}", sc.name),
+                pkg: lw.pkgs[sc.pkg].path.to_string(),
+                passed: true,
+                message: String::new(),
+                location: String::new(),
+                stdout,
+                backtrace: Vec::new(),
+            },
+            Case::Fail { message, span, backtrace, stdout } => TestResult {
+                name: format!("Scenario: {}", sc.name),
+                pkg: lw.pkgs[sc.pkg].path.to_string(),
+                passed: false,
+                // Name the step that failed: the scenario's frame points at its line.
+                message: match sc.steps.iter().find(|st| {
+                    let loc = location(lw.sm, st.span);
+                    backtrace.iter().any(|b| b.ends_with(&format!(" at {loc}")))
+                }) {
+                    Some(st) => format!("{message}\n  in step: {} ({})", st.text, location(lw.sm, st.span)),
+                    None => message,
+                },
+                location: span.map(|s| location(lw.sm, s)).unwrap_or_default(),
+                stdout,
+                backtrace,
+            },
+        };
+        out.push(r);
+    }
     for (i, &tid) in ids.iter().enumerate() {
         let m = lw.test_fn(tid);
         let seed = 0x9e37_79b9 ^ (i as u64 + 1);

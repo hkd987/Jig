@@ -139,6 +139,7 @@ pub fn load_program(sources: &Sources, dir: &Path) -> Program {
         prelude,
         root,
         project_root,
+        scenarios: Vec::new(),
     }
 }
 

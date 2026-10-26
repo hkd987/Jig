@@ -119,6 +119,60 @@ impl<'a> Lowerer<'a> {
         m
     }
 
+    /// A scenario as a function: build the world, then call each step on it.
+    pub fn scenario_fn(&mut self, sc: &crate::feature::bind::ScenarioDef) -> MFnId {
+        use crate::feature::bind::StepArg;
+        let unit = self.tys.unit;
+        let mut locals: IndexVec<Local, LocalDecl> = IndexVec::new();
+        locals.push(LocalDecl { ty: unit, name: None });
+        let mut stmts = Vec::new();
+        let world = sc.world.map(|(t, new)| {
+            let w = locals.push(LocalDecl { ty: t, name: Some(Symbol::intern("world")) });
+            let m = self.instance(new, Box::new([]));
+            stmts.push((Stmt::Assign(Place::local(w), Rvalue::Call(Callee::Fn(m), Vec::new(), t)), sc.span));
+            w
+        });
+        for st in &sc.steps {
+            let m = self.instance(st.f, Box::new([]));
+            let mut args = Vec::new();
+            let first = self.defs.fns[st.f].params.first().map(|p| (p.mode, p.ty));
+            if let (Some(w), Some((mode, t))) = (world, first) {
+                if Some(t) == sc.world.map(|(wt, _)| wt) {
+                    args.push(match mode {
+                        Mode::MutRef => Arg::MutRef(Place::local(w)),
+                        Mode::Value => Arg::Value(Operand::local(w)),
+                    });
+                }
+            }
+            for a in &st.args {
+                let c = match a {
+                    StepArg::Int(v, k) => Const::Int(*v, *k),
+                    StepArg::Float(f) => Const::Float(*f),
+                    StepArg::Bool(b) => Const::Bool(*b),
+                    StepArg::Str(s) => Const::Str(*s),
+                };
+                args.push(Arg::Value(Operand::Const(c)));
+            }
+            let tmp = locals.push(LocalDecl { ty: unit, name: None });
+            stmts.push((Stmt::Assign(Place::local(tmp), Rvalue::Call(Callee::Fn(m), args, unit)), st.span));
+        }
+        let mut blocks = IndexVec::new();
+        blocks.push(Block { stmts, term: Terminator::Return, term_span: sc.span });
+        self.mir.fns.push(MFn {
+            name: format!("scenario \"{}\"", sc.name),
+            source: None,
+            type_args: Box::new([]),
+            params: Vec::new(),
+            n_captures: 0,
+            ret: unit,
+            locals,
+            blocks,
+            intrinsic: None,
+            span: sc.span,
+            lowered: true,
+        })
+    }
+
     fn lower_instance(&mut self, m: MFnId) {
         let f = self.mir.fns[m].source.expect("instance has a source");
         let args = self.mir.fns[m].type_args.clone();

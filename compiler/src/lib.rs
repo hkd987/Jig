@@ -3,6 +3,7 @@
 pub mod cli;
 pub mod codegen;
 pub mod diag;
+pub mod feature;
 pub mod fmt;
 pub mod mir;
 pub mod proptest;

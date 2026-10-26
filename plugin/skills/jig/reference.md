@@ -332,9 +332,17 @@ fn World.new() -> World { … }
 
 step "an account {name} with balance {amt}"
 fn given_account(w: &mut World, name: Str, amt: Cents) { … }
+
+step "{name} has balance {amt}"
+fn then_balance(w: World, name: Str, amt: Int) { … }
 ```
 
-A missing, ambiguous or mistyped step is a compile error, and so is a step no scenario uses.
+Each scenario starts from `World.new()` and runs its steps in order: a step takes the world
+first (`&mut World` to change it, `World` to read it), then one parameter per placeholder.
+Placeholders are `Str` (quoted), numbers or `Bool`. A `Scenario Outline` runs once per
+`Examples` row with `<column>` replaced. `jig test` runs every scenario. A missing (the error
+suggests a step), ambiguous or mistyped step is a compile error, and so is a step no
+scenario uses. Scenarios are roots for dead code: code they reach is justified.
 
 ## Dead code and traceability
 
@@ -342,8 +350,9 @@ Roots are `main` and step functions used by a scenario; a package without `main`
 library) also has its root package's `pub` items as roots. Unreachable functions, unused
 fields, variants and constants, and impossible match arms fail the build. So does an
 unused export: a `pub` item of a non-root package that no other package uses (remove the
-`pub`). `jig trace` (planned) will answer which scenarios exercise a function, what is
-reachable but covered by no scenario, and what dies if a scenario is deleted.
+`pub`). `jig trace` answers which scenarios exercise a function (`jig trace fn transfer`),
+what is reachable but covered by no scenario (`jig trace uncovered`), and what becomes dead
+if a scenario is deleted (`jig trace scenario overdraft`).
 
 ## Standard library
 
@@ -387,7 +396,7 @@ its position; `Str.to_int` and `to_float` ignore surrounding spaces and accept a
 | `jig build [--release] [-o out]` | native binary (debug: checks on; release: `clang -O2`, contracts off) |
 | `jig run [--native] [-- args]` | run `main` (interpreter, or a native debug build) |
 | `jig fmt [--check]` | canonical formatting; no options |
-| `jig trace <query>` | traceability reports (planned) |
+| `jig trace [fn F \| scenario S \| uncovered] [--json]` | traceability between scenarios and code |
 | `jig explain <code>` | long explanation of a diagnostic code |
 
 Every diagnostic has a stable code (`E0301`), a span, a message, and where possible a

@@ -1,0 +1,39 @@
+import "std/io"
+
+struct Shop {
+  stock: Int
+}
+
+fn Shop.new() -> Shop {
+  return Shop { stock: 0 }
+}
+
+step "we have {n} items"
+fn given_items(w: &mut Shop, n: Int) {
+  w.stock = n
+}
+
+step "we have {n} widgets"
+fn given_widgets(w: &mut Shop, n: Int) {
+  w.stock = n
+}
+
+step "we sell {count} items to {who}"
+fn when_sell(w: &mut Shop, count: Int, who: Str) {
+  w.stock -= count
+  assert(who.len() > 0)
+}
+
+step "we sell {count} items to \"bob\""
+fn when_sell_bob(w: &mut Shop, count: Int) {
+  w.stock -= count
+}
+
+step "the stock is {left}" //~ E0805
+fn then_stock(w: Shop, n: Int) {
+  assert(w.stock == n)
+}
+
+fn main() effects {io} {
+  io.println(Shop.new().stock.str())
+}

@@ -44,6 +44,7 @@ pub fn analyze(sources: &Sources, dir: &Path) -> Program {
     collect::collect(&mut prog);
     let t2 = std::time::Instant::now();
     check::check_bodies(&mut prog);
+    prog.scenarios = crate::feature::bind::bind(&mut prog);
     let t3 = std::time::Instant::now();
     quiet_after_syntax_errors(&mut prog);
     prog.diags.sort();

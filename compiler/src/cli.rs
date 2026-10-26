@@ -13,6 +13,7 @@ commands:
   prove [filter] [--json] [--verbose]  prove contracts and safety with an SMT solver (cached)
   run [--native] [-- args]  run main (interpreter, or a native debug build)
   build [--release] [-o out]  compile main to a native executable (C; LLVM via clang for release)
+  trace [fn <name> | scenario <name> | uncovered] [--json]  which scenarios exercise which code
   fmt [--check]           format .jig files in place
   explain <code>          explain a diagnostic code
   search <signature>      find functions by type, e.g. 'List<T> -> Option<T>'
@@ -256,6 +257,29 @@ fn cmd_prove(args: &[String]) -> i32 {
     }
 }
 
+fn cmd_trace(args: &[String]) -> i32 {
+    let o = parse_opts(args);
+    let words: Vec<&str> = o.rest.iter().filter(|a| !a.starts_with("--")).map(|s| s.as_str()).collect();
+    let q = match words.as_slice() {
+        [] => crate::tools::trace::Query::Summary,
+        ["uncovered"] => crate::tools::trace::Query::Uncovered,
+        ["fn", name @ ..] if !name.is_empty() => crate::tools::trace::Query::Function(name.join(" ")),
+        ["scenario", name @ ..] if !name.is_empty() => crate::tools::trace::Query::Scenario(name.join(" ")),
+        _ => {
+            eprintln!("usage: jig trace [fn <name> | scenario <name> | uncovered] [--json]");
+            return 2;
+        }
+    };
+    let Some(prog) = analyze_or_report(&o) else { return 1 };
+    let (text, json) = crate::tools::trace::run(&prog, &q);
+    if o.json {
+        println!("{}", json.to_string_compact());
+    } else {
+        print!("{text}");
+    }
+    0
+}
+
 fn cmd_test(args: &[String]) -> i32 {
     let o = parse_opts(args);
     let filter = o.rest.iter().find(|a| !a.starts_with("--")).cloned();
@@ -377,6 +401,7 @@ pub fn main() -> i32 {
         Some("run") => cmd_run(rest),
         Some("build") => cmd_build(rest),
         Some("prove") => cmd_prove(rest),
+        Some("trace") => cmd_trace(rest),
         Some("test") => cmd_test(rest),
         Some("fmt") => cmd_fmt(rest),
         Some("mcp") => crate::tools::mcp::serve(),

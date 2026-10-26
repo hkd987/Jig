@@ -1,0 +1,41 @@
+// Steps for payments.feature. Each scenario starts from `Bank.new()`.
+
+struct Bank {
+  ledger: Ledger
+  refused: Bool
+}
+
+fn Bank.new() -> Bank {
+  return Bank { ledger: Ledger.new(), refused: false }
+}
+
+step "an account {name} with {amount} cents"
+fn given_account(w: &mut Bank, name: Str, amount: Cents) {
+  w.ledger.open(name, amount)
+}
+
+step "{from} pays {amount} cents to {to}"
+fn when_pays(w: &mut Bank, from: Str, amount: Int, to: Str) {
+  match w.ledger.pay(from, to, amount) {
+    Ok(_) => w.refused = false
+    Err(_) => w.refused = true
+  }
+}
+
+step "{name} has {amount} cents"
+fn then_has(w: Bank, name: Str, amount: Int) {
+  match w.ledger.find(name) {
+    Ok(i) => assert(w.ledger.accounts[i].balance == amount)
+    Err(_) => assert(false)
+  }
+}
+
+step "the payment is refused"
+fn then_refused(w: Bank) {
+  assert(w.refused)
+}
+
+step "the bank holds {amount} cents in total"
+fn then_total(w: Bank, amount: Int) {
+  assert(w.ledger.total() == amount)
+}

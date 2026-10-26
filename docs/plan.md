@@ -126,13 +126,14 @@ optimizing release backend.
 
 **Gate:** within 10% of Rust on the benchmark suite.
 
-- [ ] Gherkin subset parser (`Feature`, `Scenario`, `Scenario Outline`/`Examples`,
-      `Given/When/Then/And/But`); no hooks, tags or backgrounds.
-- [ ] Typed step binding: `step "pattern {param}" fn …`; missing, ambiguous or mistyped steps
-      are compile errors; unused steps are dead code.
-- [ ] Scenarios run as tests in the deterministic runner.
-- [ ] Traceability: `jig trace` answers "which scenarios cover this function", "what is
-      reachable but uncovered", "what dies if this scenario is deleted"; JSON + text.
+- [x] Gherkin subset parser (`Feature`, `Scenario`, `Scenario Outline`/`Examples`,
+      `Given/When/Then/And/But`); no hooks, tags or backgrounds (rejected with E0801).
+- [x] Typed step binding: `step "pattern {param}" fn …`; missing (with a suggested step),
+      ambiguous or mistyped steps are compile errors; unused steps are dead code.
+- [x] Scenarios run as tests in the deterministic runner; failures name the step line.
+- [x] Traceability: `jig trace` answers "which scenarios cover this function", "what is
+      reachable but uncovered", "what dies if this scenario is deleted"; JSON + text; MCP
+      `trace` tool.
 - [ ] Deterministic simulation for `clock`, `rand`, `net`, `fs`, `spawn`.
 - [ ] Structured concurrency under the `spawn` effect.
 - [x] LLVM release backend: one C unit through `clang -O2` (D20), internal linkage so unused

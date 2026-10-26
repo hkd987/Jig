@@ -13,11 +13,22 @@ pub fn check_dead_code(prog: &mut Program) {
     if prog.diags.has_errors() {
         return;
     }
-    let Program { defs, bodies, test_bodies, pkgs, tables, tys, diags, root, sm, .. } = prog;
+    let Program { defs, bodies, test_bodies, pkgs, tables, tys, diags, root, sm, scenarios, .. } = prog;
     let is_user = |pkg: PkgId| !pkgs[pkg].is_std;
     let library = defs.main.is_none();
 
     let mut roots: Vec<FnId> = Vec::new();
+    // Scenarios justify the steps they use and the worlds they build.
+    let mut used_steps: FxHashSet<FnId> = FxHashSet::default();
+    for sc in scenarios.iter() {
+        for st in &sc.steps {
+            used_steps.insert(st.f);
+            roots.push(st.f);
+        }
+        if let Some((_, new)) = sc.world {
+            roots.push(new);
+        }
+    }
     match defs.main {
         Some(m) => roots.push(m),
         None => {
@@ -135,8 +146,14 @@ pub fn check_dead_code(prog: &mut Program) {
         if !is_user(fd.pkg) || fd.iface.is_some() || !fd.has_body || reachable.contains(&fid) {
             continue;
         }
-        if fd.step.is_some() {
-            continue; // checked against scenarios
+        if let Some((pattern, pspan)) = fd.step {
+            if !used_steps.contains(&fid) {
+                diags.push(
+                    Diagnostic::error(codes::E0605, pspan, format!("no scenario uses the step \"{pattern}\""))
+                        .note("delete it, or write a scenario that needs it"),
+                );
+            }
+            continue;
         }
         if test_reachable.contains(&fid) && in_test_file(fid) {
             continue; // a test helper

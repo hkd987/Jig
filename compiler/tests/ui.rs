@@ -1,5 +1,6 @@
 //! UI tests: each `tests/ui/*.jig` file (or directory with `jig.mod`) is checked, and the
-//! errors must match the `//~ E0xxx` annotations exactly (same line, same codes).
+//! errors must match the `//~ E0xxx` annotations exactly (same line, same codes). In
+//! `.feature` files, a `#~^ E0xxx` comment line annotates the line above it.
 
 use jig::sema::load::Sources;
 use std::collections::BTreeMap;
@@ -8,6 +9,15 @@ use std::path::{Path, PathBuf};
 fn expected_in(src: &str) -> Vec<(u32, String)> {
     let mut out = Vec::new();
     for (i, line) in src.lines().enumerate() {
+        // Feature files have no inline comments: `#~^ E0802` annotates the line above.
+        if let Some(pos) = line.trim_start().strip_prefix("#~^").map(|_| line.find("#~^").unwrap()) {
+            for code in line[pos + 3..].split_whitespace() {
+                if code.starts_with('E') {
+                    out.push((i as u32, code.to_string()));
+                }
+            }
+            continue;
+        }
         if let Some(pos) = line.find("//~") {
             for code in line[pos + 3..].split_whitespace() {
                 if code.starts_with('E') {
@@ -101,7 +111,7 @@ fn collect_jig(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
     for p in entries {
         if p.is_dir() {
             collect_jig(&p, out);
-        } else if p.extension().is_some_and(|e| e == "jig") {
+        } else if p.extension().is_some_and(|e| e == "jig" || e == "feature") {
             let canon = std::fs::canonicalize(&p).unwrap();
             out.push((canon, std::fs::read_to_string(&p).unwrap()));
         }

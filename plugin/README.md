@@ -9,8 +9,8 @@ The official agent plugin for the Jig language.
   file is formatted.
 - **Skill `jig-proofs`:** how to read `jig prove` counterexamples and add the facts the prover
   needs (requires, callee ensures, loop invariants).
-- **MCP tools** (`jig mcp`): `check`, `test`, `prove`, `run`, `fmt`, `explain`, `search` (by
-  type signature) and `reference`.
+- **MCP tools** (`jig mcp`): `check`, `test`, `prove`, `trace`, `run`, `fmt`, `explain`,
+  `search` (by type signature) and `reference`.
 
 ## Install
 

@@ -22,6 +22,8 @@ pub struct Program {
     pub root: PkgId,
     /// Project root directory (holding `jig.mod`), if any.
     pub project_root: Option<PathBuf>,
+    /// Scenarios from `.feature` files, bound to their step functions.
+    pub scenarios: Vec<crate::feature::bind::ScenarioDef>,
 }
 
 pub struct Package {
