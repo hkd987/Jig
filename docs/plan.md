@@ -160,7 +160,9 @@ optimizing release backend.
 Goal: agents rewrite the compiler in Jig through the plugin, with proven contracts on its
 core passes.
 
-**Gate:** the compiler compiles itself; public alpha release.
+**Gate:** the compiler compiles itself; public alpha release. Status in
+[`gates/phase4.md`](gates/phase4.md): `jigc` compiles itself to a fixed point checked in CI,
+and 0.1.0-alpha is ready to tag (`.github/workflows/release.yml`).
 
 - [x] Std library in Jig, with > 80% proven contracts. The prelude's Jig functions and the
       Jig packages `std/lists`, `std/strings` and the integer half of `std/math` state

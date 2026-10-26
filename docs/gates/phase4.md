@@ -1,0 +1,95 @@
+# Phase 4 gate: the compiler compiles itself; public alpha
+
+Gate: "the compiler compiles itself; public alpha release."
+
+## The compiler compiles itself
+
+`jigc` (`selfhost/`) is the Jig compiler written in Jig: 18,500 lines ported pass by pass
+from the bootstrap compiler (about 16,000 lines of Rust for the same passes), keeping its
+flat arenas and indices. It lexes, parses, loads packages, collects items, type-checks
+(inference, effects, `&mut` rules, contracts, units), checks exhaustiveness, runs the lints
+and the whole-program dead-code check, lowers to MIR, runs the ownership analyses and
+prints C.
+
+The fixed point, checked in CI by `bootstrap/update.sh --check` with gcc and with clang, on
+a runner without Rust:
+
+1. `cc bootstrap/jigc.c -o jigc0`: the checked-in C (3.5 MB, runtime included) builds a
+   compiler with nothing but a C compiler.
+2. `jigc0 cc selfhost compiler/std` regenerates the C from the Jig sources.
+3. The two files are byte-identical, so the compiler built by itself rebuilds itself.
+
+The bootstrap compiler agrees with it: `compiler/tests/selfhost.rs` compares every pass
+byte for byte on every example, UI and run test, the agent benchmark's solutions and `jigc`
+itself (token and AST dumps on every `.jig` file plus 400 mutated copies; diagnostics and
+the type of every expression on 300 semantically mutated projects; the whole C program for
+every program that builds). `cargo test` fails if `bootstrap/jigc.c` is stale.
+
+The port paid for itself before it finished. It found bugs every Jig program had:
+
+- A struct invariant check copied the whole struct and kept the copy alive, so the next
+  `push` copied the list: the lexer was quadratic.
+- `a + b + c` allocated a string per `+`; numbers and payload-free enums went through a
+  formatting buffer; a `match` on strings compared against every literal in turn.
+- Invariants that call `.len()` were never checked at run time, and every write to a field
+  re-evaluated every invariant of the struct, copying the fields they read.
+- `jig prove` overflowed its stack on any type that holds a list of itself (a tree).
+- The C back end named generated helpers by type-table ids, so the same program could
+  produce different C; it now numbers them by first use.
+
+## Success metrics
+
+The PRD's proposed targets, measured on `main` (4-core Xeon, clang 18):
+
+| Metric | Target | Now | |
+| --- | --- | --- | --- |
+| Check after one edit, 100k-line project | under 100 ms | 70 ms for a full `jig check` of 98k lines | met |
+| Re-proof after changing one function | under 1 s, warm cache | 0.2 s (`bench/reprove.py`, CI) | met |
+| Bootstrap compiler regression per change | under 2% or sign-off | gated in CI (`bench/compare.py`) | met |
+| Runtime vs Rust, shared suite | within 10% | 0.89 by instructions, 0.97 wall clock ([phase 3](phase3.md)) | met |
+| Hello-world release binary | under 100 KB | 84 KB (72 KB stripped) | met |
+| Self-hosted vs bootstrap compiler, same corpus | equal or faster | 1.07 by instructions (CI gate 1.10) | not yet |
+| Agent tasks reaching a verified build, vs Rust | equal or better | harness and tasks ready (`bench/agents`); no agent runs yet | not measured |
+| Agent iterations per task, vs Rust and TypeScript | equal or fewer | as above | not measured |
+| Std and compiler functions with proven contracts | over 80% | std 91%; jigc 1% (8 of 605 functions state contracts, and all 136 of their obligations prove) | std only |
+| Language reference size | fits in 10k tokens | about 6,000 | met |
+
+**Self-hosted speed.** By pass (`bench/selfhost.py --instructions`): lexer 0.97, parser
+0.74, checker 1.56, checker through C 1.19. Lowering and C generation alone are at parity.
+The checker's gap is structural: jigc slices every identifier into a new string and reads
+types and expressions out of lists by value, retaining their payloads, where the bootstrap
+compiler compares interned symbols and borrows. Closing it means borrowing match
+scrutinees and string slices in the language's implementation, which every Jig program
+would gain from.
+
+**Agent measures.** `bench/agents/run.py --agent CMD` runs an agent per task and language
+and reports tasks solved and turns. Its six tasks have reference solutions in all three
+languages, checked in CI, but the agent runs themselves are not part of CI and have not
+been done.
+
+**Compiler contracts.** The standard library meets the target; the compiler does not. The
+contracts jigc states (token spans ordered, the cursor only moving forward, the lexer's
+state consistent, literal decoding in range) all prove, but most of its 605 functions state
+none.
+
+## The alpha
+
+Version 0.1.0-alpha is what `main` holds now: the `jig` command (Rust), the standard library,
+the agent plugin, `jigc` and its C bootstrap. `.github/workflows/release.yml` builds the
+Linux x86-64 binary and publishes it with `bootstrap/jigc.c` as a GitHub pre-release when a
+`v*` tag is pushed:
+
+```
+git tag v0.1.0-alpha && git push origin v0.1.0-alpha
+```
+
+Release notes are in [`CHANGELOG.md`](../../CHANGELOG.md).
+
+## Open
+
+- `jigc`: `.feature` files, modules from `jig.mod`, the formatter, the prover (Z3 through
+  the `ffi` effect), the test runner and the interpreter. Until `jigc` passes every test
+  suite the Rust compiler stays the `jig` command (D6).
+- Self-hosted speed: borrowing in place of copies for match scrutinees and string slices.
+- Contracts on the compiler's passes.
+- Agent benchmark runs.

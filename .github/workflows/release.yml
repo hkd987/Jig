@@ -1,0 +1,41 @@
+name: Release
+
+# Pushing a tag such as v0.1.0-alpha publishes a GitHub pre-release with the Linux x86-64
+# `jig` binary, the agent plugin and the C bootstrap (D28).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install the pinned Z3 solver
+        run: pip install --user z3-solver==5.3.2.0 && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Test
+        run: cargo test --locked
+      - name: The bootstrap is a fixed point
+        run: sh bootstrap/update.sh --check
+      - name: Package
+        run: |
+          cargo build --release --locked
+          name="jig-${GITHUB_REF_NAME}-x86_64-linux"
+          mkdir -p "dist/$name"
+          cp target/release/jig README.md CHANGELOG.md LICENSE "dist/$name/"
+          cp -r plugin docs "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          cp bootstrap/jigc.c dist/jigc.c
+          # The notes are the changelog's first section.
+          awk '/^## /{n++} n==1' CHANGELOG.md > dist/notes.md
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --prerelease --title "Jig $GITHUB_REF_NAME" \
+            --notes-file dist/notes.md dist/*.tar.gz dist/jigc.c
