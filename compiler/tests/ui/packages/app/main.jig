@@ -1,0 +1,13 @@
+import "std/io"
+import "std/math" //~ E0502
+import "lib"
+import "a"
+import "missing" //~ E0203
+
+fn main() effects {io} {
+  let t = lib.make()
+  io.println(t.secret.str()) //~ E0206
+  io.println(lib.hidden().str()) //~ E0205
+  let u = lib.Thing { id: 1, secret: 2 } //~ E0206
+  io.println(u.id.str() + a.fa().str())
+}

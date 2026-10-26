@@ -1,0 +1,12 @@
+pub struct Thing {
+  pub id: Int
+  secret: Int
+}
+
+fn hidden() -> Int {
+  return 1
+}
+
+pub fn make() -> Thing {
+  return Thing { id: hidden(), secret: 2 }
+}

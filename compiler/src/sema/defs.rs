@@ -355,6 +355,11 @@ pub struct Body {
     pub variants_built: Vec<(AdtId, u32)>,
     pub fields_read: Vec<(AdtId, u32)>,
     pub consts_used: Vec<ConstId>,
+    /// Method names called through generic bounds (resolved per instantiation).
+    pub dyn_methods: Vec<Symbol>,
+    /// Expressions whose type is compared, hashed or shown with derived behavior (which reads
+    /// every field).
+    pub derived_exprs: Vec<ExprId>,
 }
 
 /// Per-package tables filled by the checker, indexed by AST node ids.

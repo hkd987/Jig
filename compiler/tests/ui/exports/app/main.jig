@@ -1,0 +1,9 @@
+import "std/io"
+import "geom"
+
+fn main() effects {io} {
+  let p = geom.origin()
+  io.println(geom.dist(p).str() + geom.uses_secret().str())
+  let q = geom.Point { x: 1, y: 2 }
+  io.println(q.x.str())
+}

@@ -289,7 +289,8 @@ impl Loader<'_> {
                     Diagnostic::error(codes::E0204, span, format!("import cycle: {}", chain.join(" -> ")))
                         .note("move the shared code into a package that both can import"),
                 );
-                return None;
+                // Keep the binding so the rest of the package still resolves.
+                return Some(p);
             }
             return Some(p);
         }

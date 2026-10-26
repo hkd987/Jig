@@ -1,0 +1,5 @@
+import "a" //~ E0204
+
+pub fn fb() -> Int {
+  return a.fa()
+}

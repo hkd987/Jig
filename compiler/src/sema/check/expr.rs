@@ -524,6 +524,7 @@ impl Cx<'_> {
                     return self.tys.bool;
                 }
                 let r = self.resolve(lt);
+                self.body.derived_exprs.push(lhs);
                 let is_float = matches!(self.tys.kind(r), TyKind::Float(_));
                 match op {
                     BinOp::Eq | BinOp::Ne => self.require_bound(span, lt, Bound::Eq),

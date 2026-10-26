@@ -2,6 +2,7 @@
 
 pub mod check;
 pub mod collect;
+pub mod dead;
 pub mod defs;
 pub mod exhaust;
 pub mod load;
@@ -17,5 +18,6 @@ pub fn analyze(sources: &Sources, dir: &Path) -> Program {
     collect::collect(&mut prog);
     check::check_bodies(&mut prog);
     prog.diags.sort();
+    dead::check_dead_code(&mut prog);
     prog
 }

@@ -1,0 +1,51 @@
+import "std/io"
+
+struct Config {
+  name: Str
+  unused_field: Int //~ E0602
+}
+
+enum Mode {
+  Fast
+  Slow
+  Never //~ E0604
+}
+
+const LIMIT: Int = 10
+const UNUSED: Int = 20 //~ E0606
+
+fn helper(c: Config) -> Str {
+  return c.name
+}
+
+fn never_called() -> Int { //~ E0601
+  return 1
+}
+
+fn only_tests() -> Int { //~ E0601
+  return 2
+}
+
+fn pick(fast: Bool) -> Mode {
+  if fast {
+    return Mode.Fast
+  }
+  return Mode.Slow
+}
+
+fn describe(m: Mode) -> Str {
+  return match m {
+    Fast => "fast"
+    Slow => "slow"
+    Never => "never"
+  }
+}
+
+fn main() effects {io} {
+  let c = Config { name: "x", unused_field: 1 }
+  io.println(helper(c) + describe(pick(LIMIT > 5)))
+}
+
+test "helper" {
+  assert(only_tests() == 2)
+}

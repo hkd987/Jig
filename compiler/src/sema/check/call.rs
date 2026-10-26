@@ -714,6 +714,9 @@ impl Cx<'_> {
                     let ms = self.defs.ifaces[*iid].methods.clone();
                     if let Some((mi, &mf)) = ms.iter().enumerate().find(|(_, &m)| self.defs.fns[m].name == name.sym) {
                         self.set_res(callee, Res::IfaceMethod(*iid, mi as u32));
+                        if !self.body.dyn_methods.contains(&name.sym) {
+                            self.body.dyn_methods.push(name.sym);
+                        }
                         if self.defs.fns[mf].self_mode == Some(Mode::MutRef) {
                             self.require_mut_place(base, "call a `&mut self` method on");
                             self.tables.autoref.insert(callee, true);
@@ -724,6 +727,9 @@ impl Cx<'_> {
             }
             if name.sym == sym::STR_METHOD && bounds.contains(&Bound::Show) {
                 self.set_res(callee, Res::BoundMethod(Bound::Show));
+                if !self.body.dyn_methods.contains(&name.sym) {
+                    self.body.dyn_methods.push(name.sym);
+                }
                 if !args.is_empty() {
                     self.err(codes::E0302, span, "`str` takes no arguments");
                 }
@@ -748,6 +754,7 @@ impl Cx<'_> {
                 self.push(Diagnostic::error(codes::E0312, span, format!("`{ts}` cannot be shown")).note(why));
             }
             self.set_res(callee, Res::BoundMethod(Bound::Show));
+            self.body.derived_exprs.push(base);
             return self.tys.str;
         }
         // A field holding a function.

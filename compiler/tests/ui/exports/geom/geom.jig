@@ -1,0 +1,24 @@
+pub struct Point {
+  pub x: Int
+  pub y: Int
+}
+
+pub fn origin() -> Point {
+  return Point { x: 0, y: 0 }
+}
+
+pub fn norm(p: Point) -> Int { //~ E0603
+  return p.x * p.x + p.y * p.y
+}
+
+pub fn dist(p: Point) -> Int {
+  return norm(p)
+}
+
+fn secret() -> Int {
+  return 7
+}
+
+pub fn uses_secret() -> Int {
+  return secret()
+}

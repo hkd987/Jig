@@ -73,7 +73,8 @@ fn ui() {
         let result = if path.is_dir() {
             let mut files = Vec::new();
             collect_jig(&path, &mut files);
-            run(&path, &Sources::Disk, &files)
+            let start = if path.join("app").is_dir() { path.join("app") } else { path.clone() };
+            run(&start, &Sources::Disk, &files)
         } else if path.extension().is_some_and(|e| e == "jig") {
             let src = std::fs::read_to_string(&path).unwrap();
             let dir = PathBuf::from(format!("/ui/{name}"));
