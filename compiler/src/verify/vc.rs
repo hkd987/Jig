@@ -3151,6 +3151,12 @@ impl<'a> Gen<'a> {
                 }
                 Some(Sv::Unit)
             }
+            TaskAll | TaskMap => {
+                // One result per job (item), in order; their values are unknown.
+                let Some(Sv::List { len, .. }) = v0 else { return Some(self.fresh(t, "tasks")) };
+                let Sv::List { elems, .. } = self.fresh(t, "tasks") else { return Some(self.fresh(t, "tasks")) };
+                Some(Sv::List { len, elems })
+            }
             ListRepeat => {
                 let Some(Sv::List { len, .. }) = v0 else { return Some(self.fresh(t, "repeat")) };
                 let n = term(1)?;

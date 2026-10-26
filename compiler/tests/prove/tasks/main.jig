@@ -1,0 +1,27 @@
+import "std/io"
+import "std/task"
+
+// Tasks give one result per job, in order, so the number of results is known.
+
+fn last(xs: List<Int>) -> Int
+  requires xs.len() > 0
+  effects {spawn}
+{
+  let ys = task.map(xs, fn(x) { x % 10 })
+  return ys[ys.len() - 1]
+}
+
+fn pair() -> Int effects {spawn} {
+  let rs = task.all([fn() { 1 }, fn() { 2 }])
+  assert(rs.len() == 2)
+  return rs[1]
+}
+
+fn too_far(xs: List<Int>) -> Int effects {spawn} {
+  let ys = task.map(xs, fn(x) { x })
+  return ys[xs.len()]
+}
+
+fn main() effects {io, spawn} {
+  io.println(last([3, 14]).str() + " " + pair().str() + " " + too_far([1, 2]).str())
+}

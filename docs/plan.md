@@ -135,7 +135,9 @@ optimizing release backend.
       reachable but uncovered", "what dies if this scenario is deleted"; JSON + text; MCP
       `trace` tool.
 - [ ] Deterministic simulation for `clock`, `rand`, `net`, `fs`, `spawn`.
-- [ ] Structured concurrency under the `spawn` effect.
+- [x] Structured concurrency under the `spawn` effect: fork-join `std/task` (`all`, `map`,
+      `both`, D4); tasks may only spawn, so they are deterministic; a persistent worker pool
+      with nested batches; atomic reference counts only in programs that use tasks.
 - [x] LLVM release backend: one C unit through `clang -O2` (D20), internal linkage so unused
       code is dropped; release hello world is 60 KB.
 - [x] Benchmark suite vs. Rust (same programs in both languages), tracked in CI:

@@ -206,6 +206,16 @@ fn main() effects {io} {
 Function types carry effects: `fn(Int) -> Int effects {io}`. A pure function value cannot
 perform effects. Tests run effects against deterministic fakes.
 
+Parallelism is fork-join through `std/task` and the `spawn` effect: `task.map(items, f)`,
+`task.all(jobs)` and `task.both(f, g)` run their functions in parallel and return when all
+have finished, results in order. Task functions have type `fn() -> T effects {spawn}`: they
+may start tasks but do nothing else, so results never depend on scheduling (tests run them
+in order). Write a list of jobs as `var jobs: List<fn() -> Int effects {spawn}> = []`.
+
+```
+let sizes = task.map(files, fn(f) { parse(f).len() })
+```
+
 ## Statements and expressions
 
 ```
@@ -387,6 +397,7 @@ its position; `Str.to_int` and `to_float` ignore surrounding spaces and accept a
 | `std/time` (`clock`) | `now_ms() -> Int now_ns() -> Int` |
 | `std/rand` (`rand`) | `int(lo, hi) -> Int float() -> Float` |
 | `std/math` (pure) | `PI E sin(x) cos(x) tan(x) exp(x) ln(x) log10(x) pow(x, y)` |
+| `std/task` (`spawn`) | `all(jobs) -> List<T> map(items, f) -> List<U> both(f, g) -> (A, B)` |
 
 ## Toolchain
 

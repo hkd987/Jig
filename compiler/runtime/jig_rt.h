@@ -87,6 +87,17 @@ void jig_free(void *p);
 /* Objects of a size known at both ends (boxes, closures, list and map headers): no header. */
 void *jig_alloc_obj(size_t n);
 void jig_free_obj(void *p, size_t n);
+#ifdef JIG_ATOMIC_RC
+/* Programs that run tasks share values between threads, so counts change atomically. A
+ * count of 1 still means only this thread holds the value: nobody else can raise it. */
+static inline void jig_rc_inc(int64_t *rc) {
+    if (*rc >= 0) __atomic_fetch_add(rc, 1, __ATOMIC_RELAXED);
+}
+static inline bool jig_rc_dec(int64_t *rc) {
+    if (*rc < 0) return false;
+    return __atomic_sub_fetch(rc, 1, __ATOMIC_ACQ_REL) == 0;
+}
+#else
 static inline void jig_rc_inc(int64_t *rc) {
     if (*rc >= 0) (*rc)++;
 }
@@ -95,6 +106,7 @@ static inline bool jig_rc_dec(int64_t *rc) {
     if (*rc < 0) return false;
     return --(*rc) == 0;
 }
+#endif
 
 /* ---- buffers ---- */
 void jig_buf_push(jig_buf *b, const char *s, int64_t n);
@@ -265,6 +277,13 @@ static inline void *jig_list_ref_mut(jig_list **lp, int64_t i, size_t sz, const 
     if (__builtin_expect((*lp)->rc != 1, 0)) jig_list_make_unique(lp, t);
     return (*lp)->data + (size_t)i * sz;
 }
+
+/* ---- tasks (std/task) ---- */
+/* Calls a task's function value: *out = f() or f(*in). */
+typedef void (*jig_task_call)(jig_fn *f, const void *in, void *out);
+jig_list *jig_task_all(const jig_list *jobs, jig_task_call call, const jig_type *rt);
+jig_list *jig_task_map(const jig_list *items, jig_fn *f, jig_task_call call, const jig_type *it, const jig_type *rt);
+void jig_task_both(jig_fn *a, jig_fn *b, jig_task_call ca, jig_task_call cb, void *oa, void *ob);
 
 /* ---- function values ---- */
 static inline void jig_fn_retain(jig_fn *f) {

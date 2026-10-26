@@ -109,6 +109,9 @@ pub enum Op {
     Ln,
     Log10,
     Pow,
+    TaskAll,
+    TaskMap,
+    TaskBoth,
     // compiler-generated
     /// `x.str()` with derived formatting (type in `tys[0]`).
     Show,
@@ -270,6 +273,12 @@ pub fn lookup(pkg_path: &str, recv: Option<TyKey>, name: &str) -> Option<(Op, Op
         ("std/time", None, "now_ns") => NowNs,
         ("std/rand", None, "int") => RandInt,
         ("std/rand", None, "float") => RandFloat,
+        ("std/task", None, n) => match n {
+            "all" => TaskAll,
+            "map" => TaskMap,
+            "both" => TaskBoth,
+            _ => return None,
+        },
         ("std/math", None, n) => match n {
             "sin" => Sin,
             "cos" => Cos,

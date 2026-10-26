@@ -63,6 +63,10 @@ void jig_exit(int code) {
 }
 
 void jig_panic(const char *msg, const char *loc) {
+    /* With tasks, several threads may fail at once: the first one reports. */
+    static int panicking;
+    if (__atomic_exchange_n(&panicking, 1, __ATOMIC_SEQ_CST))
+        for (;;) pause();
     flush_out();
     fprintf(stderr, "panic at %s: %s\n", loc, msg);
     fflush(stderr);
@@ -220,6 +224,156 @@ static void *jig_realloc(void *p, size_t n) {
     return q;
 }
 #endif
+
+/* ---------- tasks ---------- */
+
+/* A batch of `n` independent calls body(ctx, i). The thread that starts it works through it
+ * and idle workers help; the starter waits only for indices other threads have taken, so a
+ * task that starts its own batch (nesting) always makes progress. Workers are started once
+ * and kept, so their allocation pools are never lost. */
+typedef struct jig_batch {
+    int64_t n, next, helpers;
+    void (*body)(void *ctx, int64_t i);
+    void *ctx;
+    struct jig_batch *link;
+} jig_batch;
+
+static pthread_mutex_t batch_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t batch_work = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t batch_idle = PTHREAD_COND_INITIALIZER;
+static jig_batch *batches;
+static int workers = -1;
+
+static void batch_run(jig_batch *b) {
+    for (;;) {
+        int64_t i = __atomic_fetch_add(&b->next, 1, __ATOMIC_RELAXED);
+        if (i >= b->n) return;
+        b->body(b->ctx, i);
+    }
+}
+
+static void *batch_worker(void *arg) {
+    (void)arg;
+    pthread_mutex_lock(&batch_mu);
+    for (;;) {
+        jig_batch *b = batches;
+        while (b && __atomic_load_n(&b->next, __ATOMIC_RELAXED) >= b->n) b = b->link;
+        if (!b) {
+            pthread_cond_wait(&batch_work, &batch_mu);
+            continue;
+        }
+        b->helpers++;
+        pthread_mutex_unlock(&batch_mu);
+        batch_run(b);
+        pthread_mutex_lock(&batch_mu);
+        if (--b->helpers == 0) pthread_cond_broadcast(&batch_idle);
+    }
+    return NULL;
+}
+
+static int worker_count(void) {
+    const char *e = getenv("JIG_THREADS");
+    long n = e ? atol(e) : sysconf(_SC_NPROCESSORS_ONLN);
+    return n > 1 ? (int)(n - 1) : 0;
+}
+
+/* Under batch_mu. */
+static void start_workers(void) {
+    if (workers >= 0) return;
+    workers = worker_count();
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, (size_t)256 << 20);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    for (int i = 0; i < workers; i++) {
+        pthread_t t;
+        if (pthread_create(&t, &attr, batch_worker, NULL) != 0) {
+            workers = i;
+            break;
+        }
+    }
+    pthread_attr_destroy(&attr);
+}
+
+static void parallel_for(int64_t n, void (*body)(void *, int64_t), void *ctx) {
+    pthread_mutex_lock(&batch_mu);
+    start_workers();
+    if (n < 2 || workers == 0) {
+        pthread_mutex_unlock(&batch_mu);
+        for (int64_t i = 0; i < n; i++) body(ctx, i);
+        return;
+    }
+    jig_batch b = {n, 0, 0, body, ctx, batches};
+    batches = &b;
+    pthread_cond_broadcast(&batch_work);
+    pthread_mutex_unlock(&batch_mu);
+    batch_run(&b);
+    pthread_mutex_lock(&batch_mu);
+    jig_batch **pp = &batches;
+    while (*pp != &b) pp = &(*pp)->link;
+    *pp = b.link;
+    while (b.helpers > 0) pthread_cond_wait(&batch_idle, &batch_mu);
+    pthread_mutex_unlock(&batch_mu);
+}
+
+typedef struct {
+    jig_fn *fns;
+    const char *in;
+    size_t isz;
+    char *out;
+    size_t osz;
+    jig_task_call call;
+} task_ctx;
+
+static void task_all_body(void *c, int64_t i) {
+    task_ctx *t = c;
+    t->call(&t->fns[i], NULL, t->out + (size_t)i * t->osz);
+}
+
+static void task_map_body(void *c, int64_t i) {
+    task_ctx *t = c;
+    t->call(t->fns, t->in + (size_t)i * t->isz, t->out + (size_t)i * t->osz);
+}
+
+static jig_list *task_results(int64_t n, const jig_type *rt) {
+    jig_list *r = jig_list_with_capacity(n, rt);
+    r->len = n;
+    return r;
+}
+
+jig_list *jig_task_all(const jig_list *jobs, jig_task_call call, const jig_type *rt) {
+    int64_t n = jig_list_len(jobs);
+    if (!n) return NULL;
+    jig_list *r = task_results(n, rt);
+    task_ctx c = {(jig_fn *)jobs->data, NULL, 0, r->data, rt->size, call};
+    parallel_for(n, task_all_body, &c);
+    return r;
+}
+
+jig_list *jig_task_map(const jig_list *items, jig_fn *f, jig_task_call call, const jig_type *it, const jig_type *rt) {
+    int64_t n = jig_list_len(items);
+    if (!n) return NULL;
+    jig_list *r = task_results(n, rt);
+    task_ctx c = {f, items->data, it->size, r->data, rt->size, call};
+    parallel_for(n, task_map_body, &c);
+    return r;
+}
+
+typedef struct {
+    jig_fn *f[2];
+    jig_task_call call[2];
+    void *out[2];
+} both_ctx;
+
+static void task_both_body(void *c, int64_t i) {
+    both_ctx *b = c;
+    b->call[i](b->f[i], NULL, b->out[i]);
+}
+
+void jig_task_both(jig_fn *a, jig_fn *b, jig_task_call ca, jig_task_call cb, void *oa, void *ob) {
+    both_ctx c = {{a, b}, {ca, cb}, {oa, ob}};
+    parallel_for(2, task_both_body, &c);
+}
 
 /* ---------- buffers ---------- */
 

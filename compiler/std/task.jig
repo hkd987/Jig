@@ -1,0 +1,13 @@
+// Structured parallelism. Every task finishes before the call that started it returns, so
+// none can outlive its caller. A task may start tasks of its own but has no other effects:
+// it computes from the values it captures, so results never depend on scheduling.
+
+/// Run every job in parallel; the results in job order.
+pub fn all<T>(jobs: List<fn() -> T effects {spawn}>) -> List<T> effects {spawn}
+
+/// Apply `f` to every item in parallel; the results in item order.
+pub fn map<T, U>(items: List<T>, f: fn(T) -> U effects {spawn}) -> List<U> effects {spawn}
+
+/// Run two jobs in parallel.
+pub fn both<A, B>(a: fn() -> A effects {spawn}, b: fn() -> B effects {spawn}) -> (A, B)
+  effects {spawn}

@@ -1,0 +1,36 @@
+// Parallel tasks give the same results as running them in order.
+
+import "std/io"
+import "std/task"
+
+fn fib(n: Int) -> Int {
+  if n < 2 {
+    return n
+  }
+  return fib(n - 1) + fib(n - 2)
+}
+
+fn words(n: Int) -> List<Str> {
+  var out: List<Str> = []
+  for i in 0..n {
+    out.push("w" + (i % 7).str())
+  }
+  return out
+}
+
+fn main() effects {io, spawn} {
+  let ns = [20, 21, 22, 23, 24, 25, 26, 27]
+  let fibs = task.map(ns, fn(n) { fib(n) })
+  io.println(fibs.str())
+  let shared = words(1000)
+  var jobs: List<fn() -> Int effects {spawn}> = []
+  for k in 0..16 {
+    jobs.push(fn() { shared.len() + k + shared[k].len() })
+  }
+  io.println(task.all(jobs).str())
+  let (a, b) = task.both(fn() { fib(25) }, fn() { words(3).str() })
+  io.println(a.str() + " " + b)
+  // Nested: each task runs its own batch.
+  let nested = task.map([1, 2, 3, 4], fn(m) { task.map([m, m * 2], fn(x) { fib(x + 10) }).str() })
+  io.println(nested.str())
+}

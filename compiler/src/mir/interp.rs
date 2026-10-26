@@ -1171,6 +1171,29 @@ impl<'l, 'a> Interp<'l, 'a> {
                 list_mut!().sort_by(val_cmp);
                 Ok((Value::Unit, vec![a.swap_remove(0)]))
             }
+            // Tasks are pure, so running them one after another in order is a faithful,
+            // deterministic simulation of running them in parallel.
+            TaskAll => {
+                let jobs = list(&a[0]).unwrap_or_default();
+                let mut out = Vec::with_capacity(jobs.len());
+                for j in jobs.iter() {
+                    out.push(self.call_value(j, vec![], span)?);
+                }
+                ret(Value::List(Rc::new(out)))
+            }
+            TaskMap => {
+                let items = list(&a[0]).unwrap_or_default();
+                let mut out = Vec::with_capacity(items.len());
+                for x in items.iter() {
+                    out.push(self.call_value(&a[1], vec![x.clone()], span)?);
+                }
+                ret(Value::List(Rc::new(out)))
+            }
+            TaskBoth => {
+                let x = self.call_value(&a[0], vec![], span)?;
+                let y = self.call_value(&a[1], vec![], span)?;
+                ret(Value::Tuple(Rc::new(vec![x, y])))
+            }
             SortBy => {
                 let f = a[1].clone();
                 let mut xs: Vec<Value> = list(&a[0]).map(|x| x.to_vec()).unwrap_or_default();

@@ -65,10 +65,10 @@ fn write_if_changed(path: &Path, contents: &str) -> Result<(), String> {
 }
 
 /// Compile the runtime into an object cached by content, compiler and mode.
-fn runtime_object(cc: &str, opts: &BuildOpts) -> Result<PathBuf, String> {
+fn runtime_object(cc: &str, opts: &BuildOpts, threads: bool) -> Result<PathBuf, String> {
     let fl = flags(opts.release);
     let mut h = StableHasher::new();
-    h.str(RUNTIME_H).str(RUNTIME_C).str(cc);
+    h.str(RUNTIME_H).str(RUNTIME_C).str(cc).str(if threads { "threads" } else { "" });
     for f in fl {
         h.str(f);
     }
@@ -80,7 +80,9 @@ fn runtime_object(cc: &str, opts: &BuildOpts) -> Result<PathBuf, String> {
     write_if_changed(&opts.build_dir.join("jig_rt.h"), RUNTIME_H)?;
     write_if_changed(&opts.build_dir.join("jig_rt.c"), RUNTIME_C)?;
     let tmp = opts.build_dir.join(format!("jig_rt-{key}.o.tmp{}", std::process::id()));
-    run(Command::new(cc).args(fl).arg("-c").arg(opts.build_dir.join("jig_rt.c")).arg("-o").arg(&tmp))?;
+    // Programs that run tasks count references atomically, the runtime included.
+    let define: &[&str] = if threads { &["-DJIG_ATOMIC_RC=1"] } else { &[] };
+    run(Command::new(cc).args(fl).args(define).arg("-c").arg(opts.build_dir.join("jig_rt.c")).arg("-o").arg(&tmp))?;
     std::fs::rename(&tmp, &obj).map_err(|e| e.to_string())?;
     Ok(obj)
 }
@@ -172,7 +174,7 @@ pub fn build(prog: &mut Program, opts: &BuildOpts) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&opts.build_dir).map_err(|e| format!("cannot create {}: {e}", opts.build_dir.display()))?;
     let cc = c_compiler(opts.release);
     // Release builds compile the runtime into the program's one unit, so it inlines too.
-    let rt = if opts.release { None } else { Some(runtime_object(&cc, opts)?) };
+    let rt = if opts.release { None } else { Some(runtime_object(&cc, opts, c.threads)?) };
     write_if_changed(&opts.build_dir.join("jig_rt.h"), RUNTIME_H)?;
     let stem = opts.out.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "main".into());
     if let Some(dir) = opts.out.parent().filter(|d| !d.as_os_str().is_empty()) {
