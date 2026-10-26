@@ -84,6 +84,31 @@ pub fn test_result_json(r: &TestResult) -> Json {
     j
 }
 
+/// Run `main` with faked effects and captured output. Returns (stdout, status).
+pub fn run_main_captured(prog: &mut Program, args: Vec<String>, stdin: &str) -> (String, String) {
+    let mut lw = Lowerer::new(prog, LowerOpts { check_contracts: true });
+    let Some(m) = lw.main() else {
+        return (String::new(), "error: no `main` function".into());
+    };
+    let mut fx = Effects::fake(7);
+    fx.args = std::iter::once("main".to_string()).chain(args).collect();
+    fx.stdin = stdin.lines().map(|l| l.to_string()).collect();
+    let mut it = Interp::new(&mut lw, fx);
+    it.fuel = 500_000_000;
+    let r = it.call(m, Vec::new());
+    let mut out = std::mem::take(&mut it.fx.stdout);
+    let err = std::mem::take(&mut it.fx.stderr);
+    if !err.is_empty() {
+        out.push_str(&err);
+    }
+    let status = match r {
+        Ok(_) => "exit 0".to_string(),
+        Err(Trap::Exit(c)) => format!("exit {c}"),
+        Err(Trap::Panic { msg, span, .. }) => format!("panic at {}: {msg}", location(lw.sm, span)),
+    };
+    (out, status)
+}
+
 /// Run `main` on the interpreter with real effects. Returns the exit code.
 pub fn run_main(prog: &mut Program, args: Vec<String>) -> Result<i32, Diagnostic> {
     let mut lw = Lowerer::new(prog, LowerOpts { check_contracts: true });

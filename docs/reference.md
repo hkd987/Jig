@@ -344,7 +344,7 @@ Prelude (no import): `assert(c)`, `panic(msg) -> Never`, `min(a, b)`, `max(a, b)
 | --- | --- |
 | `std/io` (`io`) | `print(s) println(s) eprintln(s) read_line() -> Option<Str> read_all() -> Str` |
 | `std/fs` (`fs`) | `read(path) -> Result<Str, Str> write(path, s) -> Result<(), Str> exists(path) -> Bool list(dir) -> Result<List<Str>, Str>` |
-| `std/os` (`env`) | `args() -> List<Str> var(name) -> Option<Str> exit(code) -> Never` |
+| `std/os` (`env`) | `args() -> List<Str> env(name) -> Option<Str> exit(code) -> Never` |
 | `std/time` (`clock`) | `now_ms() -> Int now_ns() -> Int` |
 | `std/rand` (`rand`) | `int(lo, hi) -> Int float() -> Float` |
 | `std/math` (pure) | `PI E sin(x) cos(x) tan(x) exp(x) ln(x) log10(x) pow(x, y)` |

@@ -1,0 +1,9 @@
+{
+  "name": "jig",
+  "version": "0.1.0",
+  "description": "Write Jig with the language reference, edit-time checks, commit gates and the jig MCP tools (check, test, run, fmt, explain, search)",
+  "author": { "name": "hkd987" },
+  "repository": "https://github.com/hkd987/Jig",
+  "license": "MIT",
+  "keywords": ["jig", "language", "verification", "compiler"]
+}

@@ -7,4 +7,5 @@ pub mod mir;
 pub mod runner;
 pub mod sema;
 pub mod syntax;
+pub mod tools;
 pub mod util;

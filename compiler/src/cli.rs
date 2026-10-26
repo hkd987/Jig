@@ -5,6 +5,19 @@ use crate::sema::load::Sources;
 use std::io::Write;
 use std::path::PathBuf;
 
+const USAGE: &str = "usage: jig <command> [path] [options]
+
+commands:
+  check [--json]          parse, types, effects, lints and dead code for the project
+  test [filter] [--json]  run tests in the deterministic runner
+  run [-- args]           run main
+  fmt [--check]           format .jig files in place
+  explain <code>          explain a diagnostic code
+  search <signature>      find functions by type, e.g. 'List<T> -> Option<T>'
+  reference               print the language reference
+  mcp                     serve the agent tools over MCP (stdio)
+  hook <name>             Claude Code hook entry points (post-edit, pre-commit)";
+
 struct Opts {
     json: bool,
     path: PathBuf,
@@ -58,9 +71,15 @@ fn is_tty() -> bool {
 
 fn cmd_check(args: &[String]) -> i32 {
     let o = parse_opts(args);
-    let prog = crate::sema::analyze(&Sources::Disk, &o.path);
-    let errors = prog.diags.error_count();
-    print_diags(&prog, &prog.diags.list, o.json);
+    let report = crate::tools::project::check_project(&o.path);
+    let errors = report.errors();
+    for d in &report.diags {
+        if o.json {
+            println!("{}", d.json.to_string_compact());
+        } else {
+            println!("{}", d.text);
+        }
+    }
     if !o.json {
         if errors == 0 {
             eprintln!("ok: no errors");
@@ -216,6 +235,33 @@ pub fn main() -> i32 {
         Some("run") => cmd_run(rest),
         Some("test") => cmd_test(rest),
         Some("fmt") => cmd_fmt(rest),
+        Some("mcp") => crate::tools::mcp::serve(),
+        Some("hook") => crate::tools::hooks::main(rest),
+        Some("search") => {
+            let o = parse_opts(rest);
+            let q = o.rest.join(" ");
+            let prog = crate::sema::analyze(&Sources::Disk, &o.path);
+            match crate::tools::search::search(&prog, &q, 20) {
+                Ok(hits) => {
+                    for h in hits {
+                        println!("{}{}  [{}]", h.name, h.signature, h.package);
+                    }
+                    0
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    2
+                }
+            }
+        }
+        Some("reference") => {
+            print!("{}", crate::tools::mcp::REFERENCE);
+            0
+        }
+        Some("--version") | Some("version") => {
+            println!("jig {}", env!("CARGO_PKG_VERSION"));
+            0
+        }
         Some("explain") => {
             let Some(code) = args.get(1).and_then(|c| crate::diag::Code::parse(c)) else {
                 eprintln!("usage: jig explain <code>");
@@ -226,7 +272,7 @@ pub fn main() -> i32 {
             0
         }
         _ => {
-            eprintln!("usage: jig <check|test|run|fmt|explain> [path] [--json]");
+            eprintln!("{USAGE}");
             2
         }
     }

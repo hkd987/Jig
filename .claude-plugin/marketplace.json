@@ -1,0 +1,12 @@
+{
+  "name": "jig",
+  "owner": { "name": "hkd987" },
+  "description": "The official Claude Code plugin for the Jig language",
+  "plugins": [
+    {
+      "name": "jig",
+      "source": "./plugin",
+      "description": "Write Jig with the language reference, edit-time checks, commit gates and the jig MCP tools"
+    }
+  ]
+}

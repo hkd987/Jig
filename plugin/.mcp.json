@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "jig": {
+      "command": "jig",
+      "args": ["mcp"]
+    }
+  }
+}

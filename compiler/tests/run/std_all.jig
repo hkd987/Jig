@@ -1,0 +1,39 @@
+import "std/fs"
+import "std/io"
+import "std/math"
+import "std/os"
+import "std/rand"
+import "std/time"
+
+fn main() effects {io, fs, env, clock, rand} {
+  let args = os.args()
+  io.println("args " + args.len().str())
+  match os.env("JIG_UNSET_VARIABLE") {
+    Some(v) => io.println("env " + v)
+    None => io.println("no env")
+  }
+  match fs.write("/tmp/x.txt", "hello file") {
+    Ok(_) => io.println("wrote")
+    Err(e) => io.println(e)
+  }
+  match fs.read("/tmp/x.txt") {
+    Ok(s) => io.println("read " + s)
+    Err(e) => io.println(e)
+  }
+  io.println("exists " + fs.exists("/tmp/x.txt").str() + " " + fs.exists("/nope").str())
+  let t0 = time.now_ms()
+  let t1 = time.now_ms()
+  io.println("clock moves " + (t1 > t0).str())
+  let r = rand.int(1, 7)
+  io.println("dice ok " + (r >= 1 && r < 7).str())
+  let f = rand.float()
+  io.println("float ok " + (f >= 0.0 && f < 1.0).str())
+  io.println("pi " + (math.PI * 100.0).floor().str() + " sin0 " + math.sin(0.0).str())
+  match io.read_line() {
+    Some(l) => io.println("line " + l)
+    None => io.println("eof")
+  }
+  io.print("no newline")
+  io.println("")
+  os.exit(3)
+}

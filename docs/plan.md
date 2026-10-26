@@ -40,43 +40,43 @@ structured diagnostics and a working agent plugin.
 
 ### 1.1 Foundations
 - [ ] Cargo workspace, `jig` binary, CI skeleton (build, unit tests, fmt, clippy).
-- [ ] Utilities: FxHash, string interner, typed index arenas, minimal JSON reader/writer
+- [x] Utilities: FxHash, string interner, typed index arenas, minimal JSON reader/writer
       (no serde, keeps compile times down).
-- [ ] Diagnostics: code registry (`E0xxx`), spans, labels, notes, fixes; JSON and human
+- [x] Diagnostics: code registry (`E0xxx`), spans, labels, notes, fixes; JSON and human
       renderers; `jig explain <code>`.
 
 ### 1.2 Front end
-- [ ] Hand-written lexer with Go-style automatic semicolon insertion.
-- [ ] Hand-written recursive-descent parser into an index-based AST (no per-node heap allocation).
-- [ ] Name resolution across packages (package = directory; import cycles are errors).
-- [ ] Type checker: structs, enums (sum types), tuples, generics (monomorphized, no trait
+- [x] Hand-written lexer with Go-style automatic semicolon insertion.
+- [x] Hand-written recursive-descent parser into an index-based AST (no per-node heap allocation).
+- [x] Name resolution across packages (package = directory; import cycles are errors).
+- [x] Type checker: structs, enums (sum types), tuples, generics (monomorphized, no trait
       search), structural interfaces as bounds, built-in `Eq`/`Ord`/`Hash`, `Option`/`Result`
       and `?`, methods, closures, no implicit conversions.
-- [ ] Mutable value semantics: `&mut` only on parameters and call arguments; exclusivity
+- [x] Mutable value semantics: `&mut` only on parameters and call arguments; exclusivity
       check at call sites; `var` vs `let`.
-- [ ] Effects: declared per function, pure by default, checked transitively.
-- [ ] Exhaustive `match` and unreachable-arm detection.
-- [ ] Refinement and contract syntax parsed and type-checked (proved in Phase 2).
-- [ ] Units of measure on `Int` and `Float`.
+- [x] Effects: declared per function, pure by default, checked transitively.
+- [x] Exhaustive `match` and unreachable-arm detection.
+- [x] Refinement and contract syntax parsed and type-checked (proved in Phase 2).
+- [x] Units of measure on `Int` and `Float`.
 
 ### 1.3 Strictness
-- [ ] Lints as errors: unused variables/imports/results, needless `var`, naming, shadowing,
+- [x] Lints as errors: unused variables/imports/results, needless `var`, naming, shadowing,
       unreachable code, self-comparison.
-- [ ] Dead code as an error: unreachable functions, unused fields, unused exports, impossible
+- [x] Dead code as an error: unreachable functions, unused fields, unused exports, impossible
       match arms, unused step functions.
-- [ ] Canonical formatter (`jig fmt`), no options; comment-preserving.
+- [x] Canonical formatter (`jig fmt`), no options; comment-preserving.
 
 ### 1.4 Back end
 - [ ] MIR: CFG with typed locals and places, monomorphization, copy/drop glue, last-use moves.
-- [ ] MIR interpreter: the deterministic runner for tests (fake `io`, `clock`, `rand`, `fs`).
+- [x] MIR interpreter: the deterministic runner for tests (fake `io`, `clock`, `rand`, `fs`).
 - [ ] Fast native backend on Cranelift + small C runtime; `jig build`, `jig run`.
 - [ ] Runtime checks: overflow, bounds, division by zero, contracts in debug builds.
 
 ### 1.5 Agent plugin (minimal) and docs
-- [ ] Language reference under 10k tokens (`docs/reference.md`), shipped as the plugin skill.
-- [ ] Claude Code plugin: reference skill, edit hook running `jig check --json`, commit hook,
+- [x] Language reference under 10k tokens (`docs/reference.md`), shipped as the plugin skill.
+- [x] Claude Code plugin: reference skill, edit hook running `jig check --json`, commit hook,
       MCP server (`jig mcp`) with check/explain/search tools.
-- [ ] Std library: `io`, `fs`, `os`, `time`, `rand`, `math`, collections.
+- [x] Std library: `io`, `fs`, `os`, `time`, `rand`, `math`, collections.
 
 ### 1.6 Performance from day one
 - [ ] Benchmark corpus (examples + generated 100k-line project).

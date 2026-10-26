@@ -1648,6 +1648,13 @@ impl<'a> Parser<'a> {
             }
             T::If => self.parse_if(),
             T::Match => self.parse_match(),
+            // `return`, `break` and `continue` in expression position (a match arm, a
+            // closure body): a block holding that one statement, which diverges.
+            T::Return | T::Break | T::Continue => {
+                let s = self.parse_stmt()?;
+                let stmts = self.ast.stmt_lists.alloc(&[s]);
+                Ok(self.mk_expr(ExprKind::Block(stmts), self.span_from(lo)))
+            }
             T::LBrace => self.parse_block(),
             T::Amp => {
                 self.diags.push(Diagnostic::error(

@@ -1,0 +1,12 @@
+args 1
+no env
+wrote
+read hello file
+exists true false
+clock moves true
+dice ok true
+float ok true
+pi 314.0 sin0 0.0
+eof
+no newline
+<exit 3>

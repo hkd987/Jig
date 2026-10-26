@@ -256,7 +256,7 @@ pub fn lookup(pkg_path: &str, recv: Option<TyKey>, name: &str) -> Option<(Op, Op
         },
         ("std/os", None, n) => match n {
             "args" => Args,
-            "var" => EnvVar,
+            "env" => EnvVar,
             "exit" => Exit,
             _ => return None,
         },

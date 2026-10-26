@@ -1,5 +1,5 @@
 // Process arguments, environment variables and exit.
 
 pub fn args() -> List<Str> effects {env}
-pub fn var(name: Str) -> Option<Str> effects {env}
+pub fn env(name: Str) -> Option<Str> effects {env}
 pub fn exit(code: Int) -> Never effects {env}
