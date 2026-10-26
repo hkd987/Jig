@@ -372,6 +372,8 @@ pub struct Gen<'a> {
     cur_ret: Option<Ty>,
     /// Nesting of callee contracts being evaluated (contracts may call contracted functions).
     depth: u32,
+    /// What each function may change in each `&mut` parameter (see `frame.rs`).
+    pub frames: FxHashMap<(FnId, usize), super::frame::Frame>,
 }
 
 impl<'a> Gen<'a> {
@@ -401,6 +403,7 @@ impl<'a> Gen<'a> {
             prelude,
             cur_ret: None,
             depth: 0,
+            frames: FxHashMap::default(),
         }
     }
 
@@ -2857,9 +2860,19 @@ impl<'a> Gen<'a> {
         let pre_env = cst.env.clone();
         let mut writes = Vec::new();
         for (i, a) in args.iter().enumerate() {
-            if let Arg::Place(p, _) = a {
+            if let Arg::Place(p, cur) = a {
                 let pt = *p.tys.last().unwrap();
-                let nv = self.fresh(pt, "out");
+                // Only what the callee's body can write changes; the rest is kept.
+                let nv = match self.frames.get(&(f, i)).cloned() {
+                    Some(super::frame::Frame::Paths(paths)) => {
+                        let mut v = cur.clone();
+                        for path in &paths {
+                            v = self.havoc_at(&mut cst, &v, pt, path, true);
+                        }
+                        v
+                    }
+                    _ => self.fresh(pt, "out"),
+                };
                 self.assume_type_preds(&mut cst, pt, &nv, 0);
                 if let Some(&id) = body.param_locals.get(i) {
                     cst.env.insert(id, nv.clone());

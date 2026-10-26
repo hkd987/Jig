@@ -2,6 +2,7 @@
 //! content-addressed proof cache so re-proving after a one-function change only redoes that
 //! function (callers depend on its contract, not its body).
 
+pub mod frame;
 pub mod smt;
 pub mod vc;
 
@@ -17,7 +18,7 @@ use std::path::PathBuf;
 use vc::{Base, ObKind};
 
 /// Bump when the encoding changes, so stale cached proofs are not reused.
-const VC_VERSION: &str = "vc-1";
+const VC_VERSION: &str = "vc-2";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
@@ -139,12 +140,20 @@ impl Proven {
 }
 
 /// The functions `jig prove` checks: non-generic user functions with bodies.
+/// Whether `span` is in a `*_test.jig` file (test helpers, which run only in tests).
+fn in_test_file(prog: &Program, span: Span) -> bool {
+    prog.sm.file_of(span.lo).is_some_and(|f| prog.sm.file(f).path.to_string_lossy().ends_with("_test.jig"))
+}
+
+/// The functions to prove: non-generic user functions, except test helpers (tests are not
+/// proved; their assertions are checked when they run).
 fn targets(prog: &Program, filter: Option<&str>) -> Vec<FnId> {
     prog.defs
         .fns
         .iter_enumerated()
         .filter(|(f, fd)| {
             !prog.pkgs[fd.pkg].is_std
+                && !in_test_file(prog, fd.span)
                 && fd.has_body
                 && fd.generics.is_empty()
                 && fd.iface.is_none()
@@ -192,7 +201,9 @@ fn contract_refs(prog: &Program, f: FnId, out: &mut Vec<FnId>) {
 
 /// Everything a function's proof depends on: its own text, the contracts of what it calls
 /// (transitively through contracts), every type predicate, the solver and the encoding.
-fn cache_key(prog: &Program, f: FnId, global: &str) -> String {
+type FrameMap = FxHashMap<(FnId, usize), frame::Frame>;
+
+fn cache_key(prog: &Program, f: FnId, global: &str, frames: &FrameMap) -> String {
     let fd = &prog.defs.fns[f];
     let pkg = &prog.pkgs[fd.pkg];
     let item = pkg.ast.items[fd.item];
@@ -209,6 +220,14 @@ fn cache_key(prog: &Program, f: FnId, global: &str) -> String {
         contract_refs(prog, g, &mut work);
     }
     let mut texts: Vec<String> = deps.into_iter().map(|g| contract_text(prog, g)).collect();
+    // What direct callees may change in their `&mut` arguments (read off their bodies).
+    for &g in prog.bodies[f].as_ref().map(|b| b.refs.as_slice()).unwrap_or(&[]) {
+        for i in 0..=prog.defs.fns[g].params.len() {
+            if let Some(fr) = frames.get(&(g, i)) {
+                texts.push(format!("frame {} {i} {}", contract_text(prog, g), fr.summary()));
+            }
+        }
+    }
     texts.sort();
     for t in &texts {
         h.str(t);
@@ -328,9 +347,10 @@ fn show_value(v: &smt::Sexp, base: &Base) -> String {
 pub fn cached_proven(prog: &Program, cache_dir: &std::path::Path) -> Proven {
     let solver = smt::solver_version().unwrap_or_default();
     let global = global_key(prog, &solver);
+    let frames = frame::compute_all(prog);
     let mut fns = Vec::new();
     for f in targets(prog, None) {
-        let key = cache_key(prog, f, &global);
+        let key = cache_key(prog, f, &global, &frames);
         let base = prog.pkgs[prog.defs.fns[f].pkg].ast.items[prog.defs.fns[f].item].span.lo;
         if let Some(obs) = load_cached(&cache_dir.join(format!("{key}.json")), base) {
             fns.push(FnReport { fid: f, name: String::new(), obligations: obs, cached: true });
@@ -346,7 +366,8 @@ pub fn cached_proven(prog: &Program, cache_dir: &std::path::Path) -> Proven {
 /// or reflection), so when each call site has its preconditions proved, the callee need not
 /// check them again. A function used as a value or reached through a generic bound has calls
 /// the prover cannot see, and one with no calls at all is an entry point; neither qualifies.
-/// Calls in `test` blocks don't count: tests run in the interpreter, which keeps every check.
+/// Calls in tests and test helpers don't count: they run in the interpreter, which keeps every
+/// check.
 fn proven_entries(prog: &Program, report: &Report) -> FxHashSet<FnId> {
     let mut sites: FxHashMap<FnId, Vec<Span>> = FxHashMap::default();
     let mut as_value: FxHashSet<FnId> = FxHashSet::default();
@@ -354,7 +375,7 @@ fn proven_entries(prog: &Program, report: &Report) -> FxHashSet<FnId> {
         let ast = &pkg.ast;
         let tests: Vec<Span> =
             ast.items.iter().filter(|it| matches!(it.kind, ast::ItemKind::Test { .. })).map(|it| it.span).collect();
-        let in_test = |sp: Span| tests.iter().any(|t| t.lo <= sp.lo && sp.hi <= t.hi);
+        let in_test = |sp: Span| tests.iter().any(|t| t.lo <= sp.lo && sp.hi <= t.hi) || in_test_file(prog, sp);
         let mut callee_of: FxHashMap<u32, Span> = FxHashMap::default();
         for e in ast.exprs.iter() {
             if let ExprKind::Call { callee, .. } = e.kind {
@@ -405,10 +426,11 @@ pub fn prove(prog: &mut Program, opts: &ProveOpts) -> Result<Report, String> {
         .ok_or_else(|| format!("cannot run the SMT solver `{}` (install z3 or set JIG_Z3)", smt::solver_path()))?;
     let global = global_key(prog, &solver_name);
     let fns = targets(prog, opts.filter.as_deref());
+    let frames = frame::compute_all(prog);
     // Keys and cached results first (needs only shared access).
     let mut plan = Vec::new();
     for &f in &fns {
-        let key = cache_key(prog, f, &global);
+        let key = cache_key(prog, f, &global, &frames);
         let fd = &prog.defs.fns[f];
         let base = prog.pkgs[fd.pkg].ast.items[fd.item].span.lo;
         let name = fd.display_name(&prog.defs, &prog.tys);
@@ -422,6 +444,7 @@ pub fn prove(prog: &mut Program, opts: &ProveOpts) -> Result<Report, String> {
     let mut work: Vec<(usize, String, u32, vc::FnVcs)> = Vec::new();
     {
         let mut gen = vc::Gen::new(prog);
+        gen.frames = frames;
         for (f, key, base, name, cached) in plan {
             if let Some(obs) = cached {
                 reports.push(Some(FnReport { fid: f, name, obligations: obs, cached: true }));

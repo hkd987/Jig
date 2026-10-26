@@ -26,23 +26,35 @@ FAILED assertion in `bad_strings` at tests/prove/semantics/main.jig:189:10: s ==
   counterexample: s.len() = 0, t.len() = 0
   confirmed: running it with s = "", t = "5" fails this check
   hint: If the counterexample can happen, the code is wrong; otherwise add the missing fact as a `requires`, an `ensures` on a callee or a loop `invariant`.
-FAILED precondition in `main` at tests/prove/semantics/main.jig:201:3: `bad_list_span` requires xs[0].hi < 1000
+FAILED assertion in `bad_frame_field` at tests/prove/semantics/main.jig:238:10: p.a == 1
+  confirmed: running it fails this check
+  hint: If the counterexample can happen, the code is wrong; otherwise add the missing fact as a `requires`, an `ensures` on a callee or a loop `invariant`.
+may trap bounds in `bad_frame_list` at tests/prove/semantics/main.jig:245:10: index in bounds: p.tags[0]
+FAILED assertion in `bad_frame_list` at tests/prove/semantics/main.jig:245:10: p.tags[0] == 5
+  confirmed: running it fails this check
+  hint: If the counterexample can happen, the code is wrong; otherwise add the missing fact as a `requires`, an `ensures` on a callee or a loop `invariant`.
+FAILED assertion in `bad_frame_generic` at tests/prove/semantics/main.jig:256:10: p.b == 2
+  not reproduced: the counterexample passes at run time, so the prover is missing a fact
+  hint: If the counterexample can happen, the code is wrong; otherwise add the missing fact as a `requires`, an `ensures` on a callee or a loop `invariant`.
+FAILED precondition in `main` at tests/prove/semantics/main.jig:265:3: `ok_list_span` requires xs.len() > 0
   hint: Establish it before the call (an `if`, or an `assert` that is proved), or add it to this function's `requires` so callers must.
-FAILED precondition in `main` at tests/prove/semantics/main.jig:202:3: `ok_list_span` requires xs.len() > 0
+FAILED precondition in `main` at tests/prove/semantics/main.jig:265:3: `ok_list_span` requires xs[0].lo > -1000
   hint: Establish it before the call (an `if`, or an `assert` that is proved), or add it to this function's `requires` so callers must.
-FAILED precondition in `main` at tests/prove/semantics/main.jig:202:3: `ok_list_span` requires xs[0].lo > -1000
-  hint: Establish it before the call (an `if`, or an `assert` that is proved), or add it to this function's `requires` so callers must.
-may trap overflow in `main` at tests/prove/semantics/main.jig:203:15: `ok_loop_exit(3) + bad_loop_havoc(2)` does not overflow Int
-may trap overflow in `main` at tests/prove/semantics/main.jig:203:15: `ok_loop_exit(3) + bad_loop_havoc(2) + ok_countdown(4)` does not overflow Int
-may trap overflow in `main` at tests/prove/semantics/main.jig:203:15: `ok_loop_exit(3) + bad_loop_havoc(2) + ok_countdown(4) + area(Shape.Empty)` does not overflow Int
-may trap overflow in `main` at tests/prove/semantics/main.jig:203:15: `ok_loop_exit(3) + bad_loop_havoc(2) + ok_countdown(4) + area(Shape.Empty) + bad_area(Shape.Circle…` does not overflow Int
-may trap overflow in `main` at tests/prove/semantics/main.jig:208:14: `ok_option([1]) + ok_mut()` does not overflow Int
-may trap overflow in `main` at tests/prove/semantics/main.jig:208:14: `ok_option([1]) + ok_mut() + bad_mut()` does not overflow Int
-may trap overflow in `main` at tests/prove/semantics/main.jig:208:14: `ok_option([1]) + ok_mut() + bad_mut() + ok_span(s)` does not overflow Int
-may trap overflow in `main` at tests/prove/semantics/main.jig:208:14: `ok_option([1]) + ok_mut() + bad_mut() + ok_span(s) + ok_recursive()` does not overflow Int
-may trap overflow in `main` at tests/prove/semantics/main.jig:208:14: `ok_option([1]) + ok_mut() + bad_mut() + ok_span(s) + ok_recursive() + positives(3).len()` does not overflow Int
-may trap overflow in `main` at tests/prove/semantics/main.jig:214:14: `ok_division() + ok_strings("q")` does not overflow Int
-may trap overflow in `main` at tests/prove/semantics/main.jig:214:14: `ok_division() + ok_strings("q") + bad_strings("a", "b")` does not overflow Int
-may trap overflow in `main` at tests/prove/semantics/main.jig:215:15: `total + more` does not overflow Int
-may trap overflow in `main` at tests/prove/semantics/main.jig:215:15: `total + more + rest` does not overflow Int
-proved 38 of 47 contract obligations and 29 of 45 safety obligations in 22 functions (0 from cache)
+may trap overflow in `main` at tests/prove/semantics/main.jig:266:15: `ok_loop_exit(3) + bad_loop_havoc(2)` does not overflow Int
+may trap overflow in `main` at tests/prove/semantics/main.jig:266:15: `ok_loop_exit(3) + bad_loop_havoc(2) + ok_countdown(4)` does not overflow Int
+may trap overflow in `main` at tests/prove/semantics/main.jig:266:15: `ok_loop_exit(3) + bad_loop_havoc(2) + ok_countdown(4) + area(Shape.Empty)` does not overflow Int
+may trap overflow in `main` at tests/prove/semantics/main.jig:266:15: `ok_loop_exit(3) + bad_loop_havoc(2) + ok_countdown(4) + area(Shape.Empty) + bad_area(Shape.Circle…` does not overflow Int
+may trap overflow in `main` at tests/prove/semantics/main.jig:271:14: `ok_option([1]) + ok_mut()` does not overflow Int
+may trap overflow in `main` at tests/prove/semantics/main.jig:271:14: `ok_option([1]) + ok_mut() + bad_mut()` does not overflow Int
+may trap overflow in `main` at tests/prove/semantics/main.jig:271:14: `ok_option([1]) + ok_mut() + bad_mut() + ok_span(s)` does not overflow Int
+may trap overflow in `main` at tests/prove/semantics/main.jig:271:14: `ok_option([1]) + ok_mut() + bad_mut() + ok_span(s) + ok_recursive()` does not overflow Int
+may trap overflow in `main` at tests/prove/semantics/main.jig:271:14: `ok_option([1]) + ok_mut() + bad_mut() + ok_span(s) + ok_recursive() + positives(3).len()` does not overflow Int
+may trap overflow in `main` at tests/prove/semantics/main.jig:277:14: `ok_division() + ok_strings("q")` does not overflow Int
+may trap overflow in `main` at tests/prove/semantics/main.jig:277:14: `ok_division() + ok_strings("q") + bad_strings("a", "b")` does not overflow Int
+may trap overflow in `main` at tests/prove/semantics/main.jig:277:14: `ok_division() + ok_strings("q") + bad_strings("a", "b") + ok_frame()` does not overflow Int
+may trap overflow in `main` at tests/prove/semantics/main.jig:277:14: `ok_division() + ok_strings("q") + bad_strings("a", "b") + ok_frame() + bad_frame_field()` does not overflow Int
+may trap overflow in `main` at tests/prove/semantics/main.jig:277:14: `ok_division() + ok_strings("q") + bad_strings("a", "b") + ok_frame() + bad_frame_field() + bad_fr…` does not overflow Int
+may trap overflow in `main` at tests/prove/semantics/main.jig:277:14: `ok_division() + ok_strings("q") + bad_strings("a", "b") + ok_frame() + bad_frame_field() + bad_fr…` does not overflow Int
+may trap overflow in `main` at tests/prove/semantics/main.jig:284:15: `total + more` does not overflow Int
+may trap overflow in `main` at tests/prove/semantics/main.jig:284:15: `total + more + rest` does not overflow Int
+proved 40 of 51 contract obligations and 30 of 51 safety obligations in 30 functions (0 from cache)

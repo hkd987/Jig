@@ -289,8 +289,10 @@ fn parse_port(s: Str) -> Result<Int, Str> {
 
 `jig prove` checks each function against its own contract and its callees' contracts, never
 their bodies, and also proves the absence of traps (overflow, division by zero, bounds,
-`unwrap`, reachable `panic`). Results are cached per function: changing a body re-proves
-only that function, since callers depend on its contract. A failed contract comes with a
+`unwrap`, reachable `panic`). The one thing read off a callee's body is what it can write:
+after `f(&mut x)` or `x.m()` with `&mut self`, fields `f` never assigns keep their values.
+Results are cached per function: changing a body re-proves only that function and, if what
+it can write changed, its callers. A failed contract comes with a
 counterexample in source terms, and is replayed on the interpreter: "confirmed" means
 those inputs really fail, "not reproduced" means the prover is missing a fact. An unproven
 obligation keeps its runtime check in every build; a proved one has none, and a `requires`
