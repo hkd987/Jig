@@ -332,7 +332,11 @@ mod tests {
     #[test]
     fn rejects_unsupported_gherkin() {
         let (_, d) = parse("Feature: X\n  Background:\n    Given a\n  @slow\n  Scenario: s\n    Given a\n", 0);
-        assert_eq!(d.len(), 2);
+        let msgs: Vec<&str> = d.iter().map(|d| d.message.as_str()).collect();
+        assert!(msgs.contains(&"`Background` is not supported"), "{msgs:?}");
+        assert!(msgs.contains(&"tags are not supported"), "{msgs:?}");
+        // The step under the background is not silently attached to anything.
+        assert!(msgs.contains(&"a step must be inside a scenario"), "{msgs:?}");
     }
 
     #[test]
