@@ -1,0 +1,382 @@
+// Ownership analyses over MIR that let code generation skip reference-count traffic, ported
+// from the bootstrap compiler's `codegen/own.rs`: borrowed locals (parts of by-value
+// parameters, which need no count of their own), last uses (which may move a value out
+// instead of retaining it) and unique lists (whose element writes need no copy check).
+
+fn place_uses(p: Place, out: &mut List<Int>) {
+  out.push(p.local)
+  for e in p.proj {
+    match e {
+      Index(op, _) => operand_uses(op, &mut out)
+      _ => {}
+    }
+  }
+}
+
+fn operand_uses(op: Operand, out: &mut List<Int>) {
+  match op {
+    Copy(p) => place_uses(p, &mut out)
+    _ => {}
+  }
+}
+
+/// The locals a statement reads (with repeats), and the local it assigns whole (or -1).
+fn stmt_uses(stmt: Stmt, out: &mut List<Int>) -> Int {
+  match stmt {
+    Assign(p, rv) => {
+      if !p.proj.is_empty() {
+        // Writing part of a local reads the rest of it.
+        place_uses(p, &mut out)
+      }
+      match rv {
+        Use(a) | Unary(_, a, _) | Cast(a, _, _) | Inc(a, _) => operand_uses(a, &mut out)
+        Binary(_, a, b, _) => {
+          operand_uses(a, &mut out)
+          operand_uses(b, &mut out)
+        }
+        Aggregate(_, _, ops) | Closure(_, ops) => {
+          for o in ops {
+            operand_uses(o, &mut out)
+          }
+        }
+        Discriminant(q) => place_uses(q, &mut out)
+        Call(callee, args, _) => {
+          match callee {
+            Value(f) => operand_uses(f, &mut out)
+            _ => {}
+          }
+          for a in args {
+            match a {
+              Value(o) => operand_uses(o, &mut out)
+              MutRef(q) => place_uses(q, &mut out)
+            }
+          }
+        }
+      }
+      return if p.proj.is_empty() { p.local } else { -1 }
+    }
+    Check(cond, _, _, values, _) => {
+      operand_uses(cond, &mut out)
+      for v in values {
+        operand_uses(v.op, &mut out)
+      }
+      return -1
+    }
+    Drop(_) => {
+      return -1
+    }
+  }
+}
+
+fn term_uses(t: Terminator, out: &mut List<Int>) {
+  match t {
+    If(c, _, _) | Switch(c, _, _) => operand_uses(c, &mut out)
+    Return => out.push(0)
+    _ => {}
+  }
+}
+
+fn successors(t: Terminator) -> List<Int> {
+  return match t {
+    Goto(b) => [b]
+    If(_, a, b) => [a, b]
+    Switch(_, cases, d) => {
+      var out: List<Int> = []
+      for (_, b) in cases {
+        out.push(b)
+      }
+      out.push(d)
+      out
+    }
+    _ => []
+  }
+}
+
+fn by_value_params(mf: MFn) -> Set<Int> {
+  var out: Set<Int> = Set.new()
+  for (l, m) in mf.params {
+    if m != Mode.MutRef {
+      out.insert(l)
+    }
+  }
+  return out
+}
+
+/// Locals that only ever hold a part of a by-value parameter (or of another such local):
+/// match scrutinees and pattern bindings, typically.
+fn borrowed_locals(mf: MFn) -> Set<Int> {
+  let by_value = by_value_params(mf)
+  // For each local assigned whole: the local each assignment copies from (-1: something else).
+  var sources: Map<Int, List<Int>> = Map.new()
+  var bad: Set<Int> = Set.new()
+  for block in mf.blocks {
+    for ss in block.stmts {
+      match ss.stmt {
+        Assign(p, rv) => {
+          if !p.proj.is_empty() {
+            bad.insert(p.local)
+          } else {
+            let src = match rv {
+              Use(Copy(q)) => q.local
+              _ => -1
+            }
+            var srcs = sources.get(p.local).unwrap_or([])
+            srcs.push(src)
+            sources.insert(p.local, srcs)
+          }
+          match rv {
+            Call(_, args, _) => {
+              for a in args {
+                match a {
+                  MutRef(q) => bad.insert(q.local)
+                  _ => {}
+                }
+              }
+            }
+            _ => {}
+          }
+        }
+        _ => {}
+      }
+    }
+  }
+  var ok: Set<Int> = Set.new()
+  for l in by_value.items() {
+    if !sources.contains(l) && !bad.contains(l) {
+      ok.insert(l)
+    }
+  }
+  var borrowed: Set<Int> = Set.new()
+  for {
+    var more: List<Int> = []
+    for (l, srcs) in sources {
+      if l == 0 || bad.contains(l) || ok.contains(l) {
+        continue
+      }
+      var all = true
+      for s in srcs {
+        if s < 0 || !ok.contains(s) || s == l {
+          all = false
+        }
+      }
+      if all {
+        more.push(l)
+      }
+    }
+    if more.is_empty() {
+      return borrowed
+    }
+    for l in more {
+      ok.insert(l)
+      borrowed.insert(l)
+    }
+  }
+}
+
+/// For each statement, the locals whose value it may move out: read exactly once there and
+/// dead afterwards. `owners` own their values (not parameters, borrowed locals or the
+/// return slot).
+fn last_uses(mf: MFn, owners: Set<Int>) -> List<List<Set<Int>>> {
+  let n = mf.blocks.len()
+  var uses_b: List<Set<Int>> = []
+  var defs_b: List<Set<Int>> = []
+  for block in mf.blocks {
+    var u: Set<Int> = Set.new()
+    var d: Set<Int> = Set.new()
+    var t: List<Int> = []
+    term_uses(block.term, &mut t)
+    for x in t {
+      u.insert(x)
+    }
+    var i = block.stmts.len() - 1
+    for i >= 0 {
+      var us: List<Int> = []
+      let l = stmt_uses(block.stmts[i].stmt, &mut us)
+      if l >= 0 {
+        let _ = u.remove(l)
+        d.insert(l)
+      }
+      for x in us {
+        u.insert(x)
+      }
+      i -= 1
+    }
+    uses_b.push(u)
+    defs_b.push(d)
+  }
+  var succ: List<List<Int>> = []
+  for block in mf.blocks {
+    succ.push(successors(block.term))
+  }
+  var live_in: List<Set<Int>> = []
+  for _ in 0..n {
+    live_in.push(Set.new())
+  }
+  var changed = true
+  for changed {
+    changed = false
+    var b = n - 1
+    for b >= 0 {
+      var inn: Set<Int> = Set.new()
+      for s in succ[b] {
+        for l in live_in[s].items() {
+          if !defs_b[b].contains(l) {
+            inn.insert(l)
+          }
+        }
+      }
+      for l in uses_b[b].items() {
+        inn.insert(l)
+      }
+      if inn.len() != live_in[b].len() {
+        live_in[b] = inn
+        changed = true
+      }
+      b -= 1
+    }
+  }
+  var result: List<List<Set<Int>>> = []
+  for b in 0..n {
+    let block = mf.blocks[b]
+    var live: Set<Int> = Set.new()
+    for s in succ[b] {
+      for l in live_in[s].items() {
+        live.insert(l)
+      }
+    }
+    var t: List<Int> = []
+    term_uses(block.term, &mut t)
+    for x in t {
+      live.insert(x)
+    }
+    var per: List<Set<Int>> = []
+    for _ in block.stmts {
+      per.push(Set.new())
+    }
+    var i = block.stmts.len() - 1
+    for i >= 0 {
+      var us: List<Int> = []
+      let def = stmt_uses(block.stmts[i].stmt, &mut us)
+      var counts: Map<Int, Int> = Map.new()
+      for l in us {
+        counts.insert(l, counts.get(l).unwrap_or(0) + 1)
+      }
+      var moves: Set<Int> = Set.new()
+      for (l, c) in counts {
+        if c == 1 && owners.contains(l) && !live.contains(l) {
+          moves.insert(l)
+        }
+      }
+      per[i] = moves
+      if def >= 0 {
+        let _ = live.remove(def)
+      }
+      for x in us {
+        live.insert(x)
+      }
+      i -= 1
+    }
+    result.push(per)
+  }
+  return result
+}
+
+/// Intrinsics that read a list argument in place.
+fn reads_in_place(op: Op) -> Bool {
+  return match op {
+    ListLen | ListIsEmpty | Get | ListSlice | ListRepeat | Show => true
+    _ => false
+  }
+}
+
+fn whole_use(op: Operand, bad: &mut Set<Int>) {
+  match op {
+    Copy(p) => if p.proj.is_empty() { bad.insert(p.local) }
+    _ => {}
+  }
+}
+
+fn index_first(p: Place) -> Bool {
+  if p.proj.is_empty() {
+    return false
+  }
+  return match p.proj[0] {
+    Index(_, _) => true
+    _ => false
+  }
+}
+
+/// Lists that stay unique once made so: written through indices, and otherwise used only by
+/// intrinsics that read them in place or keep them unique.
+fn unique_lists(mf: MFn, tys: TyCtx) -> Set<Int> {
+  var written: Set<Int> = Set.new()
+  var bad: Set<Int> = Set.new()
+  for block in mf.blocks {
+    for ss in block.stmts {
+      match ss.stmt {
+        Assign(p, rv) => {
+          if index_first(p) {
+            written.insert(p.local)
+          }
+          match rv {
+            Use(a) | Unary(_, a, _) | Cast(a, _, _) | Inc(a, _) => whole_use(a, &mut bad)
+            Binary(_, a, b, _) => {
+              whole_use(a, &mut bad)
+              whole_use(b, &mut bad)
+            }
+            Aggregate(_, _, ops) | Closure(_, ops) => {
+              for o in ops {
+                whole_use(o, &mut bad)
+              }
+            }
+            Discriminant(_) => {}
+            Call(callee, args, _) => {
+              var intr: Option<Op> = None
+              match callee {
+                Intrinsic(i) => intr = Some(i.op)
+                Value(f) => whole_use(f, &mut bad)
+                _ => {}
+              }
+              for a in args {
+                match a {
+                  Value(o) => {
+                    let in_place = match intr {
+                      Some(op) => reads_in_place(op)
+                      None => false
+                    }
+                    if !in_place {
+                      whole_use(o, &mut bad)
+                    }
+                  }
+                  MutRef(q) => {
+                    // List intrinsics taking `&mut` keep a unique list unique.
+                    if intr.is_none() {
+                      if q.proj.is_empty() {
+                        bad.insert(q.local)
+                      } else if index_first(q) {
+                        written.insert(q.local)
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        _ => {}
+      }
+    }
+  }
+  let by_value = by_value_params(mf)
+  var out: Set<Int> = Set.new()
+  for l in written.items() {
+    let is_list = match tys.kinds[mf.locals[l]] {
+      List(_) => true
+      _ => false
+    }
+    if l != 0 && !bad.contains(l) && !by_value.contains(l) && is_list {
+      out.insert(l)
+    }
+  }
+  return out
+}

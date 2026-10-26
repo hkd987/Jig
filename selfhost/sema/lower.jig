@@ -1,0 +1,1579 @@
+// Lowering typed bodies to MIR, one monomorphized instance at a time, ported from the
+// bootstrap compiler's `mir/lower.rs`. This file: instances, the function builder,
+// statements, loops, places and expressions. `lower_call.jig`: calls, matches, contracts and
+// closures.
+
+import "syntax"
+
+struct LoopFrame {
+  cont: Int
+  brk: Int
+  scope_depth: Int
+}
+
+/// The function being built.
+struct Fb {
+  /// The package and file of the function's body.
+  pkg: Int
+  file: Int
+  /// The AST and tables names are resolved against (another file's for its predicates).
+  ast: syntax.Ast
+  tab: Tables
+  body: Body
+  inst: List<Int>
+  mfn: Int
+  locals: List<Int>
+  blocks: List<Block>
+  cur: Int
+  local_map: Map<Int, Int>
+  loops: List<LoopFrame>
+  /// Locals declared in each open scope (dropped at scope exit).
+  scopes: List<List<Int>>
+  exit: Int
+  ret_ty: Int
+  olds: Map<Int, Int>
+  posts: List<Int>
+  /// Checked on return: the return type's refinement and `&mut` parameters' predicates.
+  ret_refine: Option<Int>
+  mut_params: List<Int>
+  params: List<(Int, Mode)>
+  n_captures: Int
+  cur_span: syntax.Span
+}
+
+/// The lowerer: the checked program, the MIR built so far and the current function.
+struct Lw {
+  s: Sema
+  mir: Mir
+  fb: Fb
+}
+
+fn new_lw(s: Sema) -> Lw {
+  let empty = empty_fb()
+  return Lw { s: s, mir: Mir { fns: [], instances: Map.new() }, fb: empty }
+}
+
+fn empty_fb() -> Fb {
+  return Fb {
+    pkg: 0
+    file: 0
+    ast: empty_ast()
+    tab: new_tables(0, 0, 0)
+    body: new_body()
+    inst: []
+    mfn: 0
+    locals: []
+    blocks: []
+    cur: 0
+    local_map: Map.new()
+    loops: []
+    scopes: []
+    exit: 0
+    ret_ty: 0
+    olds: Map.new()
+    posts: []
+    ret_refine: None
+    mut_params: []
+    params: []
+    n_captures: 0
+    cur_span: dummy_span()
+  }
+}
+
+/// The MIR function for an instance, created on first request (lowered later).
+fn Lw.instance(&mut self, f: Int, args: List<Int>) -> Int {
+  match self.mir.instances.get((f, args)) {
+    Some(m) => {
+      return m
+    }
+    None => {}
+  }
+  let fd = self.s.defs.fns[f]
+  var name = self.s.fn_display_name(f)
+  if !args.is_empty() {
+    name = name + "<" + self.s.tys.display_list(args) + ">"
+  }
+  var intr: Option<Intrinsic> = None
+  if !fd.has_body {
+    match lookup_intrinsic(self.s.pkgs[fd.pkg].path, fd.recv, fd.name) {
+      Some((op, int)) => intr = Some(Intrinsic { op: op, tys: args, int: int })
+      None => {}
+    }
+  }
+  let ret = self.s.tys.subst(fd.ret, args)
+  let m = self.mir.fns.len()
+  self.mir.fns.push(
+    MFn {
+      name: name
+      source: Some(f)
+      type_args: args
+      params: []
+      n_captures: 0
+      ret: ret
+      locals: []
+      blocks: []
+      lowered: intr.is_some() || (!fd.has_body && !fd.ffi)
+      intrinsic: intr
+      span: fd.span
+    },
+  )
+  self.mir.instances.insert((f, args), m)
+  return m
+}
+
+fn Lw.ensure_lowered(&mut self, m: Int) {
+  if !self.mir.fns[m].lowered {
+    self.lower_instance(m)
+  }
+}
+
+/// Start building function `mfn` from a body in `pkg`'s file `file`.
+fn Lw.begin_fn(&mut self, pkg: Int, file: Int, body: Body, inst: List<Int>, mfn: Int) {
+  let ret = self.mir.fns[mfn].ret
+  let span = self.mir.fns[mfn].span
+  self.fb = Fb {
+    pkg: pkg
+    file: file
+    ast: self.s.pkgs[pkg].files[file].ast
+    tab: self.s.tables[pkg][file]
+    body: body
+    inst: inst
+    mfn: mfn
+    locals: [ret]
+    blocks: [
+      Block { stmts: [], term: Terminator.Unreachable, term_span: span },
+      Block { stmts: [], term: Terminator.Return, term_span: span },
+    ]
+    cur: 0
+    local_map: Map.new()
+    loops: []
+    scopes: [[]]
+    exit: 1
+    ret_ty: ret
+    olds: Map.new()
+    posts: []
+    ret_refine: None
+    mut_params: []
+    params: []
+    n_captures: 0
+    cur_span: span
+  }
+}
+
+fn Lw.lower_instance(&mut self, m: Int) {
+  let f = self.mir.fns[m].source.unwrap_or(0)
+  let args = self.mir.fns[m].type_args
+  let fd = self.s.defs.fns[f]
+  let item = self.s.pkgs[fd.pkg].files[fd.file].ast.items[fd.item]
+  let decl = match item.kind {
+    Fn(d) => d
+    _ => {
+      return
+    }
+  }
+  let body = match self.s.bodies[f] {
+    Some(b) => b
+    None => {
+      self.mir.fns[m].lowered = true
+      return
+    }
+  }
+  var modes: List<Mode> = []
+  match fd.self_mode {
+    Some(sm) => modes.push(sm)
+    None => {}
+  }
+  for p in fd.params {
+    modes.push(p.mode)
+  }
+  self.begin_fn(fd.pkg, fd.file, body, args, m)
+  self.params_from_body(modes)
+  // Parameter refinements, then preconditions.
+  for p in decl.params {
+    match p.refine {
+      Some(pred) => self.check(pred, CheckKind.Refinement)
+      None => {}
+    }
+  }
+  let offset = if fd.self_mode.is_some() { 1 } else { 0 }
+  self.fb.ret_refine = fd.ret_refine
+  for i in 0..fd.params.len() {
+    match fd.params[i].refine {
+      Some(al) => {
+        let l = self.fb.params[i + offset].0
+        // At the parameter: the caller's obligation.
+        let saved = self.fb.cur_span
+        self.fb.cur_span = fd.params[i].span
+        self.check_alias(al, place_of(l))
+        self.fb.cur_span = saved
+      }
+      None => {}
+    }
+  }
+  for r in decl.pre {
+    self.check(r, CheckKind.Precondition)
+  }
+  // `&mut` parameters must satisfy their struct predicates again on return.
+  var mut_params: List<Int> = []
+  for (l, mode) in self.fb.params {
+    if mode == Mode.MutRef {
+      mut_params.push(l)
+    }
+  }
+  self.fb.mut_params = mut_params
+  // Postconditions, with `old(...)` snapshots; the standard library's are proved.
+  if !self.s.pkgs[fd.pkg].is_std {
+    for en in decl.post {
+      self.snapshot_olds(en)
+    }
+    self.fb.posts = decl.post
+  }
+  match decl.body {
+    Some(bexpr) => self.lower_body_block(bexpr)
+    None => if fd.ffi {
+      // A C function: call it with the parameters, then check the contract as usual.
+      var cargs: List<Arg> = []
+      for (l, _) in self.fb.params {
+        cargs.push(Arg.Value(op_local(l)))
+      }
+      self.assign(place_of(0), Rvalue.Call(Callee.Ffi(fd.name), cargs, self.fb.ret_ty))
+    }
+  }
+  self.finish()
+}
+
+// ---------- infrastructure ----------
+
+fn Lw.subst(&mut self, t: Int) -> Int {
+  return self.s.tys.subst(t, self.fb.inst)
+}
+
+fn Lw.ty(&mut self, e: Int) -> Int {
+  return self.subst(self.fb.tab.expr_ty[e])
+}
+
+fn Lw.temp(&mut self, ty: Int) -> Int {
+  let l = self.fb.locals.len()
+  self.fb.locals.push(ty)
+  return l
+}
+
+fn Lw.new_block(&mut self) -> Int {
+  let b = self.fb.blocks.len()
+  self.fb.blocks.push(
+    Block { stmts: [], term: Terminator.Unreachable, term_span: self.fb.cur_span },
+  )
+  return b
+}
+
+fn Lw.push(&mut self, s: Stmt) {
+  let span = self.fb.cur_span
+  self.fb.blocks[self.fb.cur].stmts.push(SpannedStmt { stmt: s, span: span })
+}
+
+fn Lw.assign(&mut self, p: Place, rv: Rvalue) {
+  self.push(Stmt.Assign(p, rv))
+}
+
+fn Lw.terminate(&mut self, t: Terminator) {
+  let c = self.fb.cur
+  self.fb.blocks[c].term = t
+  self.fb.blocks[c].term_span = self.fb.cur_span
+}
+
+fn Lw.goto(&mut self, target: Int) {
+  self.terminate(Terminator.Goto(target))
+}
+
+/// End the current block with `t` and continue in a fresh (unreachable) block.
+fn Lw.terminate_and_continue(&mut self, t: Terminator) {
+  self.terminate(t)
+  self.fb.cur = self.new_block()
+}
+
+fn Lw.sema_local(&mut self, id: Int) -> Int {
+  match self.fb.local_map.get(id) {
+    Some(l) => {
+      return l
+    }
+    None => {}
+  }
+  let ty = self.subst(self.fb.body.locals[id].ty)
+  let l = self.temp(ty)
+  self.fb.local_map.insert(id, l)
+  let n = self.fb.scopes.len()
+  if n > 0 {
+    self.fb.scopes[n - 1].push(l)
+  }
+  return l
+}
+
+fn Lw.params_from_body(&mut self, modes: List<Mode>) {
+  let ids = self.fb.body.param_locals
+  for i in 0..ids.len() {
+    let l = self.sema_local(ids[i])
+    self.fb.params.push((l, if i < modes.len() { modes[i] } else { Mode.Value }))
+  }
+  // Parameters are not dropped by scopes.
+  let n = self.fb.scopes.len()
+  if n > 0 {
+    self.fb.scopes[n - 1] = []
+  }
+}
+
+fn Lw.finish(&mut self) {
+  // Fall off the end of the body into the exit block.
+  self.drop_scopes_to(0)
+  self.goto(self.fb.exit)
+  // Postconditions in the exit block.
+  let posts = self.fb.posts
+  self.fb.posts = []
+  let mut_params = self.fb.mut_params
+  self.fb.mut_params = []
+  let ret_refine = self.fb.ret_refine
+  self.fb.ret_refine = None
+  if !posts.is_empty() || !mut_params.is_empty() || ret_refine.is_some() {
+    let exit = self.fb.exit
+    let ret_block = self.new_block()
+    self.fb.cur = exit
+    // The exit block checks, then returns.
+    self.fb.blocks[ret_block].term = Terminator.Return
+    // Return checks are reported at the function (where the prover records them).
+    self.fb.cur_span = self.mir.fns[self.fb.mfn].span
+    match ret_refine {
+      Some(al) => self.check_alias(al, place_of(0))
+      None => {}
+    }
+    for l in mut_params {
+      match self.s.tys.kinds[self.fb.locals[l]] {
+        Adt(adt, _) => if !self.s.defs.adts[adt].is_enum {
+          self.check_struct_predicates(adt, place_of(l))
+        }
+        _ => {}
+      }
+    }
+    for en in posts {
+      self.check(en, CheckKind.Postcondition)
+    }
+    self.goto(ret_block)
+  }
+  let m = self.fb.mfn
+  self.mir.fns[m].locals = self.fb.locals
+  self.mir.fns[m].blocks = self.fb.blocks
+  self.mir.fns[m].params = self.fb.params
+  self.mir.fns[m].n_captures = self.fb.n_captures
+  self.mir.fns[m].lowered = true
+}
+
+/// The source text of an expression, shortened to 120 bytes.
+fn Lw.src(self, e: Int) -> Str {
+  let sp = self.fb.ast.exprs[e].span
+  let s = match self.s.file_of(sp.lo) {
+    Some((p, f)) => {
+      let file = self.s.pkgs[p].files[f]
+      let hi = if sp.hi - file.base > file.text.len() { file.text.len() } else { sp.hi - file.base }
+      file.text[sp.lo - file.base..hi]
+    }
+    None => ""
+  }
+  if s.len() > 120 {
+    let cs = s.chars()
+    return Str.from_chars(cs[0..117]) + "…"
+  }
+  return s
+}
+
+fn Lw.res(self, e: Int) -> Res {
+  return self.fb.tab.expr_res[e]
+}
+
+fn is_literal(k: syntax.ExprKind) -> Bool {
+  return match k {
+    Int(_) | Float | Str(_) | Bool(_) => true
+    _ => false
+  }
+}
+
+/// Emit a runtime check of a boolean expression, showing operand values on failure.
+fn Lw.check(&mut self, cond: Int, kind: CheckKind) {
+  let cspan = self.fb.ast.exprs[cond].span
+  let saved = self.fb.cur_span
+  self.fb.cur_span = cspan
+  let text = self.src(cond)
+  var values: List<CheckValue> = []
+  var op = op_unit()
+  var compared = false
+  match self.fb.ast.exprs[cond].kind {
+    Binary(bop, lhs, rhs) => if is_comparison(bop) {
+      compared = true
+      let lt = self.ty(lhs)
+      let a = self.expr_to_temp(lhs)
+      let b = self.expr_to_temp(rhs)
+      let ls = self.src(lhs)
+      let rs = self.src(rhs)
+      let t = self.temp(self.s.tys.bool)
+      self.assign(place_of(t), Rvalue.Binary(bop, op_local(a), op_local(b), lt))
+      if !is_literal(self.fb.ast.exprs[lhs].kind) {
+        values.push(CheckValue { label: ls, op: op_local(a), ty: lt })
+      }
+      if !is_literal(self.fb.ast.exprs[rhs].kind) {
+        values.push(CheckValue { label: rs, op: op_local(b), ty: lt })
+      }
+      op = op_local(t)
+    }
+    _ => {}
+  }
+  if !compared {
+    op = self.expr(cond)
+  }
+  let span = self.fb.cur_span
+  // The variables, fields, `result` and `old(...)` values it mentions, read on failure.
+  var atoms: List<Int> = []
+  self.atoms(cond, &mut atoms)
+  var shown: List<Str> = []
+  for v in values {
+    shown.push(v.label)
+  }
+  var texts: List<Str> = []
+  var kept: List<Int> = []
+  for a in atoms {
+    let t = self.src(a)
+    if shown.contains(t) || texts.contains(t) {
+      continue
+    }
+    texts.push(t)
+    kept.push(a)
+  }
+  if kept.len() > 8 {
+    kept.truncate(8)
+  }
+  if kept.is_empty() {
+    self.push(Stmt.Check(op, kind, text, values, span))
+  } else {
+    let ok_bb = self.new_block()
+    let fail_bb = self.new_block()
+    self.terminate(Terminator.If(op, ok_bb, fail_bb))
+    self.fb.cur = fail_bb
+    for a in kept {
+      let t = self.ty(a)
+      let l = self.expr_to_temp(a)
+      values.push(CheckValue { label: self.src(a), op: op_local(l), ty: t })
+    }
+    self.fb.cur_span = span
+    self.push(Stmt.Check(op_bool(false), kind, text, values, span))
+    self.goto(ok_bb)
+    self.fb.cur = ok_bb
+  }
+  self.fb.cur_span = saved
+}
+
+/// Side-effect-free leaves of a condition worth showing: locals, field paths, `result` and
+/// `old(...)`. Indexing is left out (it could trap again).
+fn Lw.atoms(self, e: Int, out: &mut List<Int>) {
+  match self.fb.ast.exprs[e].kind {
+    Name(_) => {
+      match self.res(e) {
+        Local(_) | ResultVal => out.push(e)
+        _ => {}
+      }
+      return
+    }
+    Field(base, _) => {
+      match self.res(e) {
+        Field(_) => if self.field_chain(base) {
+          out.push(e)
+          return
+        }
+        _ => {}
+      }
+    }
+    TupleField(base, _, _) => if self.field_chain(base) {
+      out.push(e)
+      return
+    }
+    Call(callee, _) => if self.res(callee) == Res.Old {
+      out.push(e)
+      return
+    }
+    Closure(_, _, _) | Quant(_, _, _, _, _) => {
+      return
+    }
+    Int(_) | Float | Str(_) | Bool(_) | Char(_) => {
+      return
+    }
+    _ => {}
+  }
+  var kids: List<Int> = []
+  visit_children(self.fb.ast, e, &mut kids)
+  for c in kids {
+    self.atoms(c, &mut out)
+  }
+}
+
+fn Lw.field_chain(self, e: Int) -> Bool {
+  return match self.fb.ast.exprs[e].kind {
+    Name(_) => match self.res(e) {
+      Local(_) | ResultVal => true
+      _ => false
+    }
+    Field(base, _) => match self.res(e) {
+      Field(_) => self.field_chain(base)
+      _ => false
+    }
+    TupleField(base, _, _) | Paren(base) => self.field_chain(base)
+    _ => false
+  }
+}
+
+fn Lw.snapshot_olds(&mut self, e: Int) {
+  // Find `old(x)` calls and evaluate `x` now.
+  var stack = [e]
+  for !stack.is_empty() {
+    let x = stack.pop().unwrap_or(0)
+    match self.fb.ast.exprs[x].kind {
+      Call(callee, args) => if self.res(callee) == Res.Old {
+        if !args.is_empty() {
+          let t = self.ty(args[0])
+          let l = self.temp(t)
+          self.expr_into(args[0], place_of(l))
+          self.fb.olds.insert(x, l)
+        }
+        continue
+      }
+      _ => {}
+    }
+    visit_children(self.fb.ast, x, &mut stack)
+  }
+}
+
+// ---------- scopes ----------
+
+fn Lw.push_scope(&mut self) {
+  self.fb.scopes.push([])
+}
+
+fn Lw.pop_scope(&mut self) {
+  match self.fb.scopes.pop() {
+    Some(s) => {
+      var i = s.len() - 1
+      for i >= 0 {
+        self.push(Stmt.Drop(s[i]))
+        i -= 1
+      }
+    }
+    None => {}
+  }
+}
+
+/// Emit drops for every scope deeper than `depth` (for early exits).
+fn Lw.drop_scopes_to(&mut self, depth: Int) {
+  var drops: List<Int> = []
+  var k = self.fb.scopes.len() - 1
+  for k >= depth {
+    let s = self.fb.scopes[k]
+    var i = s.len() - 1
+    for i >= 0 {
+      drops.push(s[i])
+      i -= 1
+    }
+    k -= 1
+  }
+  for l in drops {
+    self.push(Stmt.Drop(l))
+  }
+}
+
+// ---------- statements ----------
+
+fn Lw.lower_body_block(&mut self, block: Int) {
+  match self.fb.ast.exprs[block].kind {
+    Block(stmts) => {
+      self.push_scope()
+      for s in stmts {
+        self.stmt(s)
+      }
+      self.pop_scope()
+    }
+    _ => {}
+  }
+}
+
+fn Lw.str_concat(&mut self, p: Place, rhs: Operand, ty: Int) {
+  let rv = Rvalue.Call(
+    Callee.Intrinsic(intrinsic(Op.StrConcat, [])),
+    [Arg.Value(Operand.Copy(p)), Arg.Value(rhs)],
+    ty,
+  )
+  self.assign(p, rv)
+}
+
+fn Lw.stmt(&mut self, s: Int) {
+  let st = self.fb.ast.stmts[s]
+  self.fb.cur_span = st.span
+  match st.kind {
+    Let(pat, _, init, _) => self.let_pat(pat, init)
+    Assign(target, op, value) => {
+      let p = self.place(target)
+      match op {
+        None => if !self.append_chain(target, value, p) { self.expr_into(value, p) }
+        Some(o) => {
+          let tt = self.ty(target)
+          let v = self.expr(value)
+          if self.s.tys.kinds[tt] == TyKind.Str {
+            // `s += t` writes straight back, so native code appends in place.
+            self.str_concat(p, v, tt)
+          } else {
+            let t = self.temp(tt)
+            self.assign(place_of(t), Rvalue.Binary(o, Operand.Copy(p), v, tt))
+            self.assign(p, Rvalue.Use(op_local(t)))
+          }
+        }
+      }
+      if !p.proj.is_empty() {
+        self.check_mutated(p)
+      }
+    }
+    Expr(e) => {
+      let _ = self.expr(e)
+    }
+    Return(v) => {
+      match v {
+        Some(e) => self.expr_into(e, place_of(0))
+        None => {}
+      }
+      self.drop_scopes_to(1)
+      self.terminate_and_continue(Terminator.Goto(self.fb.exit))
+    }
+    Break | Continue => {
+      let n = self.fb.loops.len()
+      if n == 0 {
+        return
+      }
+      let fr = self.fb.loops[n - 1]
+      let target = if st.kind == syntax.StmtKind.Break { fr.brk } else { fr.cont }
+      self.drop_scopes_to(fr.scope_depth)
+      self.terminate_and_continue(Terminator.Goto(target))
+    }
+    For(head, invariants, body) => self.lower_for(head, invariants, body)
+  }
+}
+
+/// `s = s + a + b` on strings: evaluate `a` and `b`, then append each to `s` (in place in
+/// native code). Only when the target is a plain local.
+fn Lw.append_chain(&mut self, target: Int, value: Int, p: Place) -> Bool {
+  let tt = self.ty(target)
+  if !p.proj.is_empty() || self.s.tys.kinds[tt] != TyKind.Str {
+    return false
+  }
+  let tl = match self.res(target) {
+    Local(l) => l
+    _ => {
+      return false
+    }
+  }
+  var parts: List<Int> = []
+  var e = value
+  for {
+    match self.fb.ast.exprs[e].kind {
+      Binary(op, lhs, rhs) => {
+        if op != syntax.BinOp.Add {
+          return false
+        }
+        parts.push(rhs)
+        e = lhs
+      }
+      Paren(x) => e = x
+      Name(_) => {
+        if self.res(e) == Res.Local(tl) {
+          break
+        }
+        return false
+      }
+      _ => {
+        return false
+      }
+    }
+  }
+  if parts.is_empty() {
+    return false
+  }
+  parts.reverse()
+  var ops: List<Operand> = []
+  for x in parts {
+    let t = self.ty(x)
+    let l = self.temp(t)
+    self.expr_into(x, place_of(l))
+    ops.push(op_local(l))
+  }
+  for o in ops {
+    self.str_concat(p, o, self.s.tys.str)
+  }
+  return true
+}
+
+fn Lw.let_pat(&mut self, pat: Int, init: Int) {
+  match self.fb.ast.pats[pat].kind {
+    Bind(_) | Variant(_, _, _) => match self.fb.tab.pat_local.get(pat) {
+      Some(id) => {
+        let l = self.sema_local(id)
+        self.expr_into(init, place_of(l))
+      }
+      None => {
+        let _ = self.expr(init)
+      }
+    }
+    Wild => {
+      let _ = self.expr(init)
+    }
+    _ => {
+      let t = self.ty(init)
+      let tmp = self.temp(t)
+      self.expr_into(init, place_of(tmp))
+      self.bind_irrefutable(pat, place_of(tmp))
+    }
+  }
+}
+
+fn Lw.bind_irrefutable(&mut self, pat: Int, p: Place) {
+  match self.fb.ast.pats[pat].kind {
+    Bind(_) | Variant(_, _, _) => match self.fb.tab.pat_local.get(pat) {
+      Some(id) => {
+        let l = self.sema_local(id)
+        self.assign(place_of(l), Rvalue.Use(Operand.Copy(p)))
+      }
+      None => {}
+    }
+    Tuple(subs) => {
+      for i in 0..subs.len() {
+        self.bind_irrefutable(subs[i], p.field(i))
+      }
+    }
+    _ => {}
+  }
+}
+
+fn int_kind_of(tys: TyCtx, t: Int) -> IntTy {
+  return match tys.kinds[t] {
+    Int(k, _) => k
+    _ => IntTy.I64
+  }
+}
+
+fn Lw.lower_for(&mut self, head: syntax.ForHead, invs: List<Int>, body: Int) {
+  self.push_scope()
+  let head_bb = self.new_block()
+  let body_bb = self.new_block()
+  let latch_bb = self.new_block()
+  let exit_bb = self.new_block()
+  let int = self.s.tys.int
+  match head {
+    Forever => {
+      self.goto(head_bb)
+      self.fb.cur = head_bb
+      self.goto(body_bb)
+      self.fb.cur = latch_bb
+      self.goto(head_bb)
+    }
+    While(c) => {
+      self.goto(head_bb)
+      self.fb.cur = head_bb
+      let op = self.expr(c)
+      self.terminate(Terminator.If(op, body_bb, exit_bb))
+      self.fb.cur = latch_bb
+      self.goto(head_bb)
+    }
+    In(pat, iter) => {
+      match self.lazy_split(iter) {
+        Some((base, sep)) => {
+          // `for w in s.split("sep")`: one piece per iteration, no list.
+          let str_t = self.s.tys.str
+          let s = self.temp(str_t)
+          self.expr_into(base, place_of(s))
+          let pos = self.temp(int)
+          self.assign(place_of(pos), Rvalue.Use(op_int(0)))
+          self.goto(head_bb)
+          self.fb.cur = head_bb
+          let c = self.temp(self.s.tys.bool)
+          self.assign(place_of(c), Rvalue.Binary(syntax.BinOp.Ge, op_local(pos), op_int(0), int))
+          self.terminate(Terminator.If(op_local(c), body_bb, exit_bb))
+          self.fb.cur = body_bb
+          let piece = self.temp(str_t)
+          let args = [
+            Arg.Value(op_local(s)),
+            Arg.Value(Operand.Const(Const.Str(sep))),
+            Arg.MutRef(place_of(pos)),
+          ]
+          self.assign(
+            place_of(piece),
+            Rvalue.Call(Callee.Intrinsic(intrinsic(Op.SplitNext, [])), args, str_t),
+          )
+          self.bind_irrefutable(pat, place_of(piece))
+          let body_start = self.new_block()
+          self.goto(body_start)
+          self.fb.cur = latch_bb
+          self.goto(head_bb)
+          self.fb.cur = body_start
+          self.lower_loop_body(invs, body, latch_bb, exit_bb)
+          self.fb.cur = exit_bb
+          self.pop_scope()
+          return
+        }
+        None => {}
+      }
+      // Ranges iterate an integer; collections iterate a snapshot by index.
+      var elem_kind = -1
+      var idx = 0
+      var limit = 0
+      var coll = -1
+      var ranged = false
+      match self.fb.ast.exprs[iter].kind {
+        Range(lo_opt, hi_opt) => match (lo_opt, hi_opt) {
+          (Some(lo), Some(hi)) => {
+            ranged = true
+            let t = self.ty(lo)
+            idx = self.temp(t)
+            self.expr_into(lo, place_of(idx))
+            limit = self.temp(t)
+            self.expr_into(hi, place_of(limit))
+            elem_kind = t
+          }
+          _ => {}
+        }
+        _ => {}
+      }
+      if !ranged {
+        let it = self.ty(iter)
+        let src = self.expr(iter)
+        var list_ty = it
+        var conv: Option<(Op, List<Int>)> = None
+        match self.s.tys.kinds[it] {
+          Set(e) => {
+            list_ty = self.s.tys.list(e)
+            conv = Some((Op.Items, [e]))
+          }
+          Map(k, v) => {
+            let tup = self.s.tys.tuple([k, v])
+            list_ty = self.s.tys.list(tup)
+            conv = Some((Op.Entries, [k, v]))
+          }
+          _ => {}
+        }
+        coll = self.temp(list_ty)
+        match conv {
+          None => self.assign(place_of(coll), Rvalue.Use(src))
+          Some((op, tys)) => self.assign(
+            place_of(coll),
+            Rvalue.Call(Callee.Intrinsic(intrinsic(op, tys)), [Arg.Value(src)], list_ty),
+          )
+        }
+        let elem = match self.s.tys.kinds[list_ty] {
+          List(e) => e
+          _ => self.s.tys.error
+        }
+        limit = self.temp(int)
+        self.assign(
+          place_of(limit),
+          Rvalue.Call(
+            Callee.Intrinsic(intrinsic(Op.ListLen, [elem])),
+            [Arg.Value(op_local(coll))],
+            int,
+          ),
+        )
+        idx = self.temp(int)
+        self.assign(place_of(idx), Rvalue.Use(op_int(0)))
+      }
+      self.goto(head_bb)
+      self.fb.cur = head_bb
+      let it = if elem_kind >= 0 { elem_kind } else { int }
+      let c = self.temp(self.s.tys.bool)
+      self.assign(place_of(c), Rvalue.Binary(syntax.BinOp.Lt, op_local(idx), op_local(limit), it))
+      self.terminate(Terminator.If(op_local(c), body_bb, exit_bb))
+      self.fb.cur = body_bb
+      if coll < 0 {
+        self.bind_irrefutable(pat, place_of(idx))
+      } else {
+        self.bind_irrefutable(pat, place_of(coll).index(op_local(idx), dummy_span()))
+      }
+      let body_start = self.new_block()
+      self.goto(body_start)
+      self.fb.cur = latch_bb
+      self.assign(place_of(idx), Rvalue.Inc(op_local(idx), int_kind_of(self.s.tys, it)))
+      self.goto(head_bb)
+      // The body proper starts after the binding.
+      self.fb.cur = body_start
+      self.lower_loop_body(invs, body, latch_bb, exit_bb)
+      self.fb.cur = exit_bb
+      self.pop_scope()
+      return
+    }
+  }
+  self.fb.cur = body_bb
+  self.lower_loop_body(invs, body, latch_bb, exit_bb)
+  self.fb.cur = exit_bb
+  self.pop_scope()
+}
+
+/// `base.split("sep")` with a non-empty literal separator, from the prelude: a loop over it
+/// can take the pieces one at a time.
+fn Lw.lazy_split(self, iter: Int) -> Option<(Int, Str)> {
+  let (callee, args) = match self.fb.ast.exprs[iter].kind {
+    Call(c, a) => (c, a)
+    _ => {
+      return None
+    }
+  }
+  let base = match self.fb.ast.exprs[callee].kind {
+    Field(b, _) => b
+    _ => {
+      return None
+    }
+  }
+  let f = match self.res(callee) {
+    Method(f) => f
+    _ => {
+      return None
+    }
+  }
+  let fd = self.s.defs.fns[f]
+  if fd.has_body {
+    return None
+  }
+  match lookup_intrinsic(self.s.pkgs[fd.pkg].path, fd.recv, fd.name) {
+    Some((op, _)) => if op != Op.Split {
+      return None
+    }
+    None => {
+      return None
+    }
+  }
+  if args.len() != 1 {
+    return None
+  }
+  return match self.fb.ast.exprs[args[0]].kind {
+    Str(sep) => if sep.is_empty() { None } else { Some((base, sep)) }
+    _ => None
+  }
+}
+
+fn Lw.lower_loop_body(&mut self, invs: List<Int>, body: Int, latch: Int, exit: Int) {
+  for inv in invs {
+    self.check(inv, CheckKind.Invariant)
+  }
+  self.fb.loops.push(LoopFrame { cont: latch, brk: exit, scope_depth: self.fb.scopes.len() })
+  self.lower_body_block(body)
+  let _ = self.fb.loops.pop()
+  self.goto(latch)
+}
+
+// ---------- places ----------
+
+fn Lw.is_place_expr(self, e: Int) -> Bool {
+  return match self.fb.ast.exprs[e].kind {
+    Name(_) => match self.res(e) {
+      Local(_) => true
+      _ => false
+    }
+    Field(base, _) => match self.res(e) {
+      Field(_) => self.is_place_expr(base)
+      _ => false
+    }
+    TupleField(base, _, _) => self.is_place_expr(base)
+    Index(base, index) => {
+      let range = match self.fb.ast.exprs[index].kind {
+        Range(_, _) => true
+        _ => false
+      }
+      let listy = match self.s.tys.kinds[self.fb.tab.expr_ty[base]] {
+        List(_) | Param(_, _) => true
+        _ => false
+      }
+      !range && listy && self.is_place_expr(base)
+    }
+    Paren(x) => self.is_place_expr(x)
+    _ => false
+  }
+}
+
+/// A place for a place expression; other expressions are evaluated into a temporary.
+fn Lw.place(&mut self, e: Int) -> Place {
+  match self.fb.ast.exprs[e].kind {
+    Name(_) => match self.res(e) {
+      Local(id) => {
+        return place_of(self.sema_local(id))
+      }
+      _ => {}
+    }
+    Field(base, _) => match self.res(e) {
+      Field(i) => {
+        let b = self.place(base)
+        return b.field(i)
+      }
+      _ => {}
+    }
+    TupleField(base, index, _) => {
+      let b = self.place(base)
+      return b.field(index)
+    }
+    Index(base, index) => {
+      let range = match self.fb.ast.exprs[index].kind {
+        Range(_, _) => true
+        _ => false
+      }
+      if !range {
+        let bt = self.ty(base)
+        match self.s.tys.kinds[bt] {
+          List(_) => {
+            let b = self.place(base)
+            let i = self.expr(index)
+            return b.index(i, self.fb.ast.exprs[e].span)
+          }
+          _ => {}
+        }
+      }
+    }
+    Paren(x) => {
+      return self.place(x)
+    }
+    _ => {}
+  }
+  let t = self.ty(e)
+  let tmp = self.temp(t)
+  self.expr_into(e, place_of(tmp))
+  return place_of(tmp)
+}
+
+// ---------- expressions ----------
+
+fn Lw.expr_to_temp(&mut self, e: Int) -> Int {
+  let t = self.ty(e)
+  let l = self.temp(t)
+  self.expr_into(e, place_of(l))
+  return l
+}
+
+/// The value of a float literal.
+fn Lw.float_lit(self, e: Int) -> Float {
+  return float_value(self.src(e))
+}
+
+/// Evaluate an expression to an operand.
+fn Lw.expr(&mut self, e: Int) -> Operand {
+  if self.is_place_expr(e) {
+    return Operand.Copy(self.place(e))
+  }
+  match self.fb.ast.exprs[e].kind {
+    Int(v) => {
+      let t = self.ty(e)
+      return self.int_const(false, v, t)
+    }
+    Unary(op, inner) => if op == syntax.UnOp.Neg {
+      match self.fb.ast.exprs[inner].kind {
+        Int(v) => {
+          let t = self.ty(e)
+          return self.int_const(true, v, t)
+        }
+        _ => {}
+      }
+    }
+    Float => {
+      return Operand.Const(Const.Float(self.float_lit(e)))
+    }
+    Bool(b) => {
+      return op_bool(b)
+    }
+    Str(s) => {
+      return Operand.Const(Const.Str(s))
+    }
+    Char(c) => {
+      let t = self.ty(e)
+      return match self.s.tys.kinds[t] {
+        Int(k, _) => Operand.Const(Const.Int(false, c as U64, k))
+        _ => Operand.Const(Const.Char(c))
+      }
+    }
+    Paren(x) => {
+      return self.expr(x)
+    }
+    _ => {}
+  }
+  match self.res(e) {
+    Const(c) => {
+      return self.const_val(c)
+    }
+    _ => {}
+  }
+  let t = self.ty(e)
+  if t == self.s.tys.unit_ty {
+    let l = self.temp(t)
+    self.expr_into(e, place_of(l))
+    return op_unit()
+  }
+  let l = self.temp(t)
+  self.expr_into(e, place_of(l))
+  return op_local(l)
+}
+
+fn Lw.int_const(self, neg: Bool, mag: U64, t: Int) -> Operand {
+  return match self.s.tys.kinds[t] {
+    Int(k, _) => Operand.Const(Const.Int(neg && mag != 0, mag, k))
+    Float(_) => Operand.Const(
+      Const.Float(if neg && mag != 0 { -(mag as Float) } else { mag as Float }),
+    )
+    _ => Operand.Const(Const.Int(neg && mag != 0, mag, IntTy.I64))
+  }
+}
+
+fn Lw.const_val(self, c: Int) -> Operand {
+  let cd = self.s.defs.consts[c]
+  return match cd.value {
+    Some(Int(v)) => match int_value(v, IntTy.I64) {
+      Int(neg, mag, _) => self.int_const(neg, mag, cd.ty)
+      _ => op_unit()
+    }
+    Some(Big(v)) => self.int_const(false, v, cd.ty)
+    Some(Float(f)) => Operand.Const(Const.Float(f))
+    Some(Bool(b)) => op_bool(b)
+    Some(Str(s)) => Operand.Const(Const.Str(s))
+    Some(Char(ch)) => Operand.Const(Const.Char(ch))
+    None => op_unit()
+  }
+}
+
+fn Lw.inst_of(&mut self, e: Int) -> List<Int> {
+  let args = self.fb.tab.expr_inst.get(e).unwrap_or([])
+  var out: List<Int> = []
+  for t in args {
+    out.push(self.subst(t))
+  }
+  return out
+}
+
+fn Lw.exprs_of(&mut self, xs: List<Int>) -> List<Operand> {
+  var ops: List<Operand> = []
+  for x in xs {
+    ops.push(self.expr(x))
+  }
+  return ops
+}
+
+/// Evaluate `e` and store its value into `dest`.
+fn Lw.expr_into(&mut self, e: Int, dest: Place) {
+  let ex = self.fb.ast.exprs[e]
+  let saved = self.fb.cur_span
+  self.fb.cur_span = ex.span
+  let t = self.ty(e)
+  match ex.kind {
+    Name(_) | Field(_, _) | TupleField(_, _, _) | Index(_, _) => {
+      if self.is_place_expr(e) {
+        let p = self.place(e)
+        self.assign(dest, Rvalue.Use(Operand.Copy(p)))
+      } else {
+        self.value_expr_into(e, dest)
+      }
+    }
+    TypeArgs(_, _) => self.value_expr_into(e, dest)
+    Int(_) | Float | Bool(_) | Str(_) | Char(_) => {
+      let op = self.expr(e)
+      self.assign(dest, Rvalue.Use(op))
+    }
+    Paren(x) => self.expr_into(x, dest)
+    Tuple(list) => {
+      let ops = self.exprs_of(list)
+      self.assign(dest, Rvalue.Aggregate(AggKind.Tuple, t, ops))
+    }
+    List(list) => {
+      let ops = self.exprs_of(list)
+      self.assign(dest, Rvalue.Aggregate(AggKind.List, t, ops))
+    }
+    Call(callee, args) => self.lower_call(e, callee, args, dest)
+    Unary(op, inner) => {
+      var lit = false
+      if op == syntax.UnOp.Neg {
+        match self.fb.ast.exprs[inner].kind {
+          Int(_) => lit = true
+          _ => {}
+        }
+      }
+      if lit {
+        let o = self.expr(e)
+        self.assign(dest, Rvalue.Use(o))
+      } else {
+        let o = self.expr(inner)
+        let it = self.ty(inner)
+        self.assign(dest, Rvalue.Unary(op, o, it))
+      }
+    }
+    Binary(op, lhs, rhs) => self.lower_binary(op, lhs, rhs, t, dest)
+    Cast(inner, _) => {
+      let from = self.ty(inner)
+      let o = self.expr(inner)
+      self.assign(dest, Rvalue.Cast(o, from, t))
+    }
+    Try(inner) => self.lower_try(inner, dest)
+    If(cond, then, els) => self.lower_if(cond, then, els, Some(dest))
+    Match(scrut, arms) => self.lower_match(scrut, arms, Some(dest))
+    Block(_) => self.block_into(e, Some(dest))
+    StructLit(_, fields) => self.lower_struct_lit(fields, t, dest)
+    Closure(params, _, body) => self.lower_closure(e, params, body, t, dest)
+    Quant(forall, binder, lo, hi, body) => self.lower_quant(forall, binder, lo, hi, body, dest)
+    MutArg(x) => self.expr_into(x, dest)
+    Range(_, _) => {}
+  }
+  self.fb.cur_span = saved
+}
+
+/// Names and fields that are not places: functions, constants, variants, packages.
+fn Lw.value_expr_into(&mut self, e: Int, dest: Place) {
+  let t = self.ty(e)
+  match self.res(e) {
+    Const(c) => {
+      let o = self.const_val(c)
+      self.assign(dest, Rvalue.Use(o))
+    }
+    Fn(f) => {
+      let inst = self.inst_of(e)
+      let m = self.instance(f, inst)
+      self.assign(dest, Rvalue.Use(Operand.Const(Const.Fn(m))))
+    }
+    Variant(adt, v) => {
+      if self.s.defs.adts[adt].variants[v].fields.is_empty() {
+        self.assign(dest, Rvalue.Aggregate(AggKind.Variant(adt, v), t, []))
+      } else {
+        let m = self.variant_ctor(adt, v, t)
+        self.assign(dest, Rvalue.Use(Operand.Const(Const.Fn(m))))
+      }
+    }
+    ResultVal => self.assign(dest, Rvalue.Use(op_local(0)))
+    Field(i) => match self.fb.ast.exprs[e].kind {
+      Field(base, _) => {
+        let b = self.place(base)
+        self.assign(dest, Rvalue.Use(Operand.Copy(b.field(i))))
+      }
+      _ => {}
+    }
+    _ => match self.fb.ast.exprs[e].kind {
+      TupleField(base, index, _) => {
+        let b = self.place(base)
+        self.assign(dest, Rvalue.Use(Operand.Copy(b.field(index))))
+      }
+      Index(base, index) => self.lower_index(base, index, t, dest)
+      TypeArgs(base, _) => self.value_expr_into(base, dest)
+      _ => {}
+    }
+  }
+}
+
+/// A function constructing an enum variant from its fields (`xs.map(Some)`).
+fn Lw.variant_ctor(&mut self, adt: Int, v: Int, fn_ty: Int) -> Int {
+  let (ps, ret) = match self.s.tys.kinds[fn_ty] {
+    Fn(ps, ret, _) => (ps, ret)
+    _ => ([], fn_ty)
+  }
+  var locals = [ret]
+  var params: List<(Int, Mode)> = []
+  var ops: List<Operand> = []
+  for p in ps {
+    params.push((locals.len(), Mode.Value))
+    ops.push(op_local(locals.len()))
+    locals.push(p)
+  }
+  let span = self.fb.cur_span
+  let stmt = Stmt.Assign(place_of(0), Rvalue.Aggregate(AggKind.Variant(adt, v), ret, ops))
+  let ad = self.s.defs.adts[adt]
+  let m = self.mir.fns.len()
+  self.mir.fns.push(
+    MFn {
+      name: ad.name + "." + ad.variants[v].name
+      source: None
+      type_args: []
+      params: params
+      n_captures: 0
+      ret: ret
+      locals: locals
+      blocks: [
+        Block {
+          stmts: [SpannedStmt { stmt: stmt, span: span }]
+          term: Terminator.Return
+          term_span: span
+        },
+      ]
+      intrinsic: None
+      span: span
+      lowered: true
+    },
+  )
+  return m
+}
+
+fn Lw.lower_index(&mut self, base: Int, index: Int, t: Int, dest: Place) {
+  let bt = self.ty(base)
+  let int = self.s.tys.int
+  match self.fb.ast.exprs[index].kind {
+    Range(lo, hi) => {
+      let b = self.expr(base)
+      let lo_op = match lo {
+        Some(l) => self.expr(l)
+        None => op_int(0)
+      }
+      let is_str = self.s.tys.kinds[bt] == TyKind.Str
+      let hi_op = match hi {
+        Some(h) => self.expr(h)
+        None => {
+          let n = self.temp(int)
+          var intr = intrinsic(Op.StrLen, [])
+          if !is_str {
+            let el = match self.s.tys.kinds[bt] {
+              List(x) => x
+              _ => bt
+            }
+            intr = intrinsic(Op.ListLen, [el])
+          }
+          self.assign(place_of(n), Rvalue.Call(Callee.Intrinsic(intr), [Arg.Value(b)], int))
+          op_local(n)
+        }
+      }
+      let op = if is_str { Op.StrSlice } else { Op.ListSlice }
+      let args = [Arg.Value(b), Arg.Value(lo_op), Arg.Value(hi_op)]
+      self.assign(dest, Rvalue.Call(Callee.Intrinsic(intrinsic(op, [t])), args, t))
+      return
+    }
+    _ => {}
+  }
+  if self.s.tys.kinds[bt] == TyKind.Str {
+    let b = self.expr(base)
+    let i = self.expr(index)
+    self.assign(
+      dest,
+      Rvalue.Call(Callee.Intrinsic(intrinsic(Op.StrByte, [])), [Arg.Value(b), Arg.Value(i)], t),
+    )
+    return
+  }
+  let b = self.place(base)
+  let i = self.expr(index)
+  let span = self.fb.cur_span
+  self.assign(dest, Rvalue.Use(Operand.Copy(b.index(i, span))))
+}
+
+fn Lw.lower_binary(&mut self, op: syntax.BinOp, lhs: Int, rhs: Int, t: Int, dest: Place) {
+  if op == syntax.BinOp.And || op == syntax.BinOp.Or {
+    // Short-circuit.
+    self.expr_into(lhs, dest)
+    let rhs_bb = self.new_block()
+    let join = self.new_block()
+    let c = Operand.Copy(dest)
+    if op == syntax.BinOp.And {
+      self.terminate(Terminator.If(c, rhs_bb, join))
+    } else {
+      self.terminate(Terminator.If(c, join, rhs_bb))
+    }
+    self.fb.cur = rhs_bb
+    self.expr_into(rhs, dest)
+    self.goto(join)
+    self.fb.cur = join
+    return
+  }
+  if op == syntax.BinOp.Add && self.s.tys.kinds[t] == TyKind.Str {
+    // A chain `a + b + c + ...` builds one string, allocated once.
+    var parts = [rhs]
+    var e = lhs
+    for {
+      match self.fb.ast.exprs[e].kind {
+        Binary(o, l, r) => {
+          if o != syntax.BinOp.Add {
+            break
+          }
+          parts.push(r)
+          e = l
+        }
+        Paren(x) => e = x
+        _ => {
+          break
+        }
+      }
+    }
+    parts.push(e)
+    parts.reverse()
+    var args: List<Arg> = []
+    for x in parts {
+      args.push(Arg.Value(self.expr(x)))
+    }
+    let concat = if args.len() == 2 { Op.StrConcat } else { Op.StrConcatN }
+    self.assign(dest, Rvalue.Call(Callee.Intrinsic(intrinsic(concat, [])), args, t))
+    return
+  }
+  let lt = self.ty(lhs)
+  let a = self.expr(lhs)
+  let b = self.expr(rhs)
+  self.assign(dest, Rvalue.Binary(op, a, b, lt))
+}
+
+fn Lw.lower_try(&mut self, inner: Int, dest: Place) {
+  let it = self.ty(inner)
+  let tmp = self.temp(it)
+  self.expr_into(inner, place_of(tmp))
+  let adt = match self.s.tys.kinds[it] {
+    Adt(a, _) => a
+    _ => {
+      return
+    }
+  }
+  let d = self.temp(self.s.tys.int)
+  self.assign(place_of(d), Rvalue.Discriminant(place_of(tmp)))
+  let ok_bb = self.new_block()
+  let err_bb = self.new_block()
+  self.terminate(Terminator.Switch(op_local(d), [(0, ok_bb)], err_bb))
+  // Failure: return the error (or None) from this function.
+  self.fb.cur = err_bb
+  let ret = self.fb.ret_ty
+  if adt == self.s.defs.result {
+    let e = place_of(tmp).variant_field(1, 0)
+    self.assign(place_of(0), Rvalue.Aggregate(AggKind.Variant(adt, 1), ret, [Operand.Copy(e)]))
+  } else {
+    self.assign(place_of(0), Rvalue.Aggregate(AggKind.Variant(adt, 1), ret, []))
+  }
+  self.drop_scopes_to(1)
+  self.goto(self.fb.exit)
+  self.fb.cur = ok_bb
+  self.assign(dest, Rvalue.Use(Operand.Copy(place_of(tmp).variant_field(0, 0))))
+}
+
+fn Lw.block_into(&mut self, block: Int, dest: Option<Place>) {
+  let stmts = match self.fb.ast.exprs[block].kind {
+    Block(ss) => ss
+    _ => {
+      match dest {
+        Some(d) => self.expr_into(block, d)
+        None => {
+          let _ = self.expr(block)
+        }
+      }
+      return
+    }
+  }
+  self.push_scope()
+  let n = stmts.len()
+  for i in 0..n {
+    let s = stmts[i]
+    if i + 1 == n {
+      match (self.fb.ast.stmts[s].kind, dest) {
+        (Expr(e), Some(d)) => {
+          self.fb.cur_span = self.fb.ast.stmts[s].span
+          self.expr_into(e, d)
+          continue
+        }
+        _ => {}
+      }
+    }
+    self.stmt(s)
+  }
+  self.pop_scope()
+}
+
+fn Lw.lower_if(&mut self, cond: Int, then: Int, els: Option<Int>, dest: Option<Place>) {
+  let c = self.expr(cond)
+  let then_bb = self.new_block()
+  let else_bb = self.new_block()
+  let join = self.new_block()
+  self.terminate(Terminator.If(c, then_bb, else_bb))
+  self.fb.cur = then_bb
+  self.block_into(then, dest)
+  self.goto(join)
+  self.fb.cur = else_bb
+  match els {
+    Some(el) => match self.fb.ast.exprs[el].kind {
+      If(c2, t2, e2) => self.lower_if(c2, t2, e2, dest)
+      _ => self.block_into(el, dest)
+    }
+    None => {}
+  }
+  self.goto(join)
+  self.fb.cur = join
+}
+
+/// Push the direct sub-expressions of `e`.
+fn visit_children(ast: syntax.Ast, e: Int, out: &mut List<Int>) {
+  match ast.exprs[e].kind {
+    Paren(x) | Try(x) | MutArg(x) => out.push(x)
+    Unary(_, x) | Cast(x, _) => out.push(x)
+    Field(base, _) | TupleField(base, _, _) | TypeArgs(base, _) => out.push(base)
+    Binary(_, lhs, rhs) => {
+      out.push(lhs)
+      out.push(rhs)
+    }
+    Index(base, index) => {
+      out.push(base)
+      out.push(index)
+    }
+    Range(lo, hi) => {
+      match lo {
+        Some(x) => out.push(x)
+        None => {}
+      }
+      match hi {
+        Some(x) => out.push(x)
+        None => {}
+      }
+    }
+    Call(callee, args) => {
+      out.push(callee)
+      out.extend(args)
+    }
+    Tuple(l) | List(l) => out.extend(l)
+    If(cond, then, els) => {
+      out.push(cond)
+      out.push(then)
+      match els {
+        Some(x) => out.push(x)
+        None => {}
+      }
+    }
+    Match(scrut, arms) => {
+      out.push(scrut)
+      for a in arms {
+        match a.guard {
+          Some(g) => out.push(g)
+          None => {}
+        }
+        out.push(a.body)
+      }
+    }
+    Block(stmts) => {
+      for s in stmts {
+        match ast.stmts[s].kind {
+          Let(_, _, init, _) => out.push(init)
+          Assign(target, _, value) => {
+            out.push(target)
+            out.push(value)
+          }
+          Expr(x) => out.push(x)
+          Return(v) => match v {
+            Some(x) => out.push(x)
+            None => {}
+          }
+          For(head, invariants, body) => {
+            match head {
+              While(c) => out.push(c)
+              In(_, iter) => out.push(iter)
+              Forever => {}
+            }
+            out.extend(invariants)
+            out.push(body)
+          }
+          _ => {}
+        }
+      }
+    }
+    StructLit(_, fields) => {
+      for f in fields {
+        out.push(f.value)
+      }
+    }
+    Closure(_, _, body) => out.push(body)
+    Quant(_, _, lo, hi, body) => {
+      out.push(lo)
+      out.push(hi)
+      out.push(body)
+    }
+    _ => {}
+  }
+}

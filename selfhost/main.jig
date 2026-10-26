@@ -4,10 +4,12 @@ import "std/io"
 import "std/os"
 import "syntax"
 
-// jigc: the Jig compiler, written in Jig. So far it lexes, parses and checks:
-// `jigc tokens FILE`, `jigc ast FILE` and `jigc check DIR STD` print the same text as
-// `jig debug tokens FILE`, `jig debug ast FILE` and `jig debug check DIR` (STD is the
-// standard library's directory, `compiler/std`).
+// jigc: the Jig compiler, written in Jig. `jigc tokens FILE`, `jigc ast FILE`,
+// `jigc check DIR STD` and `jigc c DIR STD` print the same text as `jig debug tokens FILE`,
+// `jig debug ast FILE`, `jig debug check DIR` and `jig debug c DIR` (STD is the standard
+// library's directory, `compiler/std`; `c` prints the C program a release build compiles).
+// `jigc cc DIR STD` prints that program with the runtime inlined: one C file that a C
+// compiler alone builds, which is how `bootstrap/jigc.c` is made.
 
 fn main() effects {io, fs, env} {
   let args = os.args()
@@ -15,8 +17,24 @@ fn main() effects {io, fs, env} {
     io.print(sema.check_dump(args[2], args[3]))
     return
   }
+  if args.len() == 4 && (args[1] == "c" || args[1] == "cc") {
+    let cwd = os.env("PWD").unwrap_or("")
+    let out = if args[1] == "c" {
+      sema.c_dump(args[2], args[3], cwd)
+    } else {
+      sema.c_unit(args[2], args[3], cwd)
+    }
+    match out {
+      Ok(c) => io.print(c)
+      Err(e) => {
+        io.eprintln("error: " + e)
+        os.exit(1)
+      }
+    }
+    return
+  }
   if args.len() < 3 || (args[1] != "tokens" && args[1] != "ast") {
-    io.eprintln("usage: jigc tokens|ast FILE, jigc check DIR STD")
+    io.eprintln("usage: jigc tokens|ast FILE, jigc check|c|cc DIR STD")
     os.exit(2)
   }
   match fs.read(args[2]) {

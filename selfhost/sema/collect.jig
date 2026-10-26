@@ -222,6 +222,7 @@ fn Sema.declare_adt(
       fields: []
       variants: []
       is_pub: item.is_pub
+      recursive: false
     },
   )
   self.tys.adt_names.push(item.name.text)
@@ -272,12 +273,14 @@ fn new_fn(
     n_recv_generics: n_recv
     params: []
     ret: 0
+    ret_refine: None
     eff: 0
     is_pub: item.is_pub || iface.is_some()
     has_body: f.body.is_some()
     ffi: false
     iface: iface
     step_attr: f.step_attr
+    span: item.span
     name_span: item.name.span
   }
 }
@@ -331,6 +334,50 @@ fn Sema.lookup_name(self, pkg: Int, name: Str) -> Option<Def> {
 
 fn Sema.ast_of(self, pkg: Int, file: Int) -> syntax.Ast {
   return self.pkgs[pkg].files[file].ast
+}
+
+/// The refinement alias a type expression names directly (`amt: Cents`), if any.
+fn Sema.refinement_alias(&mut self, sc: TyScope, te: Int) -> Option<Int> {
+  let t = self.ast_of(sc.pkg, sc.file).types[te]
+  let (pkg, name) = match t.kind {
+    Named(pkg, name, args, _) => {
+      if !args.is_empty() {
+        return None
+      }
+      (pkg, name)
+    }
+    _ => {
+      return None
+    }
+  }
+  let def = match pkg {
+    Some(p) => {
+      let target = match self.pkgs[sc.pkg].imports[sc.file].get(p.text) {
+        Some(imp) => imp.0
+        None => {
+          return None
+        }
+      }
+      self.pkgs[target].scope.get(name.text)
+    }
+    None => {
+      if sc.generics.contains(name.text) || builtin_type(name.text).is_some() {
+        return None
+      }
+      self.lookup_name(sc.pkg, name.text)
+    }
+  }
+  return match def {
+    Some(Alias(al)) => {
+      self.ensure_alias(al)
+      if self.defs.aliases[al].refine.is_some() {
+        Some(al)
+      } else {
+        None
+      }
+    }
+    _ => None
+  }
 }
 
 fn Sema.resolve_type(&mut self, sc: TyScope, te: Int) -> Int {
@@ -679,7 +726,8 @@ fn Sema.resolve_fields(
       continue
     }
     let ty = self.resolve_type(sc, f.ty)
-    out.push(FieldDef { name: f.name.text, ty: ty, is_pub: f.is_pub, span: f.span })
+    let refine = self.refinement_alias(sc, f.ty)
+    out.push(FieldDef { name: f.name.text, ty: ty, is_pub: f.is_pub, span: f.span, refine: refine })
   }
   return out
 }
@@ -722,6 +770,9 @@ fn Sema.check_recursive_adts(&mut self) {
         Tuple(ts) => stack.extend(ts)
         _ => {}
       }
+    }
+    if reaches_self && self.defs.adts[aid].is_enum {
+      self.defs.adts[aid].recursive = true
     }
     if reaches_self && !self.defs.adts[aid].is_enum && !self.struct_reaches_self_through_enum(aid) {
       let ad = self.defs.adts[aid]
@@ -917,12 +968,17 @@ fn Sema.resolve_fn(&mut self, fid: Int) {
       Some(t) => self.resolve_type(sc, t)
       None => self.tys.error
     }
+    let refine = match p.ty {
+      Some(t) => self.refinement_alias(sc, t)
+      None => None
+    }
     params.push(
       ParamDef {
         name: p.name.text
         ty: ty
         mode: if p.mut_ref { Mode.MutRef } else { Mode.Value }
         span: p.span
+        refine: refine
       },
     )
   }
@@ -931,6 +987,11 @@ fn Sema.resolve_fn(&mut self, fid: Int) {
     Some(t) => self.resolve_type(sc, t)
     None => self.tys.unit_ty
   }
+  self.defs.fns[fid].ret_refine = match f.ret {
+    Some(t) => self.refinement_alias(sc, t)
+    None => None
+  }
+
   self.defs.fns[fid].eff = match f.effect_names {
     Some(names) => self.resolve_effects(names)
     None => 0
@@ -1303,7 +1364,13 @@ fn Sema.resolve_tests(&mut self) {
       if p.mut_ref {
         self.err("E0314", p.span, "test parameters cannot be `&mut`")
       }
-      out.push(ParamDef { name: p.name.text, ty: ty, mode: Mode.Value, span: p.span })
+      let refine = match p.ty {
+        Some(t) => self.refinement_alias(sc, t)
+        None => None
+      }
+      out.push(
+        ParamDef { name: p.name.text, ty: ty, mode: Mode.Value, span: p.span, refine: refine },
+      )
     }
     self.defs.tests[tid].params = out
   }

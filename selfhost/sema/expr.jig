@@ -386,6 +386,7 @@ fn Sema.fn_value(&mut self, e: Int, f: Int, explicit: Option<List<Int>>, span: s
   }
   let ret = self.tys.subst(fd.ret, inst)
   self.set_res(e, Res.Fn(f))
+  self.set_inst(e, inst)
   self.add_ref(f)
   return self.tys.func(ptys, ret, fd.eff)
 }
@@ -463,6 +464,7 @@ fn Sema.variant_value(
     None => {}
   }
   self.set_res(e, Res.Variant(adt, v))
+  self.set_inst(e, args)
   let fts = self.variant_field_tys(adt, v)
   self.note_variant_built(adt, v)
   if fts.is_empty() {
@@ -1147,6 +1149,7 @@ fn Sema.check_closure(
     .pop()
     .unwrap_or(ClosureFrame { ret: 0, allowed: None, used: 0, captures: [], saved_loop_depth: 0 })
   self.loop_depth = frame.saved_loop_depth
+  self.tab.closure_captures.insert(e, frame.captures)
   let eff = allowed.unwrap_or(frame.used)
   return self.tys.func(ptys, ret_ty, eff)
 }

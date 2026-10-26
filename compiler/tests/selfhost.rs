@@ -5,7 +5,10 @@
 //! `jig debug tokens` and `jig debug ast` byte for byte. Its checker runs over every example,
 //! UI and run test, the self-hosted compiler itself and mutated copies of them (names, types,
 //! literals, operators and lines swapped, dropped or duplicated); every diagnostic and the
-//! type of every expression and pattern must match `jig debug check`.
+//! type of every expression and pattern must match `jig debug check`. Its MIR lowering and C
+//! back end run over every example, run test, the agent benchmark's Jig solutions and `jigc`
+//! itself; the C must match `jig debug c` byte for byte. And the checked-in bootstrap
+//! (`bootstrap/jigc.c`, D6) must be what `jigc` makes of its own sources.
 
 use jig::codegen::build::{build, BuildOpts};
 use jig::sema::load::Sources;
@@ -432,4 +435,83 @@ fn jigc_checker_matches_bootstrap() {
         failures.extend(compare_check(exe, &std_dir, &entry).map(|m| format!("mutation {k} of {}: {m}", f.display())));
     }
     assert!(failures.is_empty(), "{} cases differ:\n{}", failures.len(), failures.join("\n"));
+}
+
+/// The C program `jigc c` generates for DIR, compared with `jig debug c`. Both name source
+/// files relative to the working directory.
+fn compare_c(exe: &Path, std_dir: &Path, dir: &Path) -> Option<String> {
+    let dir = std::fs::canonicalize(dir).unwrap();
+    let Ok(expected) = jig::tools::debug_check::c(&dir) else { return None };
+    let cwd = std::env::current_dir().unwrap();
+    let out = Command::new(exe).arg("c").arg(&dir).arg(std_dir).env("PWD", &cwd).output().unwrap();
+    let actual = String::from_utf8_lossy(&out.stdout);
+    if actual == expected && out.status.success() {
+        return None;
+    }
+    let (e, a): (Vec<&str>, Vec<&str>) = (expected.lines().collect(), actual.lines().collect());
+    let first = e.iter().zip(&a).position(|(x, y)| x != y).unwrap_or(e.len().min(a.len()));
+    Some(format!(
+        "{}: line {} differs (bootstrap {:?}, jigc {:?}) {}",
+        dir.display(),
+        first + 1,
+        e.get(first),
+        a.get(first),
+        String::from_utf8_lossy(&out.stderr)
+    ))
+}
+
+#[test]
+fn jigc_back_end_matches_bootstrap() {
+    if !have_cc() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    let root = repo_root();
+    let exe = jigc();
+    let std_dir = root.join("compiler/std");
+    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("selfhost-c");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    let mut cases: Vec<PathBuf> = Vec::new();
+    let mut entries: Vec<PathBuf> =
+        std::fs::read_dir(root.join("compiler/tests/run")).unwrap().map(|e| e.unwrap().path()).collect();
+    entries.sort();
+    for (i, p) in entries.iter().enumerate() {
+        if p.is_dir() && !has_feature_files(p) {
+            cases.push(if p.join("app").is_dir() { p.join("app") } else { p.clone() });
+        } else if p.extension().is_some_and(|x| x == "jig") {
+            let d = work.join(format!("single{i}"));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::copy(p, d.join("main.jig")).unwrap();
+            cases.push(d);
+        }
+    }
+    for d in ["examples", "bench/agents/reference/jig"] {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(root.join(d)).unwrap().map(|e| e.unwrap().path()).collect();
+        entries.sort();
+        cases.extend(entries.into_iter().filter(|p| p.is_dir() && !has_feature_files(p)));
+    }
+    cases.push(root.join("selfhost"));
+    let failures: Vec<String> = cases.iter().filter_map(|d| compare_c(exe, &std_dir, d)).collect();
+    assert!(failures.is_empty(), "{} programs differ:\n{}", failures.len(), failures.join("\n"));
+}
+
+/// `bootstrap/jigc.c` is what `jigc cc selfhost compiler/std` prints, run from the
+/// repository root (D6). `bootstrap/update.sh` regenerates it.
+#[test]
+fn bootstrap_is_current() {
+    if !have_cc() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    let root = std::fs::canonicalize(repo_root()).unwrap();
+    let out = Command::new(jigc())
+        .args(["cc", "selfhost", "compiler/std"])
+        .current_dir(&root)
+        .env("PWD", &root)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "jigc cc failed: {}", String::from_utf8_lossy(&out.stderr));
+    let checked_in = std::fs::read(root.join("bootstrap/jigc.c")).unwrap_or_default();
+    assert!(out.stdout == checked_in, "bootstrap/jigc.c is stale: run bootstrap/update.sh");
 }

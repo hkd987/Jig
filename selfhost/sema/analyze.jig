@@ -2,6 +2,7 @@
 // compared with `jig debug check DIR`: every diagnostic, then the type of every expression
 // and pattern of the project's own packages.
 
+import "std/fs"
 import "syntax"
 
 /// A package that failed to parse reports only its syntax errors: recovery drops code, and
@@ -163,4 +164,26 @@ pub fn check_dump(dir: Str, std_dir: Str) -> Str effects {fs} {
     }
   }
   return out.join("")
+}
+
+/// `jigc c DIR STD`: the C program for the package in DIR, the same text as `jig debug c DIR`.
+/// Locations name files relative to `cwd`.
+pub fn c_dump(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs} {
+  let (s, _) = analyze(dir, std_dir)
+  if !s.diags.is_empty() {
+    return Err(dir + " has errors")
+  }
+  return generate_c(new_lw(s), cwd)
+}
+
+/// A release build of DIR as one self-contained C file: `c_dump`'s program with the runtime
+/// (`STD/../runtime`) inlined, so a C compiler alone builds it (`cc FILE -pthread -lm`).
+pub fn c_unit(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs} {
+  let c = c_dump(dir, std_dir, cwd)?
+  let rt = std_dir + "/../runtime/"
+  let header = fs.read(rt + "jig_rt.h")?
+  let runtime = fs.read(rt + "jig_rt.c")?
+  let include = "#include \"jig_rt.h\"\n"
+  let program = c.replace(include, header) + "\n" + runtime.replace(include, "")
+  return Ok("#define _GNU_SOURCE\n#define JIG_POOL 1\n" + program)
 }

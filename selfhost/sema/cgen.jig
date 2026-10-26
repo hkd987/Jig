@@ -1,0 +1,1195 @@
+// The native back end, ported from the bootstrap compiler's `codegen/c.rs`: MIR to C,
+// compiled by `cc` with the runtime (`compiler/runtime/`). The output is the same C, byte for
+// byte, as `jig debug c DIR`.
+//
+// Ownership: arguments are borrowed, results are owned. Every local is zero-initialized,
+// assignment releases the old value, and returning releases every local except the result.
+
+import "syntax"
+
+struct FnCx {
+  out: Str
+  /// Locals that are `&mut` parameters (accessed through a pointer).
+  mutref: Set<Int>
+  params: Set<Int>
+  /// Lists made unique where they are defined.
+  unique: Set<Int>
+  /// Locals aliasing part of a by-value parameter: no count of their own.
+  borrowed: Set<Int>
+  /// Locals the current statement reads for the last time.
+  movable: Set<Int>
+}
+
+struct Cg {
+  lw: Lw
+  names: Map<Int, Str>
+  /// Each type's number in generated names, in order of first use.
+  type_ids: Map<Int, Int>
+  typedefs: Str
+  types_done: Set<Int>
+  types_in_progress: Set<Int>
+  glue: Str
+  glue_decls: Str
+  glue_done: Set<(Int, Int)>
+  decls: Str
+  /// One C definition per function, in emission order.
+  fns: List<Str>
+  data_decls: Str
+  data_defs: Str
+  /// Static boxes for nullary variants of recursive enums, by (type, variant).
+  static_boxes: Map<(Int, Int), Str>
+  /// Source locations, NUL-separated; a location is an offset into `jig_locs`.
+  loc_table: Str
+  loc_parts: List<Str>
+  loc_flushed: Int
+  str_lits: Map<Str, Str>
+  enum_names: Map<Int, Str>
+  ffi_decls: Set<Str>
+  locs: Map<syntax.Span, Str>
+  queued: Set<Int>
+  queue: List<Int>
+  wrappers: Set<Int>
+  sortby_thunks: Set<Int>
+  task_thunks: Set<(Int, Int)>
+  serve_thunks: Set<Int>
+  threads: Bool
+  counter: Int
+  /// The working directory: locations name files relative to it.
+  cwd: Str
+  /// Line starts of each (package, file), computed on first use.
+  line_starts: Map<(Int, Int), List<Int>>
+}
+
+fn g_retain() -> Int {
+  return 0
+}
+
+fn g_release() -> Int {
+  return 1
+}
+
+fn g_eq() -> Int {
+  return 2
+}
+
+fn g_cmp() -> Int {
+  return 3
+}
+
+fn g_hash() -> Int {
+  return 4
+}
+
+fn g_show() -> Int {
+  return 5
+}
+
+fn g_desc() -> Int {
+  return 6
+}
+
+fn int_suffix(k: IntTy) -> Str {
+  return match k {
+    I64 => "i64"
+    I32 => "i32"
+    U8 => "u8"
+    U32 => "u32"
+    U64 => "u64"
+  }
+}
+
+fn int_cty(k: IntTy) -> Str {
+  return match k {
+    I64 => "int64_t"
+    I32 => "int32_t"
+    U8 => "uint8_t"
+    U32 => "uint32_t"
+    U64 => "uint64_t"
+  }
+}
+
+fn int_bits(k: IntTy) -> Int {
+  return match k {
+    I64 | U64 => 64
+    I32 | U32 => 32
+    U8 => 8
+  }
+}
+
+/// `k.min() as f64` and `k.max() as f64` in Rust's `{:e}` format.
+fn int_float_bounds(k: IntTy) -> (Str, Str) {
+  return match k {
+    I64 => ("-9.223372036854776e18", "9.223372036854776e18")
+    I32 => ("-2.147483648e9", "2.147483647e9")
+    U8 => ("0e0", "2.55e2")
+    U32 => ("0e0", "4.294967295e9")
+    U64 => ("0e0", "1.8446744073709552e19")
+  }
+}
+
+fn octal3(b: Int) -> Str {
+  return (b / 64).str() + ((b / 8) % 8).str() + (b % 8).str()
+}
+
+/// A C string literal: printable ASCII stays, everything else is escaped.
+fn c_string(s: Str) -> Str {
+  var out = "\""
+  var run = 0
+  for i in 0..s.len() {
+    let b = s[i] as Int
+    var esc = ""
+    if b == 34 {
+      esc = "\\\""
+    } else if b == 92 {
+      esc = "\\\\"
+    } else if b == 10 {
+      esc = "\\n"
+    } else if b == 9 {
+      esc = "\\t"
+    } else if b == 13 {
+      esc = "\\r"
+    } else if b < 32 || b > 126 {
+      esc = "\\" + octal3(b)
+    } else {
+      continue
+    }
+    // Only ASCII runs are sliced, so slices fall on character boundaries.
+    if run < i {
+      out = out + s[run..i]
+    }
+    out = out + esc
+    run = i + 1
+  }
+  if run < s.len() {
+    out = out + s[run..s.len()]
+  }
+  return out + "\""
+}
+
+/// A float in Rust's `{:e}` format (shortest round-trip digits, `d.ddde<exp>`).
+fn fmt_e(f: Float) -> Str {
+  var t = f.str()
+  var neg = false
+  if t.starts_with("-") {
+    neg = true
+    t = t[1..t.len()]
+  }
+  var digits = ""
+  var exp = 0
+  match t.find("e") {
+    Some(i) => {
+      digits = t[0..i].replace(".", "")
+      exp = t[i + 1..t.len()].to_int().unwrap_or(0)
+    }
+    None => {
+      let parts = t.split(".")
+      let whole = parts[0]
+      let frac = if parts.len() > 1 { parts[1] } else { "" }
+      let all = whole + frac
+      var z = 0
+      for z < all.len() && all[z] == '0' {
+        z += 1
+      }
+      if z == all.len() {
+        return (if neg { "-" } else { "" }) + "0e0"
+      }
+      digits = all[z..all.len()]
+      exp = whole.len() - 1 - z
+    }
+  }
+  var n = digits.len()
+  for n > 1 && digits[n - 1] == '0' {
+    n -= 1
+  }
+  digits = digits[0..n]
+  var out = if neg { "-" } else { "" }
+  out = out + digits[0..1]
+  if n > 1 {
+    out = out + "." + digits[1..n]
+  }
+  return out + "e" + exp.str()
+}
+
+fn const_int_text(neg: Bool, mag: U64) -> Str {
+  return (if neg { "-" } else { "" }) + mag.str()
+}
+
+fn new_cg(lw: Lw, cwd: Str) -> Cg {
+  return Cg {
+    lw: lw
+    names: Map.new()
+    type_ids: Map.new()
+    typedefs: ""
+    types_done: Set.new()
+    types_in_progress: Set.new()
+    glue: ""
+    glue_decls: ""
+    glue_done: Set.new()
+    decls: ""
+    fns: []
+    data_decls: ""
+    data_defs: ""
+    static_boxes: Map.new()
+    loc_table: ""
+    loc_parts: []
+    loc_flushed: 0
+    str_lits: Map.new()
+    enum_names: Map.new()
+    ffi_decls: Set.new()
+    locs: Map.new()
+    queued: Set.new()
+    queue: []
+    wrappers: Set.new()
+    sortby_thunks: Set.new()
+    task_thunks: Set.new()
+    serve_thunks: Set.new()
+    threads: false
+    counter: 0
+    cwd: cwd
+    line_starts: Map.new()
+  }
+}
+
+/// The C program for `main`, in one translation unit (what a release build compiles).
+fn generate_c(lw: Lw, cwd: Str) -> Result<Str, Str> {
+  var g = new_cg(lw, cwd)
+  let main = match g.lw.s.defs.main {
+    Some(m) => g.lw.instance(m, [])
+    None => {
+      return Err("this package has no `main` function")
+    }
+  }
+  g.enqueue(main)
+  for !g.queue.is_empty() {
+    let f = g.queue.pop().unwrap_or(0)
+    g.emit_fn(f)
+  }
+  g.flush_locs()
+  var header = "/* Generated by the Jig compiler. */\n"
+  if g.threads {
+    header = header + "#ifndef JIG_ATOMIC_RC\n#define JIG_ATOMIC_RC 1\n#endif\n"
+  }
+  header = header + "#include \"jig_rt.h\"\n#include <math.h>\n\n" + c_prelude() + g.typedefs
+  header = header +
+    "\n#ifndef JIG_UNITY\nextern const char jig_locs[];\n" +
+    g.data_decls +
+    "#endif\n\n"
+  header = header + g.glue_decls + g.decls + "\n"
+  var base = "JIG_LINK const char jig_locs[] =\n"
+  for part in g.loc_parts {
+    base = base + "    " + part + "\n"
+  }
+  if g.loc_parts.is_empty() {
+    base = base + "    \"\""
+  }
+  base = base + ";\n" + g.data_defs + "\n" + g.glue
+  base = base +
+    "\nstatic void entry(void) { f" +
+    main.str() +
+    "(); }\n\nint main(int argc, char **argv) {\n"
+  base = base + "    jig_init(argc, argv);\n    jig_run_main(entry);\n    jig_exit(0);\n}\n"
+  return Ok("#define JIG_UNITY 1\n" + header + base + g.fns.join(""))
+}
+
+fn Cg.fresh(&mut self) -> Int {
+  self.counter += 1
+  return self.counter
+}
+
+fn Cg.type_id(&mut self, t: Int) -> Int {
+  match self.type_ids.get(t) {
+    Some(n) => {
+      return n
+    }
+    None => {}
+  }
+  let n = self.type_ids.len()
+  self.type_ids.insert(t, n)
+  return n
+}
+
+fn Cg.enqueue(&mut self, f: Int) {
+  if self.queued.contains(f) {
+    return
+  }
+  self.queued.insert(f)
+  self.lw.ensure_lowered(f)
+  self.declare_fn(f)
+  if self.lw.mir.fns[f].intrinsic.is_none() {
+    self.queue.push(f)
+  }
+}
+
+// ---------- types ----------
+
+fn Cg.kind(self, t: Int) -> TyKind {
+  return self.lw.s.tys.kinds[t]
+}
+
+fn Cg.is_recursive_enum(self, t: Int) -> Bool {
+  return match self.kind(t) {
+    Adt(a, _) => self.lw.s.defs.adts[a].recursive
+    _ => false
+  }
+}
+
+/// Does a value of this type own heap memory (so copies must retain)?
+fn Cg.needs_rc(self, t: Int) -> Bool {
+  match self.kind(t) {
+    Str | List(_) | Map(_, _) | Set(_) | Fn(_, _, _) => {
+      return true
+    }
+    Tuple(ts) => {
+      for x in ts {
+        if self.needs_rc(x) {
+          return true
+        }
+      }
+      return false
+    }
+    Adt(a, args) => {
+      if self.lw.s.defs.adts[a].recursive {
+        return true
+      }
+      for ft in self.lw.s.adt_payload_tys(a) {
+        if self.needs_rc_subst(ft, args) {
+          return true
+        }
+      }
+      return false
+    }
+    _ => {
+      return false
+    }
+  }
+}
+
+fn Cg.needs_rc_subst(self, t: Int, args: List<Int>) -> Bool {
+  match self.kind(t) {
+    Param(i, _) => {
+      return i < args.len() && self.needs_rc(args[i])
+    }
+    Str | List(_) | Map(_, _) | Set(_) | Fn(_, _, _) => {
+      return true
+    }
+    Tuple(ts) => {
+      for x in ts {
+        if self.needs_rc_subst(x, args) {
+          return true
+        }
+      }
+      return false
+    }
+    Adt(a, inner) => {
+      if self.lw.s.defs.adts[a].recursive {
+        return true
+      }
+      var inner_rc: List<Bool> = []
+      for x in inner {
+        inner_rc.push(self.needs_rc_subst(x, args))
+      }
+      for ft in self.lw.s.adt_payload_tys(a) {
+        let rc = match self.kind(ft) {
+          Param(j, _) => j < inner_rc.len() && inner_rc[j]
+          _ => self.needs_rc_subst(ft, [])
+        }
+        if rc {
+          return true
+        }
+      }
+      return false
+    }
+    _ => {
+      return false
+    }
+  }
+}
+
+fn Cg.field_tys(&mut self, t: Int) -> List<Int> {
+  return match self.kind(t) {
+    Tuple(ts) => ts
+    Adt(a, args) => {
+      var out: List<Int> = []
+      for f in self.lw.s.defs.adts[a].fields {
+        out.push(self.lw.s.tys.subst(f.ty, args))
+      }
+      out
+    }
+    _ => []
+  }
+}
+
+fn Cg.variant_tys(&mut self, t: Int) -> List<List<Int>> {
+  return match self.kind(t) {
+    Adt(a, args) => {
+      var out: List<List<Int>> = []
+      for v in self.lw.s.defs.adts[a].variants {
+        var fs: List<Int> = []
+        for f in v.fields {
+          fs.push(self.lw.s.tys.subst(f.ty, args))
+        }
+        out.push(fs)
+      }
+      out
+    }
+    _ => []
+  }
+}
+
+/// The C type for a Jig type, declaring it if needed.
+fn Cg.cty(&mut self, t: Int) -> Str {
+  match self.names.get(t) {
+    Some(n) => {
+      return n
+    }
+    None => {}
+  }
+  let name = match self.kind(t) {
+    Int(i, _) => int_cty(i)
+    Float(_) => "double"
+    Bool => "bool"
+    Char => "uint32_t"
+    Str => "jig_str *"
+    Never | Error | Infer(_) | Param(_, _) => "jig_unit"
+    Tuple(ts) => if ts.is_empty() { "jig_unit" } else { "" }
+    List(_) => "jig_list *"
+    Map(_, _) | Set(_) => "jig_map *"
+    Fn(_, _, _) => "jig_fn"
+    Adt(_, _) => ""
+  }
+  if name.is_empty() {
+    let n = "T" + self.fresh().str()
+    self.names.insert(t, n)
+    self.define_aggregate(t, n)
+    return n
+  }
+  self.names.insert(t, name)
+  return name
+}
+
+fn Cg.type_comment(self, t: Int) -> Str {
+  return self.lw.s.tys.display(t).replace("*/", "* /")
+}
+
+fn Cg.define_aggregate(&mut self, t: Int, name: Str) {
+  if self.types_in_progress.contains(t) {
+    return
+  }
+  self.types_in_progress.insert(t)
+  let comment = self.type_comment(t)
+  if self.is_recursive_enum(t) {
+    // A pointer to a reference-counted box; declare the pointer type first.
+    self.typedefs += "typedef struct " + name + "_box *" + name + "; /* " + comment + " */\n"
+    let variants = self.variant_tys(t)
+    var body = "struct " + name + "_box {\n    int64_t rc;\n    uint32_t tag;\n"
+    body += self.union_body(variants)
+    body += "};\n"
+    self.typedefs += body
+    self.types_done.insert(t)
+    return
+  }
+  var body = ""
+  let is_enum = match self.kind(t) {
+    Adt(a, _) => self.lw.s.defs.adts[a].is_enum
+    _ => false
+  }
+  if is_enum {
+    let variants = self.variant_tys(t)
+    body = "typedef struct " + name + " { /* " + comment + " */\n    uint32_t tag;\n"
+    body += self.union_body(variants)
+    body += "} " + name + ";\n"
+  } else {
+    let fields = self.field_tys(t)
+    var ctys: List<Str> = []
+    for f in fields {
+      ctys.push(self.cty(f))
+    }
+    body = "typedef struct " + name + " { /* " + comment + " */\n"
+    for i in 0..ctys.len() {
+      body += "    " + ctys[i] + " f" + i.str() + ";\n"
+    }
+    if ctys.is_empty() {
+      body += "    jig_unit empty;\n"
+    }
+    body += "} " + name + ";\n"
+  }
+  self.typedefs += body
+  self.types_done.insert(t)
+}
+
+fn Cg.union_body(&mut self, variants: List<List<Int>>) -> Str {
+  var any = false
+  for v in variants {
+    if !v.is_empty() {
+      any = true
+    }
+  }
+  if !any {
+    return ""
+  }
+  var body = "    union {\n"
+  for vi in 0..variants.len() {
+    let fs = variants[vi]
+    if fs.is_empty() {
+      continue
+    }
+    var ctys: List<Str> = []
+    for f in fs {
+      ctys.push(self.cty(f))
+    }
+    body += "        struct {"
+    for i in 0..ctys.len() {
+      body += " " + ctys[i] + " f" + i.str() + ";"
+    }
+    body += " } v" + vi.str() + ";\n"
+  }
+  return body + "    } u;\n"
+}
+
+// ---------- glue ----------
+
+fn Cg.glue_name(&mut self, t: Int, kind: Int) -> Str {
+  let cname = self.cty(t)
+  let base = cname.replace(" *", "p").replace(" ", "_")
+  let prefix = ["retain", "release", "eq", "cmp", "hash", "show", "TD"][kind]
+  let n = prefix + "_" + base + "_" + self.type_id(t).str()
+  if !self.glue_done.contains((t, kind)) {
+    self.glue_done.insert((t, kind))
+    self.gen_glue(t, kind, n, cname)
+  }
+  return n
+}
+
+/// A pointer to the type descriptor (`&TD_...`).
+fn Cg.desc(&mut self, t: Int) -> Str {
+  return "&" + self.glue_name(t, g_desc())
+}
+
+fn Cg.gen_glue(&mut self, t: Int, kind: Int, name: Str, c: Str) {
+  let k = self.kind(t)
+  var s = ""
+  if kind == g_retain() || kind == g_release() {
+    let retain = kind == g_retain()
+    self.glue_decls += "JIG_FN void " + name + "(void *vp);\n"
+    s = "JIG_FN void " + name + "(void *vp) {\n    " + c + " *p = vp;\n"
+    let rec = self.is_recursive_enum(t)
+    match k {
+      Str => s += if retain { "    jig_str_retain(*p);\n" } else { "    jig_str_release(*p);\n" }
+      List(e) => {
+        if retain {
+          s += "    jig_list_retain(*p);\n"
+        } else {
+          let d = self.desc(e)
+          s += "    jig_list_release(*p, " + d + ");\n"
+        }
+      }
+      Map(kt, vt) => {
+        if retain {
+          s += "    jig_map_retain(*p);\n"
+        } else {
+          let dk = self.desc(kt)
+          let dv = self.desc(vt)
+          s += "    jig_map_release(*p, " + dk + ", " + dv + ");\n"
+        }
+      }
+      Set(e) => {
+        if retain {
+          s += "    jig_map_retain(*p);\n"
+        } else {
+          let dk = self.desc(e)
+          let dv = self.desc(self.lw.s.tys.unit_ty)
+          s += "    jig_map_release(*p, " + dk + ", " + dv + ");\n"
+        }
+      }
+      Fn(_, _, _) => s += if retain { "    jig_fn_retain(p);\n" } else { "    jig_fn_release(p);\n" }
+      Tuple(_) | Adt(_, _) => {
+        let is_enum = match k {
+          Adt(a, _) => self.lw.s.defs.adts[a].is_enum
+          _ => false
+        }
+        if rec {
+          if retain {
+            s += "    if (*p) jig_rc_inc(&(*p)->rc);\n"
+          } else {
+            s += "    if (!*p || !jig_rc_dec(&(*p)->rc)) return;\n    switch ((*p)->tag) {\n"
+            let vs = self.variant_tys(t)
+            for vi in 0..vs.len() {
+              s += "    case " + vi.str() + ":\n"
+              for i in 0..vs[vi].len() {
+                let f = vs[vi][i]
+                if self.needs_rc(f) {
+                  let g = self.glue_name(f, g_release())
+                  s += "        " + g + "(&(*p)->u.v" + vi.str() + ".f" + i.str() + ");\n"
+                }
+              }
+              s += "        break;\n"
+            }
+            s += "    }\n    jig_free_obj(*p, sizeof(**p));\n"
+          }
+        } else if is_enum {
+          s += "    switch (p->tag) {\n"
+          let vs = self.variant_tys(t)
+          for vi in 0..vs.len() {
+            s += "    case " + vi.str() + ":\n"
+            for i in 0..vs[vi].len() {
+              let f = vs[vi][i]
+              if self.needs_rc(f) {
+                let g = self.glue_name(f, kind)
+                s += "        " + g + "(&p->u.v" + vi.str() + ".f" + i.str() + ");\n"
+              }
+            }
+            s += "        break;\n"
+          }
+          s += "    }\n"
+        } else {
+          let fs = self.field_tys(t)
+          for i in 0..fs.len() {
+            if self.needs_rc(fs[i]) {
+              let g = self.glue_name(fs[i], kind)
+              s += "    " + g + "(&p->f" + i.str() + ");\n"
+            }
+          }
+        }
+      }
+      _ => s += "    (void)p;\n"
+    }
+    s += "}\n"
+  } else if kind == g_eq() || kind == g_cmp() {
+    let is_eq = kind == g_eq()
+    let ret = if is_eq { "bool" } else { "int" }
+    self.glue_decls += "JIG_FN " + ret + " " + name + "(const void *ap, const void *bp);\n"
+    s = "JIG_FN " +
+      ret +
+      " " +
+      name +
+      "(const void *ap, const void *bp) {\n    " +
+      c +
+      " const *a = ap;\n    " +
+      c +
+      " const *b = bp;\n"
+    let is_enum = match k {
+      Adt(a, _) => self.lw.s.defs.adts[a].is_enum
+      _ => false
+    }
+    match k {
+      Int(_, _) | Char | Bool | Float(_) => s += if is_eq {
+        "    return *a == *b;\n"
+      } else {
+        "    return *a < *b ? -1 : *a > *b ? 1 : 0;\n"
+      }
+      Str => s += if is_eq {
+        "    return jig_str_eq(*a, *b);\n"
+      } else {
+        "    return jig_str_cmp(*a, *b);\n"
+      }
+      List(e) => {
+        let d = self.desc(e)
+        s += if is_eq {
+          "    return jig_list_eq(*a, *b, " + d + ");\n"
+        } else {
+          "    return jig_list_cmp(*a, *b, " + d + ");\n"
+        }
+      }
+      Map(kt, vt) => {
+        let dk = self.desc(kt)
+        let dv = self.desc(vt)
+        s += if is_eq {
+          "    return jig_map_eq(*a, *b, " + dk + ", " + dv + ");\n"
+        } else {
+          "    (void)a; (void)b; return 0;\n"
+        }
+      }
+      Set(e) => {
+        let dk = self.desc(e)
+        let dv = self.desc(self.lw.s.tys.unit_ty)
+        s += if is_eq {
+          "    return jig_map_eq(*a, *b, " + dk + ", " + dv + ");\n"
+        } else {
+          "    (void)a; (void)b; return 0;\n"
+        }
+      }
+      Tuple(ts) => {
+        if ts.is_empty() {
+          s += if is_eq {
+            "    (void)a; (void)b; return true;\n"
+          } else {
+            "    (void)a; (void)b; return 0;\n"
+          }
+        } else {
+          s += self.eq_fields(t, kind, is_eq)
+        }
+      }
+      Adt(_, _) => {
+        if is_enum {
+          let acc = if self.is_recursive_enum(t) { "->" } else { "." }
+          let pa = "(*a)"
+          let pb = "(*b)"
+          if is_eq {
+            s += "    if (" +
+              pa +
+              acc +
+              "tag != " +
+              pb +
+              acc +
+              "tag) return false;\n    switch (" +
+              pa +
+              acc +
+              "tag) {\n"
+          } else {
+            s += "    if (" +
+              pa +
+              acc +
+              "tag != " +
+              pb +
+              acc +
+              "tag) return " +
+              pa +
+              acc +
+              "tag < " +
+              pb +
+              acc +
+              "tag ? -1 : 1;\n    switch (" +
+              pa +
+              acc +
+              "tag) {\n"
+          }
+          let vs = self.variant_tys(t)
+          for vi in 0..vs.len() {
+            s += "    case " + vi.str() + ":\n"
+            for i in 0..vs[vi].len() {
+              let g = self.glue_name(vs[vi][i], kind)
+              let fa = "&" + pa + acc + "u.v" + vi.str() + ".f" + i.str()
+              let fb = "&" + pb + acc + "u.v" + vi.str() + ".f" + i.str()
+              if is_eq {
+                s += "        if (!" + g + "(" + fa + ", " + fb + ")) return false;\n"
+              } else {
+                s += "        { int c = " + g + "(" + fa + ", " + fb + "); if (c) return c; }\n"
+              }
+            }
+            s += "        break;\n"
+          }
+          s += if is_eq { "    }\n    return true;\n" } else { "    }\n    return 0;\n" }
+        } else {
+          s += self.eq_fields(t, kind, is_eq)
+        }
+      }
+      _ => {
+        s += "    (void)a; (void)b;\n"
+        s += if is_eq { "    return false;\n" } else { "    return 0;\n" }
+      }
+    }
+    s += "}\n"
+  } else if kind == g_hash() {
+    self.glue_decls += "JIG_FN uint64_t " + name + "(const void *ap);\n"
+    s = "JIG_FN uint64_t " + name + "(const void *ap) {\n    " + c + " const *a = ap;\n"
+    let is_enum = match k {
+      Adt(a, _) => self.lw.s.defs.adts[a].is_enum
+      _ => false
+    }
+    match k {
+      Int(_, _) | Char | Bool => s += "    return jig_hash_u64((uint64_t)*a);\n"
+      Float(_) => s += "    return jig_hash_f64(*a);\n"
+      Str => s += "    return jig_str_hash(*a);\n"
+      List(e) => {
+        let d = self.desc(e)
+        s += "    return jig_list_hash(*a, " + d + ");\n"
+      }
+      Tuple(_) | Adt(_, _) => {
+        if is_enum {
+          let acc = if self.is_recursive_enum(t) { "->" } else { "." }
+          s += "    uint64_t h = jig_hash_u64((*a)" +
+            acc +
+            "tag);\n    switch ((*a)" +
+            acc +
+            "tag) {\n"
+          let vs = self.variant_tys(t)
+          for vi in 0..vs.len() {
+            s += "    case " + vi.str() + ":\n"
+            for i in 0..vs[vi].len() {
+              let g = self.glue_name(vs[vi][i], g_hash())
+              s += "        h = jig_hash_combine(h, " +
+                g +
+                "(&(*a)" +
+                acc +
+                "u.v" +
+                vi.str() +
+                ".f" +
+                i.str() +
+                "));\n"
+            }
+            s += "        break;\n"
+          }
+          s += "    }\n    return h;\n"
+        } else {
+          s += "    uint64_t h = 7;\n"
+          let fs = self.field_tys(t)
+          for i in 0..fs.len() {
+            let g = self.glue_name(fs[i], g_hash())
+            s += "    h = jig_hash_combine(h, " + g + "(&a->f" + i.str() + "));\n"
+          }
+          s += "    (void)a;\n    return h;\n"
+        }
+      }
+      _ => s += "    (void)a;\n    return 0;\n"
+    }
+    s += "}\n"
+  } else if kind == g_show() {
+    self.glue_decls += "JIG_FN void " + name + "(jig_buf *b, const void *ap, bool nested);\n"
+    s = "JIG_FN void " +
+      name +
+      "(jig_buf *b, const void *ap, bool nested) {\n    " +
+      c +
+      " const *a = ap;\n    (void)nested;\n"
+    s += self.gen_show_body(t, k)
+    s += "}\n"
+  } else {
+    let size = "sizeof(" + c + ")"
+    var r = "NULL"
+    var rl = "NULL"
+    if self.needs_rc(t) {
+      r = self.glue_name(t, g_retain())
+      rl = self.glue_name(t, g_release())
+    }
+    let eq = self.glue_name(t, g_eq())
+    let cmp = self.glue_name(t, g_cmp())
+    let hash = self.glue_name(t, g_hash())
+    let show = self.glue_name(t, g_show())
+    self.glue_decls += "JIG_EXTERN const jig_type " + name + ";\n"
+    s = "JIG_LINK const jig_type " +
+      name +
+      " = {" +
+      size +
+      ", " +
+      r +
+      ", " +
+      rl +
+      ", " +
+      eq +
+      ", " +
+      cmp +
+      ", " +
+      hash +
+      ", " +
+      show +
+      "};\n"
+  }
+  self.glue += s
+}
+
+/// Field-by-field equality or ordering of a struct or tuple.
+fn Cg.eq_fields(&mut self, t: Int, kind: Int, is_eq: Bool) -> Str {
+  var s = ""
+  let fs = self.field_tys(t)
+  for i in 0..fs.len() {
+    let g = self.glue_name(fs[i], kind)
+    if is_eq {
+      s += "    if (!" + g + "(&a->f" + i.str() + ", &b->f" + i.str() + ")) return false;\n"
+    } else {
+      s += "    { int c = " +
+        g +
+        "(&a->f" +
+        i.str() +
+        ", &b->f" +
+        i.str() +
+        "); if (c) return c; }\n"
+    }
+  }
+  return s + (if is_eq { "    return true;\n" } else { "    return 0;\n" })
+}
+
+fn Cg.gen_show_body(&mut self, t: Int, k: TyKind) -> Str {
+  var s = ""
+  match k {
+    Int(ik, _) => s += if ik == IntTy.U64 {
+      "    jig_show_u64(b, *a);\n"
+    } else {
+      "    jig_show_i64(b, (int64_t)*a);\n"
+    }
+    Float(_) => s += "    jig_show_f64(b, *a);\n"
+    Bool => s += "    jig_show_bool(b, *a);\n"
+    Char => s += "    jig_show_char(b, *a, nested);\n"
+    Str => s += "    jig_show_str(b, *a, nested);\n"
+    List(e) => {
+      let d = self.desc(e)
+      s += "    jig_list_show(b, *a, " + d + ");\n"
+    }
+    Map(kt, vt) => {
+      let dk = self.desc(kt)
+      let dv = self.desc(vt)
+      s += "    jig_map_show(b, *a, " + dk + ", " + dv + ", false);\n"
+    }
+    Set(e) => {
+      let dk = self.desc(e)
+      let dv = self.desc(self.lw.s.tys.unit_ty)
+      s += "    jig_map_show(b, *a, " + dk + ", " + dv + ", true);\n"
+    }
+    Fn(_, _, _) => s += "    (void)a;\n    jig_buf_push_cstr(b, \"<fn>\");\n"
+    Tuple(ts) => {
+      if ts.is_empty() {
+        return "    (void)a;\n    jig_buf_push_cstr(b, \"()\");\n"
+      }
+      s += "    jig_buf_push_cstr(b, \"(\");\n"
+      for i in 0..ts.len() {
+        if i > 0 {
+          s += "    jig_buf_push_cstr(b, \", \");\n"
+        }
+        let g = self.glue_name(ts[i], g_show())
+        s += "    " + g + "(b, &a->f" + i.str() + ", true);\n"
+      }
+      if ts.len() == 1 {
+        s += "    jig_buf_push_cstr(b, \",\");\n"
+      }
+      s += "    jig_buf_push_cstr(b, \")\");\n"
+    }
+    Adt(ad, args) => {
+      // A user-defined `str` wins.
+      match self.lw.s.defs.method(TyKey.Adt(ad), "str") {
+        Some(f) => {
+          let m = self.lw.instance(f, args)
+          self.enqueue(m)
+          return "    jig_str *s = f" +
+            m.str() +
+            "(*a);\n    jig_buf_push_str(b, s);\n    jig_str_release(s);\n"
+        }
+        None => {}
+      }
+      let adt = self.lw.s.defs.adts[ad]
+      if !adt.is_enum {
+        let ftys = self.field_tys(t)
+        if adt.fields.is_empty() {
+          s += "    (void)a;\n    jig_buf_push_cstr(b, " + c_string(adt.name + " {}") + ");\n"
+        } else {
+          s += "    jig_buf_push_cstr(b, " + c_string(adt.name + " { ") + ");\n"
+          for i in 0..adt.fields.len() {
+            let sep = if i == 0 {
+              adt.fields[i].name + ": "
+            } else {
+              ", " + adt.fields[i].name + ": "
+            }
+            let g = self.glue_name(ftys[i], g_show())
+            s += "    jig_buf_push_cstr(b, " +
+              c_string(sep) +
+              ");\n    " +
+              g +
+              "(b, &a->f" +
+              i.str() +
+              ", true);\n"
+          }
+          s += "    jig_buf_push_cstr(b, \" }\");\n"
+        }
+      } else {
+        let acc = if self.is_recursive_enum(t) { "->" } else { "." }
+        let vs = self.variant_tys(t)
+        s += "    switch ((*a)" + acc + "tag) {\n"
+        for vi in 0..vs.len() {
+          s += "    case " + vi.str() + ":\n"
+          s += "        jig_buf_push_cstr(b, " + c_string(adt.variants[vi].name) + ");\n"
+          if !vs[vi].is_empty() {
+            s += "        jig_buf_push_cstr(b, \"(\");\n"
+            for i in 0..vs[vi].len() {
+              if i > 0 {
+                s += "        jig_buf_push_cstr(b, \", \");\n"
+              }
+              let g = self.glue_name(vs[vi][i], g_show())
+              s += "        " +
+                g +
+                "(b, &(*a)" +
+                acc +
+                "u.v" +
+                vi.str() +
+                ".f" +
+                i.str() +
+                ", true);\n"
+            }
+            s += "        jig_buf_push_cstr(b, \")\");\n"
+          }
+          s += "        break;\n"
+        }
+        s += "    }\n"
+      }
+    }
+    _ => s += "    (void)a;\n    jig_buf_push_cstr(b, \"?\");\n"
+  }
+  return s
+}
+
+// ---------- statics ----------
+
+/// A static table of an enum's variant names, if its variants have no fields and it has no
+/// `str` method of its own.
+fn Cg.enum_name_table(&mut self, ad: Int) -> Option<Str> {
+  match self.enum_names.get(ad) {
+    Some(n) => {
+      return Some(n)
+    }
+    None => {}
+  }
+  if self.lw.s.defs.method(TyKey.Adt(ad), "str").is_some() {
+    return None
+  }
+  let adt = self.lw.s.defs.adts[ad]
+  if !adt.is_enum || adt.variants.is_empty() {
+    return None
+  }
+  for v in adt.variants {
+    if !v.fields.is_empty() {
+      return None
+    }
+  }
+  var strs: List<Str> = []
+  for v in adt.variants {
+    strs.push(self.str_lit(v.name))
+  }
+  let id = self.fresh()
+  self.data_decls += "extern jig_str *const EN" + id.str() + "[];\n"
+  self.data_defs += "JIG_LINK jig_str *const EN" + id.str() + "[] = {" + strs.join(", ") + "};\n"
+  let n = "EN" + id.str()
+  self.enum_names.insert(ad, n)
+  return Some(n)
+}
+
+fn Cg.str_lit(&mut self, s: Str) -> Str {
+  if s.is_empty() {
+    return "((jig_str *)NULL)"
+  }
+  match self.str_lits.get(s) {
+    Some(n) => {
+      return n
+    }
+    None => {}
+  }
+  let id = self.fresh()
+  let n = "(&S" + id.str() + ")"
+  self.data_decls += "extern jig_str S" + id.str() + ";\n"
+  self.data_defs += "JIG_LINK jig_str S" +
+    id.str() +
+    " = {-1, " +
+    s.len().str() +
+    ", " +
+    s.len().str() +
+    ", " +
+    c_string(s) +
+    "};\n"
+  self.str_lits.insert(s, n)
+  return n
+}
+
+/// The 1-based line and column (in characters) of a global offset, with the file's name.
+fn Cg.line_col(&mut self, pos: Int) -> Option<(Str, Int, Int)> {
+  let (p, f) = match self.lw.s.file_of(pos) {
+    Some(pf) => pf
+    None => {
+      return None
+    }
+  }
+  let file = self.lw.s.pkgs[p].files[f]
+  let starts = match self.line_starts.get((p, f)) {
+    Some(ls) => ls
+    None => {
+      var ls = [0]
+      for i in 0..file.text.len() {
+        if file.text[i] == '\n' {
+          ls.push(i + 1)
+        }
+      }
+      self.line_starts.insert((p, f), ls)
+      ls
+    }
+  }
+  let off = pos - file.base
+  // The last line starting at or before the offset.
+  var lo = 0
+  var hi = starts.len()
+  for lo + 1 < hi {
+    let mid = (lo + hi) / 2
+    if starts[mid] <= off {
+      lo = mid
+    } else {
+      hi = mid
+    }
+  }
+  let col = file.text[starts[lo]..off].chars().len() + 1
+  var path = file.path
+  let prefix = join_path(self.cwd, "")
+  if !self.cwd.is_empty() && path.starts_with(prefix) {
+    path = path[prefix.len()..path.len()]
+  }
+  return Some((path, lo + 1, col))
+}
+
+fn Cg.loc(&mut self, span: syntax.Span) -> Str {
+  match self.locs.get(span) {
+    Some(n) => {
+      return n
+    }
+    None => {}
+  }
+  let text = match self.line_col(span.lo) {
+    Some((path, line, col)) => path + ":" + line.str() + ":" + col.str()
+    None => "<unknown>"
+  }
+  let n = "(jig_locs + " + (self.loc_flushed + self.loc_table.len()).str() + ")"
+  self.loc_table += text + "\0"
+  if self.loc_table.len() > 4096 {
+    self.flush_locs()
+  }
+  self.locs.insert(span, n)
+  return n
+}
+
+/// Move pending location text into C string literal chunks.
+fn Cg.flush_locs(&mut self) {
+  if self.loc_table.is_empty() {
+    return
+  }
+  var lit = ""
+  let pieces = self.loc_table.split("\0")
+  // Every location ends with a NUL, so the last piece is empty.
+  for i in 0..pieces.len() - 1 {
+    lit += c_string(pieces[i]) + "\"\\0\""
+  }
+  self.loc_parts.push(lit)
+  self.loc_flushed += self.loc_table.len()
+  self.loc_table = ""
+}
+
+fn c_prelude() -> Str {
+  return [
+    "\n",
+    "#ifdef JIG_UNITY\n",
+    "#define JIG_LINK static\n",
+    "#define JIG_EXTERN static\n",
+    "/* A hint: overflow traps make small functions look big to the inliner. */\n",
+    "#define JIG_FN static inline\n",
+    "#else\n",
+    "#define JIG_LINK\n",
+    "#define JIG_EXTERN extern\n",
+    "#define JIG_FN\n",
+    "#endif\n",
+    "#define JIG_ARITH(T, S)                                                                        \\\n",
+    "    static inline T jig_add_##S(T a, T b, const char *l) { T r; if (__builtin_add_overflow(a, b, &r)) jig_overflow(\"+\", l); return r; } \\\n",
+    "    static inline T jig_sub_##S(T a, T b, const char *l) { T r; if (__builtin_sub_overflow(a, b, &r)) jig_overflow(\"-\", l); return r; } \\\n",
+    "    static inline T jig_mul_##S(T a, T b, const char *l) { T r; if (__builtin_mul_overflow(a, b, &r)) jig_overflow(\"*\", l); return r; }\n",
+    "JIG_ARITH(int64_t, i64)\n",
+    "JIG_ARITH(int32_t, i32)\n",
+    "JIG_ARITH(uint8_t, u8)\n",
+    "JIG_ARITH(uint32_t, u32)\n",
+    "JIG_ARITH(uint64_t, u64)\n",
+    "#define JIG_DIV_SIGNED(T, S, MIN)                                                              \\\n",
+    "    static inline T jig_div_##S(T a, T b, const char *l) { if (b == 0) jig_div_zero(l); if (a == MIN && b == -1) jig_overflow(\"/\", l); return a / b; } \\\n",
+    "    static inline T jig_rem_##S(T a, T b, const char *l) { if (b == 0) jig_div_zero(l); if (a == MIN && b == -1) return 0; return a % b; } \\\n",
+    "    static inline T jig_neg_##S(T a, const char *l) { if (a == MIN) jig_overflow(\"-\", l); return -a; }\n",
+    "JIG_DIV_SIGNED(int64_t, i64, INT64_MIN)\n",
+    "JIG_DIV_SIGNED(int32_t, i32, INT32_MIN)\n",
+    "#define JIG_DIV_UNSIGNED(T, S)                                                                 \\\n",
+    "    static inline T jig_div_##S(T a, T b, const char *l) { if (b == 0) jig_div_zero(l); return a / b; } \\\n",
+    "    static inline T jig_rem_##S(T a, T b, const char *l) { if (b == 0) jig_div_zero(l); return a % b; } \\\n",
+    "    static inline T jig_neg_##S(T a, const char *l) { if (a != 0) jig_overflow(\"-\", l); return 0; }\n",
+    "JIG_DIV_UNSIGNED(uint8_t, u8)\n",
+    "JIG_DIV_UNSIGNED(uint32_t, u32)\n",
+    "JIG_DIV_UNSIGNED(uint64_t, u64)\n",
+    "static inline int64_t jig_shamt(int64_t s, int bits, const char *l) { if (s < 0 || s >= bits) jig_shift_range(s, l); return s; }\n",
+    "static inline int jig_cmp_f64(double a, double b) { return a < b ? -1 : a > b ? 1 : 0; }\n",
+    "\n",
+  ].join("")
+}

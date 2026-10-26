@@ -1,0 +1,532 @@
+// MIR, ported from the bootstrap compiler's `mir/mod.rs` and `mir/intrinsics.rs`: a
+// monomorphized control-flow graph per function instance. Local 0 is the return slot;
+// parameters follow (captured values first for closures, then `self`, then the declared
+// parameters). `&mut` parameters are written back when the call returns.
+
+import "syntax"
+
+enum PlaceElem {
+  /// Field `i` of a struct or tuple.
+  Field(i: Int)
+  /// Field `i` of enum variant `v` (the value must be that variant).
+  VariantField(v: Int, i: Int)
+  /// An element of a list, bounds-checked; a dummy span means in bounds by construction.
+  Index(op: Operand, span: syntax.Span)
+}
+
+struct Place {
+  local: Int
+  proj: List<PlaceElem>
+}
+
+fn place_of(l: Int) -> Place {
+  return Place { local: l, proj: [] }
+}
+
+fn Place.field(self, i: Int) -> Place {
+  var p = self
+  p.proj.push(PlaceElem.Field(i))
+  return p
+}
+
+fn Place.variant_field(self, v: Int, i: Int) -> Place {
+  var p = self
+  p.proj.push(PlaceElem.VariantField(v, i))
+  return p
+}
+
+fn Place.index(self, op: Operand, span: syntax.Span) -> Place {
+  var p = self
+  p.proj.push(PlaceElem.Index(op, span))
+  return p
+}
+
+enum Const {
+  /// An integer: its sign and magnitude, and its type.
+  Int(neg: Bool, mag: U64, k: IntTy)
+  Float(v: Float)
+  Bool(v: Bool)
+  Char(v: Int)
+  Str(v: Str)
+  Unit
+  /// A function item as a value.
+  Fn(f: Int)
+}
+
+fn int_value(v: Int, k: IntTy) -> Const {
+  if v >= 0 {
+    return Const.Int(false, v as U64, k)
+  }
+  // The magnitude of the smallest `Int` does not fit in an `Int`.
+  return Const.Int(true, ((-(v + 1)) as U64) + 1, k)
+}
+
+enum Operand {
+  Copy(p: Place)
+  Const(c: Const)
+}
+
+fn op_local(l: Int) -> Operand {
+  return Operand.Copy(place_of(l))
+}
+
+fn op_int(v: Int) -> Operand {
+  return Operand.Const(int_value(v, IntTy.I64))
+}
+
+fn op_bool(b: Bool) -> Operand {
+  return Operand.Const(Const.Bool(b))
+}
+
+fn op_unit() -> Operand {
+  return Operand.Const(Const.Unit)
+}
+
+enum AggKind {
+  Tuple
+  Struct(adt: Int)
+  Variant(adt: Int, v: Int)
+  List
+}
+
+enum Callee {
+  Fn(f: Int)
+  Intrinsic(i: Intrinsic)
+  /// The C function of this name.
+  Ffi(name: Str)
+  /// A function value (closure or function item) held in an operand.
+  Value(op: Operand)
+}
+
+enum Arg {
+  Value(op: Operand)
+  MutRef(p: Place)
+}
+
+enum Rvalue {
+  Use(op: Operand)
+  /// Checked arithmetic and comparisons; `ty` is the operand type.
+  Binary(op: syntax.BinOp, a: Operand, b: Operand, ty: Int)
+  Unary(op: syntax.UnOp, a: Operand, ty: Int)
+  /// A checked numeric conversion.
+  Cast(a: Operand, from: Int, to: Int)
+  /// `x + 1` for a loop counter below its bound.
+  Inc(a: Operand, k: IntTy)
+  Aggregate(kind: AggKind, ty: Int, ops: List<Operand>)
+  /// The variant index of an enum value.
+  Discriminant(p: Place)
+  Closure(f: Int, ops: List<Operand>)
+  Call(callee: Callee, args: List<Arg>, ty: Int)
+}
+
+enum CheckKind {
+  Assert
+  Precondition
+  Postcondition
+  Invariant
+  Refinement
+}
+
+struct CheckValue {
+  label: Str
+  op: Operand
+  ty: Int
+}
+
+enum Stmt {
+  Assign(p: Place, rv: Rvalue)
+  /// Abort with a message unless `cond` holds, showing `values`.
+  Check(cond: Operand, kind: CheckKind, msg: Str, values: List<CheckValue>, span: syntax.Span)
+  /// The local is dead from here on.
+  Drop(l: Int)
+}
+
+struct SpannedStmt {
+  stmt: Stmt
+  span: syntax.Span
+}
+
+enum Terminator {
+  Goto(b: Int)
+  If(op: Operand, t: Int, e: Int)
+  /// Jump on an integer value (an enum discriminant or a length).
+  Switch(op: Operand, cases: List<(Int, Int)>, default: Int)
+  Return
+  /// Control cannot reach here.
+  Unreachable
+}
+
+struct Block {
+  stmts: List<SpannedStmt>
+  term: Terminator
+  term_span: syntax.Span
+}
+
+struct MFn {
+  name: Str
+  source: Option<Int>
+  /// The instance's type arguments.
+  type_args: List<Int>
+  params: List<(Int, Mode)>
+  /// For closures: how many leading parameters are captured values.
+  n_captures: Int
+  ret: Int
+  /// Each local's type.
+  locals: List<Int>
+  blocks: List<Block>
+  intrinsic: Option<Intrinsic>
+  span: syntax.Span
+  lowered: Bool
+}
+
+struct Intrinsic {
+  op: Op
+  /// The instance's type arguments (element types, the shown type, ...).
+  tys: List<Int>
+  /// For integer methods: the integer type.
+  int: Option<IntTy>
+}
+
+fn intrinsic(op: Op, tys: List<Int>) -> Intrinsic {
+  return Intrinsic { op: op, tys: tys, int: None }
+}
+
+struct Mir {
+  fns: List<MFn>
+  instances: Map<(Int, List<Int>), Int>
+}
+
+enum Op {
+  Panic
+  Assert
+  IntAbs
+  IntMin
+  IntMax
+  IntPow
+  WrappingAdd
+  WrappingSub
+  WrappingMul
+  FloatAbs
+  Sqrt
+  Floor
+  Ceil
+  Round
+  FloatMin
+  FloatMax
+  IsNan
+  IsDigit
+  IsAlpha
+  IsAlnum
+  IsSpace
+  IsUpper
+  IsLower
+  CharToUpper
+  CharToLower
+  StrLen
+  StrIsEmpty
+  StrContains
+  StartsWith
+  EndsWith
+  StrFind
+  Split
+  Lines
+  Trim
+  Replace
+  Repeat
+  StrToUpper
+  StrToLower
+  ToInt
+  ToFloat
+  Bytes
+  Chars
+  FromChars
+  FromBytes
+  ListNew
+  ListLen
+  ListIsEmpty
+  Push
+  Pop
+  Get
+  Insert
+  Remove
+  Clear
+  Extend
+  Reverse
+  Swap
+  Truncate
+  ListRepeat
+  Sort
+  SortBy
+  MapNew
+  MapLen
+  MapIsEmpty
+  MapGet
+  MapInsert
+  MapRemove
+  MapContains
+  Keys
+  Values
+  Entries
+  SetNew
+  SetLen
+  SetIsEmpty
+  SetInsert
+  SetRemove
+  SetContains
+  Items
+  Print
+  Println
+  Eprintln
+  ReadLine
+  ReadAll
+  FsRead
+  FsWrite
+  FsExists
+  FsList
+  Args
+  EnvVar
+  Exit
+  NowMs
+  NowNs
+  RandInt
+  RandFloat
+  Sin
+  Cos
+  Tan
+  Atan2
+  Exp
+  Ln
+  Log10
+  Pow
+  TaskAll
+  TaskMap
+  TaskBoth
+  Sleep
+  SimStdout
+  SimStderr
+  SimSetStdin
+  SimSetArgs
+  SimSetEnv
+  SimSetFile
+  SimFile
+  SimRemoveFile
+  SimSetTime
+  SimAdvance
+  SimSeed
+  SimReply
+  SimRequests
+  SimConnect
+  SimAnswers
+  NetRequest
+  NetServe
+  /// `x.str()` with derived formatting (the type in `tys[0]`).
+  Show
+  StrConcat
+  /// `a + b + c + ...`: one string, allocated once.
+  StrConcatN
+  /// `s[i]`
+  StrByte
+  /// `s[a..b]`
+  StrSlice
+  /// `xs[a..b]`
+  ListSlice
+  /// The next piece of a `for w in s.split("sep")` loop.
+  SplitNext
+}
+
+/// The intrinsic a bodiless standard library function is.
+fn lookup_intrinsic(pkg_path: Str, recv: Option<TyKey>, name: Str) -> Option<(Op, Option<IntTy>)> {
+  let op: Option<Op> = match recv {
+    None => match pkg_path {
+      "<prelude>" => match name {
+        "panic" => Some(Op.Panic)
+        "assert" => Some(Op.Assert)
+        _ => None
+      }
+      "std/io" => match name {
+        "print" => Some(Op.Print)
+        "println" => Some(Op.Println)
+        "eprintln" => Some(Op.Eprintln)
+        "read_line" => Some(Op.ReadLine)
+        "read_all" => Some(Op.ReadAll)
+        _ => None
+      }
+      "std/fs" => match name {
+        "read" => Some(Op.FsRead)
+        "write" => Some(Op.FsWrite)
+        "exists" => Some(Op.FsExists)
+        "list" => Some(Op.FsList)
+        _ => None
+      }
+      "std/os" => match name {
+        "args" => Some(Op.Args)
+        "env" => Some(Op.EnvVar)
+        "exit" => Some(Op.Exit)
+        _ => None
+      }
+      "std/time" => match name {
+        "now_ms" => Some(Op.NowMs)
+        "now_ns" => Some(Op.NowNs)
+        "sleep" => Some(Op.Sleep)
+        _ => None
+      }
+      "std/sim" => match name {
+        "stdout" => Some(Op.SimStdout)
+        "stderr" => Some(Op.SimStderr)
+        "set_stdin" => Some(Op.SimSetStdin)
+        "set_args" => Some(Op.SimSetArgs)
+        "set_env" => Some(Op.SimSetEnv)
+        "set_file" => Some(Op.SimSetFile)
+        "file" => Some(Op.SimFile)
+        "remove_file" => Some(Op.SimRemoveFile)
+        "set_time" => Some(Op.SimSetTime)
+        "advance" => Some(Op.SimAdvance)
+        "seed" => Some(Op.SimSeed)
+        "reply" => Some(Op.SimReply)
+        "requests" => Some(Op.SimRequests)
+        "connect" => Some(Op.SimConnect)
+        "answers" => Some(Op.SimAnswers)
+        _ => None
+      }
+      "std/net" => match name {
+        "request" => Some(Op.NetRequest)
+        "serve" => Some(Op.NetServe)
+        _ => None
+      }
+      "std/rand" => match name {
+        "int" => Some(Op.RandInt)
+        "float" => Some(Op.RandFloat)
+        _ => None
+      }
+      "std/task" => match name {
+        "all" => Some(Op.TaskAll)
+        "map" => Some(Op.TaskMap)
+        "both" => Some(Op.TaskBoth)
+        _ => None
+      }
+      "std/math" => match name {
+        "sin" => Some(Op.Sin)
+        "cos" => Some(Op.Cos)
+        "tan" => Some(Op.Tan)
+        "atan2" => Some(Op.Atan2)
+        "exp" => Some(Op.Exp)
+        "ln" => Some(Op.Ln)
+        "log10" => Some(Op.Log10)
+        "pow" => Some(Op.Pow)
+        _ => None
+      }
+      _ => None
+    }
+    Some(key) => if pkg_path != "<prelude>" { None } else { lookup_method_intrinsic(key, name) }
+  }
+  let int = match recv {
+    Some(Int(k)) => Some(k)
+    _ => None
+  }
+  return match op {
+    Some(o) => Some((o, int))
+    None => None
+  }
+}
+
+fn lookup_method_intrinsic(key: TyKey, name: Str) -> Option<Op> {
+  return match key {
+    Int(_) => match name {
+      "abs" => Some(Op.IntAbs)
+      "min" => Some(Op.IntMin)
+      "max" => Some(Op.IntMax)
+      "pow" => Some(Op.IntPow)
+      "wrapping_add" => Some(Op.WrappingAdd)
+      "wrapping_sub" => Some(Op.WrappingSub)
+      "wrapping_mul" => Some(Op.WrappingMul)
+      _ => None
+    }
+    Float => match name {
+      "abs" => Some(Op.FloatAbs)
+      "sqrt" => Some(Op.Sqrt)
+      "floor" => Some(Op.Floor)
+      "ceil" => Some(Op.Ceil)
+      "round" => Some(Op.Round)
+      "min" => Some(Op.FloatMin)
+      "max" => Some(Op.FloatMax)
+      "is_nan" => Some(Op.IsNan)
+      _ => None
+    }
+    Char => match name {
+      "is_digit" => Some(Op.IsDigit)
+      "is_alpha" => Some(Op.IsAlpha)
+      "is_alnum" => Some(Op.IsAlnum)
+      "is_space" => Some(Op.IsSpace)
+      "is_upper" => Some(Op.IsUpper)
+      "is_lower" => Some(Op.IsLower)
+      "to_upper" => Some(Op.CharToUpper)
+      "to_lower" => Some(Op.CharToLower)
+      _ => None
+    }
+    Str => match name {
+      "len" => Some(Op.StrLen)
+      "is_empty" => Some(Op.StrIsEmpty)
+      "contains" => Some(Op.StrContains)
+      "starts_with" => Some(Op.StartsWith)
+      "ends_with" => Some(Op.EndsWith)
+      "find" => Some(Op.StrFind)
+      "split" => Some(Op.Split)
+      "lines" => Some(Op.Lines)
+      "trim" => Some(Op.Trim)
+      "replace" => Some(Op.Replace)
+      "repeat" => Some(Op.Repeat)
+      "to_upper" => Some(Op.StrToUpper)
+      "to_lower" => Some(Op.StrToLower)
+      "to_int" => Some(Op.ToInt)
+      "to_float" => Some(Op.ToFloat)
+      "bytes" => Some(Op.Bytes)
+      "chars" => Some(Op.Chars)
+      "from_chars" => Some(Op.FromChars)
+      "from_bytes" => Some(Op.FromBytes)
+      _ => None
+    }
+    List => match name {
+      "new" => Some(Op.ListNew)
+      "len" => Some(Op.ListLen)
+      "is_empty" => Some(Op.ListIsEmpty)
+      "push" => Some(Op.Push)
+      "pop" => Some(Op.Pop)
+      "get" => Some(Op.Get)
+      "insert" => Some(Op.Insert)
+      "remove" => Some(Op.Remove)
+      "clear" => Some(Op.Clear)
+      "extend" => Some(Op.Extend)
+      "reverse" => Some(Op.Reverse)
+      "swap" => Some(Op.Swap)
+      "truncate" => Some(Op.Truncate)
+      "repeat" => Some(Op.ListRepeat)
+      "sort" => Some(Op.Sort)
+      "sort_by" => Some(Op.SortBy)
+      _ => None
+    }
+    Map => match name {
+      "new" => Some(Op.MapNew)
+      "len" => Some(Op.MapLen)
+      "is_empty" => Some(Op.MapIsEmpty)
+      "get" => Some(Op.MapGet)
+      "insert" => Some(Op.MapInsert)
+      "remove" => Some(Op.MapRemove)
+      "contains" => Some(Op.MapContains)
+      "keys" => Some(Op.Keys)
+      "values" => Some(Op.Values)
+      "entries" => Some(Op.Entries)
+      _ => None
+    }
+    Set => match name {
+      "new" => Some(Op.SetNew)
+      "len" => Some(Op.SetLen)
+      "is_empty" => Some(Op.SetIsEmpty)
+      "insert" => Some(Op.SetInsert)
+      "remove" => Some(Op.SetRemove)
+      "contains" => Some(Op.SetContains)
+      "items" => Some(Op.Items)
+      _ => None
+    }
+    _ => None
+  }
+}

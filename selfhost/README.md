@@ -13,7 +13,12 @@ bootstrap compiler on every `.jig` file in the repository plus a few hundred mut
 | Lexer | `compiler/src/syntax/lexer.rs` | `syntax/lexer.jig` | `jigc tokens FILE` = `jig debug tokens FILE` |
 | Parser | `compiler/src/syntax/parser.rs` | `syntax/ast.jig`, `syntax/parser.jig` | `jigc ast FILE` = `jig debug ast FILE` |
 | Checker: loading, collection, types, effects, exhaustiveness, lints, dead code | `compiler/src/sema/` | `sema/` | `jigc check DIR STD` = `jig debug check DIR` |
-| Formatter, MIR, back end | | not yet | |
+| MIR lowering, ownership analyses, C back end | `compiler/src/mir/lower.rs`, `compiler/src/codegen/` | `sema/mir.jig`, `sema/lower*.jig`, `sema/own.jig`, `sema/cgen*.jig` | `jigc c DIR STD` = `jig debug c DIR` |
+| Formatter, prover, test runner, interpreter | | not yet | |
+
+`jigc` compiles itself: `jigc cc selfhost compiler/std` prints a self-contained C file that a
+C compiler builds into a `jigc` printing the same file again. That file is checked in as
+`bootstrap/jigc.c` (decision D6; see `bootstrap/README.md`).
 
 The AST dump (`syntax/dump.jig`) prints every node with its span, one top-level item per
 line, then the errors, so a difference anywhere in the tree or in error recovery shows up.
@@ -29,6 +34,13 @@ swapped, `let`/`var`, `&mut`, `pub` and `effects` changed), which between them r
 fifty different error codes. `jigc` reads the standard library from STD
 (`compiler/std`); the bootstrap compiler embeds it. `.feature` files and modules from
 `jig.mod` `require` lines are not ported yet.
+
+The back end (about 6,600 lines of Jig for 7,300 of Rust) lowers to the same MIR, runs the
+same ownership analyses (borrowed locals, last uses, unique lists) and prints the same C:
+the test compares the whole program, byte for byte, for every example, run test, agent
+benchmark solution and `jigc` itself (about 110,000 lines of C). To make that comparable the
+bootstrap compiler now numbers the C names it derives from types (reference-count glue,
+task and sort thunks) in order of first use rather than by its type table's ids.
 
 Every contract in `jigc` proves (`jig prove selfhost`): token spans are ordered, the cursor
 only moves forward, the lexer's state stays consistent, and the parser's literal decoding
@@ -65,5 +77,6 @@ against every literal in turn. All four are fixed.
 jig run selfhost -- tokens examples/hello/main.jig
 jig run selfhost -- ast examples/hello/main.jig
 jig run selfhost -- check "$PWD/examples/hello" "$PWD/compiler/std"
+jig run selfhost -- c "$PWD/examples/hello" "$PWD/compiler/std"
 jig test selfhost
 ```

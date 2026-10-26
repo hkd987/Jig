@@ -353,7 +353,8 @@ fn Sema.check_pat_irrefutable(&mut self, p: Int, t: Int, kind: LocalKind) {
   match pat.kind {
     Wild => {}
     Bind(name) => {
-      let _ = self.declare_local(name, t, kind, pat.span)
+      let id = self.declare_local(name, t, kind, pat.span)
+      self.tab.pat_local.insert(p, id)
     }
     Tuple(subs) => {
       let r = self.resolve(t)
@@ -393,7 +394,8 @@ fn Sema.check_pat_irrefutable(&mut self, p: Int, t: Int, kind: LocalKind) {
     Variant(name, args, has_parens) => {
       if !has_parens && args.is_empty() && self.prelude_variant(name.text).is_none() {
         // `let Total = ...`: a binding with a bad name, not a variant.
-        let _ = self.declare_local(name.text, t, kind, pat.span)
+        let id = self.declare_local(name.text, t, kind, pat.span)
+        self.tab.pat_local.insert(p, id)
       } else {
         self.err(
           "E0323",
@@ -431,6 +433,7 @@ fn Sema.check_pat(&mut self, p: Int, t: Int, rebind: Bool, binds: &mut List<(Str
           if !self.unify(lt, t) {
             self.mismatch(pat.span, lt, t)
           }
+          self.tab.pat_local.insert(p, found)
         } else {
           self.err(
             "E0323",
@@ -440,6 +443,7 @@ fn Sema.check_pat(&mut self, p: Int, t: Int, rebind: Bool, binds: &mut List<(Str
         }
       } else {
         let id = self.declare_local(name, t, LocalKind.Pattern, pat.span)
+        self.tab.pat_local.insert(p, id)
         binds.push((name, id))
       }
     }

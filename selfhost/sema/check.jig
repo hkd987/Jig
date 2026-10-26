@@ -86,6 +86,7 @@ struct Sema {
   int_lits: List<IntLit>
   touched: List<Int>
   touched_pats: List<Int>
+  touched_insts: List<Int>
   diverges: Bool
   /// Report "cannot infer" once per variable.
   reported_vars: Set<Int>
@@ -154,6 +155,7 @@ fn new_sema(ld: Loaded) -> Sema {
     int_lits: []
     touched: []
     touched_pats: []
+    touched_insts: []
     diverges: false
     reported_vars: Set.new()
     errors_at_start: 0
@@ -185,6 +187,7 @@ fn Sema.begin(&mut self, pkg: Int, file: Int) {
   self.int_lits = []
   self.touched = []
   self.touched_pats = []
+  self.touched_insts = []
   self.diverges = false
   self.reported_vars = Set.new()
   self.errors_at_start = self.diags.len()
@@ -794,6 +797,13 @@ fn Sema.finish(&mut self) {
   for id in 0..self.body.locals.len() {
     self.body.locals[id].ty = self.zonk(self.body.locals[id].ty)
   }
+  let insts = self.touched_insts
+  self.touched_insts = []
+  for e in insts {
+    let args = self.tab.expr_inst.get(e).unwrap_or([])
+    let z = self.zonk_all(args)
+    self.tab.expr_inst.insert(e, z)
+  }
   // Integer literal ranges.
   let lits = self.int_lits
   self.int_lits = []
@@ -905,7 +915,8 @@ fn Sema.lint_locals(&mut self) {
 fn Sema.setup_params(&mut self, params: List<ParamDef>) {
   for p in params {
     let kind = if p.mode == Mode.MutRef { LocalKind.MutParam } else { LocalKind.Param }
-    let _ = self.declare_local(p.name, p.ty, kind, p.span)
+    let id = self.declare_local(p.name, p.ty, kind, p.span)
+    self.body.param_locals.push(id)
   }
 }
 
@@ -941,7 +952,8 @@ fn Sema.check_fn(&mut self, fid: Int) {
         Some(s) => s.span
         None => item.name.span
       }
-      let _ = self.declare_local("self", t, kind, span)
+      let id = self.declare_local("self", t, kind, span)
+      self.body.param_locals.push(id)
     }
     _ => {}
   }
@@ -1106,6 +1118,11 @@ fn Sema.record(&mut self, e: Int, t: Int) -> Int {
   self.tab.expr_ty[e] = t
   self.touched.push(e)
   return t
+}
+
+fn Sema.set_inst(&mut self, e: Int, args: List<Int>) {
+  self.tab.expr_inst.insert(e, args)
+  self.touched_insts.push(e)
 }
 
 fn Sema.set_pat_ty(&mut self, p: Int, t: Int) {

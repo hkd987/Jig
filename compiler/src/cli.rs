@@ -467,8 +467,18 @@ pub fn main() -> i32 {
                 print!("{}", crate::tools::debug_check::check(std::path::Path::new(dir)));
                 0
             }
+            [what, dir] if what == "c" => match crate::tools::debug_check::c(std::path::Path::new(dir)) {
+                Ok(c) => {
+                    print!("{c}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    1
+                }
+            },
             _ => {
-                eprintln!("usage: jig debug tokens|ast FILE, jig debug check DIR");
+                eprintln!("usage: jig debug tokens|ast FILE, jig debug check|c DIR");
                 2
             }
         },

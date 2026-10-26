@@ -1,0 +1,785 @@
+// Lowering, continued: `match`, patterns, struct literals and their predicates, refinement
+// checks, closures, quantifiers and calls (ported from the bootstrap compiler's
+// `mir/lower.rs`).
+
+import "syntax"
+
+fn Lw.lower_match(&mut self, scrut: Int, arms: List<syntax.Arm>, dest: Option<Place>) {
+  let st = self.ty(scrut)
+  let s = self.temp(st)
+  self.expr_into(scrut, place_of(s))
+  let join = self.new_block()
+  let lits = self.string_arms(st, arms)
+  if lits > 0 {
+    self.match_strings(s, arms[0..lits], dest, join)
+  }
+  for arm in arms[lits..arms.len()] {
+    let next = self.new_block()
+    self.push_scope()
+    self.test_pat(arm.pat, place_of(s), next)
+    match arm.guard {
+      Some(g) => {
+        let gop = self.expr(g)
+        let body_bb = self.new_block()
+        self.terminate(Terminator.If(gop, body_bb, next))
+        self.fb.cur = body_bb
+      }
+      None => {}
+    }
+    self.arm_body(arm, dest, join)
+    self.fb.cur = next
+  }
+  self.terminate(Terminator.Unreachable)
+  self.fb.cur = join
+}
+
+fn Lw.arm_body(&mut self, arm: syntax.Arm, dest: Option<Place>, join: Int) {
+  self.fb.cur_span = arm.span
+  let is_block = match self.fb.ast.exprs[arm.body].kind {
+    Block(_) => true
+    _ => false
+  }
+  match dest {
+    Some(d) => if is_block {
+      self.block_into(arm.body, Some(d))
+    } else {
+      self.expr_into(arm.body, d)
+    }
+    None => if is_block {
+      self.block_into(arm.body, None)
+    } else {
+      let _ = self.expr(arm.body)
+    }
+  }
+  self.pop_scope()
+  self.goto(join)
+}
+
+/// The string literals a pattern matches, if it is only literals (`"a"`, `"a" | "b"`).
+fn Lw.string_lits(self, pat: Int, out: &mut List<Str>) -> Bool {
+  match self.fb.ast.pats[pat].kind {
+    Lit(e) => match self.fb.ast.exprs[e].kind {
+      Str(s) => {
+        out.push(s)
+        return true
+      }
+      _ => {
+        return false
+      }
+    }
+    Or(alts) => {
+      for a in alts {
+        if !self.string_lits(a, &mut out) {
+          return false
+        }
+      }
+      return true
+    }
+    _ => {
+      return false
+    }
+  }
+}
+
+/// How many leading arms of a match on a string are guard-free string literals (zero if
+/// fewer than four literals: a switch on the length only pays off for longer chains).
+fn Lw.string_arms(self, st: Int, arms: List<syntax.Arm>) -> Int {
+  if self.s.tys.kinds[st] != TyKind.Str {
+    return 0
+  }
+  var lits: List<Str> = []
+  var n = 0
+  for a in arms {
+    if a.guard.is_some() || !self.string_lits(a.pat, &mut lits) {
+      break
+    }
+    n += 1
+  }
+  return if lits.len() < 4 { 0 } else { n }
+}
+
+/// The literal arms of a string match: switch on the length, then compare with the literals
+/// of that length in arm order. No match continues with the remaining arms.
+fn Lw.match_strings(&mut self, s: Int, arms: List<syntax.Arm>, dest: Option<Place>, join: Int) {
+  var lens: List<Int> = []
+  var by_len: List<List<(Str, Int)>> = []
+  for i in 0..arms.len() {
+    var lits: List<Str> = []
+    let _ = self.string_lits(arms[i].pat, &mut lits)
+    for l in lits {
+      let k = lens.index_of(l.len())
+      match k {
+        Some(j) => by_len[j].push((l, i))
+        None => {
+          lens.push(l.len())
+          by_len.push([(l, i)])
+        }
+      }
+    }
+  }
+  var bodies: List<Int> = []
+  for _ in arms {
+    bodies.push(self.new_block())
+  }
+  let rest = self.new_block()
+  let int = self.s.tys.int
+  let len = self.temp(int)
+  let str_ty = self.fb.locals[s]
+  self.assign(
+    place_of(len),
+    Rvalue.Call(Callee.Intrinsic(intrinsic(Op.StrLen, [])), [Arg.Value(op_local(s))], int),
+  )
+  var buckets: List<Int> = []
+  var cases: List<(Int, Int)> = []
+  for n in lens {
+    let b = self.new_block()
+    buckets.push(b)
+    cases.push((n, b))
+  }
+  self.terminate(Terminator.Switch(op_local(len), cases, rest))
+  for k in 0..by_len.len() {
+    self.fb.cur = buckets[k]
+    for (l, i) in by_len[k] {
+      let c = self.temp(self.s.tys.bool)
+      let lit = Operand.Const(Const.Str(l))
+      self.assign(place_of(c), Rvalue.Binary(syntax.BinOp.Eq, op_local(s), lit, str_ty))
+      let next = self.new_block()
+      self.terminate(Terminator.If(op_local(c), bodies[i], next))
+      self.fb.cur = next
+    }
+    self.goto(rest)
+  }
+  for i in 0..arms.len() {
+    self.fb.cur = bodies[i]
+    self.push_scope()
+    self.arm_body(arms[i], dest, join)
+  }
+  self.fb.cur = rest
+}
+
+/// Test `pat` against `p`; continue in the current block on success, jump to `fail`
+/// otherwise. Bindings are assigned as the test proceeds.
+fn Lw.test_pat(&mut self, pat: Int, p: Place, fail: Int) {
+  match self.fb.ast.pats[pat].kind {
+    Wild => {}
+    Bind(_) => match self.fb.tab.pat_local.get(pat) {
+      Some(id) => {
+        let l = self.sema_local(id)
+        self.assign(place_of(l), Rvalue.Use(Operand.Copy(p)))
+      }
+      None => {}
+    }
+    Lit(e) => {
+      let pt = self.subst(self.fb.tab.pat_ty[pat])
+      let lit = self.expr(e)
+      let c = self.temp(self.s.tys.bool)
+      self.assign(place_of(c), Rvalue.Binary(syntax.BinOp.Eq, Operand.Copy(p), lit, pt))
+      let ok = self.new_block()
+      self.terminate(Terminator.If(op_local(c), ok, fail))
+      self.fb.cur = ok
+    }
+    Variant(_, subs, _) => {
+      let vi = match self.fb.tab.pat_variant.get(pat) {
+        Some((_, v)) => v
+        None => {
+          return
+        }
+      }
+      let d = self.temp(self.s.tys.int)
+      self.assign(place_of(d), Rvalue.Discriminant(p))
+      let ok = self.new_block()
+      self.terminate(Terminator.Switch(op_local(d), [(vi, ok)], fail))
+      self.fb.cur = ok
+      for i in 0..subs.len() {
+        self.test_pat(subs[i], p.variant_field(vi, i), fail)
+      }
+    }
+    Tuple(subs) => {
+      for i in 0..subs.len() {
+        self.test_pat(subs[i], p.field(i), fail)
+      }
+    }
+    Or(alts) => {
+      let success = self.new_block()
+      for i in 0..alts.len() {
+        let alt_fail = if i + 1 == alts.len() { fail } else { self.new_block() }
+        self.test_pat(alts[i], p, alt_fail)
+        self.goto(success)
+        self.fb.cur = alt_fail
+      }
+      self.fb.cur = success
+    }
+  }
+}
+
+fn Lw.lower_struct_lit(&mut self, inits: List<syntax.FieldInit>, t: Int, dest: Place) {
+  let adt = match self.s.tys.kinds[t] {
+    Adt(a, _) => a
+    _ => {
+      return
+    }
+  }
+  let decl = self.s.defs.adts[adt].fields
+  // Evaluate in source order, assemble in declaration order.
+  var vals: List<Operand> = [op_unit()].repeat(decl.len())
+  for init in inits {
+    var op = self.expr(init.value)
+    match op {
+      Copy(p) => if !p.proj.is_empty() || p.local != 0 {
+        // Freeze the value now so later field initializers cannot observe changes.
+        let ft = self.ty(init.value)
+        let l = self.temp(ft)
+        self.assign(place_of(l), Rvalue.Use(Operand.Copy(p)))
+        op = op_local(l)
+      }
+      _ => {}
+    }
+    for i in 0..decl.len() {
+      if decl[i].name == init.name.text {
+        vals[i] = op
+        break
+      }
+    }
+  }
+  self.assign(dest, Rvalue.Aggregate(AggKind.Struct(adt), t, vals))
+  self.check_struct_predicates(adt, dest)
+}
+
+/// After an assignment through a projection, re-check the predicates of every struct on the
+/// path and the refinement of the assigned field.
+fn Lw.check_mutated(&mut self, p: Place) {
+  var t = self.fb.locals[p.local]
+  var prefix = place_of(p.local)
+  let n = p.proj.len()
+  for k in 0..n {
+    let el = p.proj[k]
+    let parent = t
+    t = match el {
+      Field(i) => match self.s.tys.kinds[parent] {
+        Adt(adt, args) => self.s.tys.subst(self.s.defs.adts[adt].fields[i].ty, args)
+        Tuple(ts) => ts[i]
+        _ => {
+          return
+        }
+      }
+      Index(_, _) => match self.s.tys.kinds[parent] {
+        List(e) => e
+        _ => {
+          return
+        }
+      }
+      VariantField(_, _) => {
+        return
+      }
+    }
+    prefix.proj.push(el)
+    match (el, self.s.tys.kinds[parent]) {
+      (Field(i), Adt(adt, _)) => if k + 1 == n {
+        match self.s.defs.adts[adt].fields[i].refine {
+          Some(al) => self.check_alias(al, prefix)
+          None => {}
+        }
+      }
+      _ => {}
+    }
+  }
+  // Struct predicates, innermost first.
+  var k = n - 1
+  for k >= 0 {
+    let q = Place { local: p.local, proj: p.proj[0..k] }
+    let qt = self.place_ty(q)
+    match self.s.tys.kinds[qt] {
+      Adt(adt, _) => if !self.s.defs.adts[adt].is_enum { self.check_struct_predicates(adt, q) }
+      _ => {}
+    }
+    k -= 1
+  }
+}
+
+fn Lw.place_ty(&mut self, p: Place) -> Int {
+  var t = self.fb.locals[p.local]
+  for el in p.proj {
+    t = match (el, self.s.tys.kinds[t]) {
+      (Field(i), Adt(adt, args)) => self.s.tys.subst(self.s.defs.adts[adt].fields[i].ty, args)
+      (Field(i), Tuple(ts)) => ts[i]
+      (Index(_, _), List(e)) => e
+      _ => {
+        return self.s.tys.error
+      }
+    }
+  }
+  return t
+}
+
+/// Check a refinement alias's predicate (`self` names the value).
+fn Lw.check_alias(&mut self, al: Int, value: Place) {
+  let ad = self.s.defs.aliases[al]
+  let pred = match ad.refine {
+    Some(x) => x
+    None => {
+      return
+    }
+  }
+  let t = self.place_ty(value)
+  let l = self.temp(t)
+  self.assign(place_of(l), Rvalue.Use(Operand.Copy(value)))
+  let (ast, tab) = self.enter_file(ad.pkg, ad.file)
+  self.check_with_names(pred, [("self", l)], CheckKind.Refinement, ad.name)
+  self.fb.ast = ast
+  self.fb.tab = tab
+  // A copy left alive would make the next mutation of the value copy it.
+  self.push(Stmt.Drop(l))
+}
+
+/// Resolve names against another file's AST and tables (for predicates written there);
+/// returns the current ones, to restore.
+fn Lw.enter_file(&mut self, pkg: Int, file: Int) -> (syntax.Ast, Tables) {
+  let saved = (self.fb.ast, self.fb.tab)
+  self.fb.ast = self.s.pkgs[pkg].files[file].ast
+  self.fb.tab = self.s.tables[pkg][file]
+  return saved
+}
+
+/// Field refinements and struct invariants at construction.
+fn Lw.check_struct_predicates(&mut self, adt: Int, value: Place) {
+  let ad = self.s.defs.adts[adt]
+  for i in 0..ad.fields.len() {
+    match ad.fields[i].refine {
+      Some(al) => self.check_alias(al, value.field(i))
+      None => {}
+    }
+  }
+  let (ast, tab) = self.enter_file(ad.pkg, ad.file)
+  self.check_struct_predicates_here(adt, value)
+  self.fb.ast = ast
+  self.fb.tab = tab
+}
+
+fn Lw.check_struct_predicates_here(&mut self, adt: Int, value: Place) {
+  let ad = self.s.defs.adts[adt]
+  let (fdecls, invs) = match self.fb.ast.items[ad.item].kind {
+    Struct(_, fields, invariants) => (fields, invariants)
+    _ => {
+      return
+    }
+  }
+  var preds: List<Int> = []
+  for f in fdecls {
+    match f.refine {
+      Some(r) => preds.push(r)
+      None => {}
+    }
+  }
+  if preds.is_empty() && invs.is_empty() {
+    return
+  }
+  preds.extend(invs)
+  // Predicates name fields: bind each field they mention to a fresh local, then check.
+  var used: Set<Str> = Set.new()
+  var stack = preds
+  for !stack.is_empty() {
+    let x = stack.pop().unwrap_or(0)
+    match self.fb.ast.exprs[x].kind {
+      Name(n) => used.insert(n)
+      _ => {}
+    }
+    visit_children(self.fb.ast, x, &mut stack)
+  }
+  var bound: List<(Str, Int)> = []
+  for i in 0..fdecls.len() {
+    let name = fdecls[i].name.text
+    if !used.contains(name) {
+      continue
+    }
+    let l = self.temp(ad.fields[i].ty)
+    self.assign(place_of(l), Rvalue.Use(Operand.Copy(value.field(i))))
+    bound.push((name, l))
+  }
+  for pred in preds {
+    self.check_with_names(pred, bound, CheckKind.Invariant, ad.name)
+  }
+  // Copies left alive would make the next mutation of the struct copy its fields.
+  for (_, l) in bound {
+    self.push(Stmt.Drop(l))
+  }
+}
+
+/// The identifier-like words of a text.
+fn words_of(text: Str) -> List<Str> {
+  var out: List<Str> = []
+  var cur: List<Char> = []
+  for c in text.chars() {
+    if c.is_alnum() || c == '_' {
+      cur.push(c)
+    } else {
+      out.push(Str.from_chars(cur))
+      cur = []
+    }
+  }
+  out.push(Str.from_chars(cur))
+  return out
+}
+
+/// Check a predicate whose free names are given by `names` (struct predicates are checked
+/// outside any function body), reported at the current site.
+fn Lw.check_with_names(&mut self, pred: Int, names: List<(Str, Int)>, kind: CheckKind, owner: Str) {
+  let text = self.src(pred)
+  let span = self.fb.cur_span
+  let c = self.temp(self.s.tys.bool)
+  if self.eval_pred_names(pred, names, place_of(c)) {
+    let words = words_of(text)
+    var values: List<CheckValue> = []
+    for (n, l) in names {
+      if words.contains(n) {
+        values.push(CheckValue { label: n, op: op_local(l), ty: self.fb.locals[l] })
+      }
+    }
+    self.push(Stmt.Check(op_local(c), kind, "`" + owner + "` requires " + text, values, span))
+  }
+}
+
+/// A small evaluator for struct predicates: names, literals, comparisons, arithmetic and
+/// logic. Returns false if the predicate uses something else.
+fn Lw.eval_pred_names(&mut self, e: Int, names: List<(Str, Int)>, dest: Place) -> Bool {
+  match self.fb.ast.exprs[e].kind {
+    Name(n) => {
+      for (x, l) in names {
+        if x == n {
+          self.assign(dest, Rvalue.Use(op_local(l)))
+          return true
+        }
+      }
+      return false
+    }
+    Int(_) | Float | Bool(_) | Str(_) | Char(_) => {
+      let op = self.expr(e)
+      self.assign(dest, Rvalue.Use(op))
+      return true
+    }
+    Paren(x) => {
+      return self.eval_pred_names(x, names, dest)
+    }
+    Unary(op, inner) => {
+      let t = self.ty(inner)
+      let l = self.temp(t)
+      if !self.eval_pred_names(inner, names, place_of(l)) {
+        return false
+      }
+      self.assign(dest, Rvalue.Unary(op, op_local(l), t))
+      return true
+    }
+    Binary(op, lhs, rhs) => {
+      if op == syntax.BinOp.And || op == syntax.BinOp.Or {
+        // Short-circuit, as in ordinary code.
+        if !self.eval_pred_names(lhs, names, dest) {
+          return false
+        }
+        let rhs_bb = self.new_block()
+        let join = self.new_block()
+        let c = Operand.Copy(dest)
+        if op == syntax.BinOp.And {
+          self.terminate(Terminator.If(c, rhs_bb, join))
+        } else {
+          self.terminate(Terminator.If(c, join, rhs_bb))
+        }
+        self.fb.cur = rhs_bb
+        let ok = self.eval_pred_names(rhs, names, dest)
+        self.goto(join)
+        self.fb.cur = join
+        return ok
+      }
+      let t = self.ty(lhs)
+      let a = self.temp(t)
+      let b = self.temp(t)
+      if !self.eval_pred_names(lhs, names, place_of(a)) ||
+        !self.eval_pred_names(rhs, names, place_of(b)) {
+        return false
+      }
+      if op == syntax.BinOp.Add && self.s.tys.kinds[t] == TyKind.Str {
+        return false
+      }
+      self.assign(dest, Rvalue.Binary(op, op_local(a), op_local(b), t))
+      return true
+    }
+    _ => {
+      return false
+    }
+  }
+}
+
+fn Lw.lower_closure(&mut self, e: Int, params: List<syntax.Param>, body: Int, t: Int, dest: Place) {
+  let captures = self.fb.tab.closure_captures.get(e).unwrap_or([])
+  let ret = match self.s.tys.kinds[t] {
+    Fn(_, r, _) => r
+    _ => {
+      return
+    }
+  }
+  let span = self.fb.ast.exprs[e].span
+  let m = self.mir.fns.len()
+  self.mir.fns.push(
+    MFn {
+      name: self.mir.fns[self.fb.mfn].name + "::closure"
+      source: None
+      type_args: self.fb.inst
+      params: []
+      n_captures: captures.len()
+      ret: ret
+      locals: []
+      blocks: []
+      intrinsic: None
+      span: span
+      lowered: false
+    },
+  )
+  var cap_ops: List<Operand> = []
+  for id in captures {
+    cap_ops.push(op_local(self.sema_local(id)))
+  }
+  // Build the closure body in its own builder.
+  let outer = self.fb
+  self.begin_fn(outer.pkg, outer.file, outer.body, outer.inst, m)
+  self.fb.ret_ty = ret
+  for id in captures {
+    let l = self.sema_local(id)
+    self.fb.params.push((l, Mode.Value))
+  }
+  self.fb.n_captures = captures.len()
+  // Closure parameters: the checker declared them as locals; find them by span.
+  for p in params {
+    var found = -1
+    let locals = self.fb.body.locals
+    for i in 0..locals.len() {
+      if found < 0 && locals[i].span == p.name.span {
+        found = i
+      }
+    }
+    if found >= 0 {
+      let l = self.sema_local(found)
+      self.fb.params.push((l, Mode.Value))
+    }
+  }
+  let ns = self.fb.scopes.len()
+  if ns > 0 {
+    self.fb.scopes[ns - 1] = []
+  }
+  self.block_into(body, Some(place_of(0)))
+  self.finish()
+  self.fb = outer
+  self.assign(dest, Rvalue.Closure(m, cap_ops))
+}
+
+fn Lw.lower_quant(
+  &mut self,
+  forall: Bool,
+  binder: syntax.Name,
+  lo: Int,
+  hi: Int,
+  body: Int,
+  dest: Place,
+) {
+  let it = self.ty(lo)
+  var found = -1
+  let locals = self.fb.body.locals
+  for i in 0..locals.len() {
+    if found < 0 && locals[i].span == binder.span && locals[i].kind == LocalKind.Quant {
+      found = i
+    }
+  }
+  let i = if found >= 0 { self.sema_local(found) } else { self.temp(it) }
+  self.expr_into(lo, place_of(i))
+  let h = self.temp(it)
+  self.expr_into(hi, place_of(h))
+  self.assign(dest, Rvalue.Use(op_bool(forall)))
+  let head = self.new_block()
+  let body_bb = self.new_block()
+  let found_bb = self.new_block()
+  let latch = self.new_block()
+  let exit = self.new_block()
+  self.goto(head)
+  self.fb.cur = head
+  let c = self.temp(self.s.tys.bool)
+  self.assign(place_of(c), Rvalue.Binary(syntax.BinOp.Lt, op_local(i), op_local(h), it))
+  self.terminate(Terminator.If(op_local(c), body_bb, exit))
+  self.fb.cur = body_bb
+  let b = self.expr(body)
+  if forall {
+    self.terminate(Terminator.If(b, latch, found_bb))
+  } else {
+    self.terminate(Terminator.If(b, found_bb, latch))
+  }
+  self.fb.cur = found_bb
+  self.assign(dest, Rvalue.Use(op_bool(!forall)))
+  self.goto(exit)
+  self.fb.cur = latch
+  let one = Operand.Const(Const.Int(false, 1, int_kind_of(self.s.tys, it)))
+  self.assign(place_of(i), Rvalue.Binary(syntax.BinOp.Add, op_local(i), one, it))
+  self.goto(head)
+  self.fb.cur = exit
+}
+
+// ---------- calls ----------
+
+fn Lw.callee_of(self, m: Int) -> Callee {
+  return match self.mir.fns[m].intrinsic {
+    Some(i) => Callee.Intrinsic(i)
+    None => Callee.Fn(m)
+  }
+}
+
+/// The receiver argument of a method call.
+fn Lw.recv_arg(&mut self, base: Int, f: Int) -> Arg {
+  if self.s.defs.fns[f].self_mode == Some(Mode.MutRef) {
+    return Arg.MutRef(self.place(base))
+  }
+  return Arg.Value(self.expr(base))
+}
+
+fn Lw.param_modes(self, f: Int) -> List<Mode> {
+  var modes: List<Mode> = []
+  for p in self.s.defs.fns[f].params {
+    modes.push(p.mode)
+  }
+  return modes
+}
+
+fn Lw.lower_call(&mut self, e: Int, callee: Int, arg_ids: List<Int>, dest: Place) {
+  let ret = self.ty(e)
+  let res = self.res(callee)
+  match res {
+    Old => {
+      match self.fb.olds.get(e) {
+        Some(l) => self.assign(dest, Rvalue.Use(op_local(l)))
+        None => if !arg_ids.is_empty() { self.expr_into(arg_ids[0], dest) }
+      }
+    }
+    Variant(adt, v) => {
+      let ops = self.exprs_of(arg_ids)
+      self.assign(dest, Rvalue.Aggregate(AggKind.Variant(adt, v), ret, ops))
+    }
+    Fn(f) | Method(f) => {
+      // `assert(cond)` becomes a check that reports operand values; the condition is
+      // evaluated exactly once, by the check.
+      let fdef = self.s.defs.fns[f]
+      if fdef.name == "assert" && !fdef.has_body && self.s.pkgs[fdef.pkg].path == "<prelude>" {
+        if !arg_ids.is_empty() {
+          self.check(arg_ids[0], CheckKind.Assert)
+        }
+        self.assign(dest, Rvalue.Use(op_unit()))
+        return
+      }
+      let inst = self.inst_of(callee)
+      var call_args: List<Arg> = []
+      match (res, self.fb.ast.exprs[callee].kind) {
+        (Method(_), Field(base, _)) => call_args.push(self.recv_arg(base, f))
+        _ => {}
+      }
+      self.push_args(arg_ids, self.param_modes(f), &mut call_args)
+      let m = self.instance(f, inst)
+      self.assign(dest, Rvalue.Call(self.callee_of(m), call_args, ret))
+      if ret == self.s.tys.never {
+        self.terminate_and_continue(Terminator.Unreachable)
+      }
+    }
+    IfaceMethod(iid, mi) => {
+      let base = match self.fb.ast.exprs[callee].kind {
+        Field(b, _) => b
+        _ => {
+          return
+        }
+      }
+      let rt = self.ty(base)
+      let mname = self.s.defs.fns[self.s.defs.ifaces[iid].methods[mi]].name
+      let f = match ty_key(self.s.tys, rt) {
+        Some(k) => match self.s.defs.method(k, mname) {
+          Some(x) => x
+          None => {
+            return
+          }
+        }
+        None => {
+          return
+        }
+      }
+      let recv_args = self.s.type_args_of(rt)
+      var call_args = [self.recv_arg(base, f)]
+      self.push_args(arg_ids, self.param_modes(f), &mut call_args)
+      let m = self.instance(f, recv_args)
+      self.assign(dest, Rvalue.Call(self.callee_of(m), call_args, ret))
+    }
+    BoundMethod(_) => {
+      let base = match self.fb.ast.exprs[callee].kind {
+        Field(b, _) => b
+        _ => {
+          return
+        }
+      }
+      let rt = self.ty(base)
+      let o = self.expr(base)
+      // A user-defined `str` wins over the derived one.
+      let user = match ty_key(self.s.tys, rt) {
+        Some(k) => self.s.defs.method(k, "str")
+        None => None
+      }
+      match (user, self.s.tys.kinds[rt]) {
+        (Some(f), Adt(_, a)) => {
+          let m = self.instance(f, a)
+          self.assign(dest, Rvalue.Call(Callee.Fn(m), [Arg.Value(o)], ret))
+        }
+        _ => self.assign(
+          dest,
+          Rvalue.Call(Callee.Intrinsic(intrinsic(Op.Show, [rt])), [Arg.Value(o)], ret),
+        )
+      }
+    }
+    Field(i) => {
+      let base = match self.fb.ast.exprs[callee].kind {
+        Field(b, _) => b
+        _ => {
+          return
+        }
+      }
+      let b = self.place(base)
+      var call_args: List<Arg> = []
+      self.push_args(arg_ids, [Mode.Value].repeat(arg_ids.len()), &mut call_args)
+      self.assign(dest, Rvalue.Call(Callee.Value(Operand.Copy(b.field(i))), call_args, ret))
+    }
+    _ => {
+      let f = self.expr(callee)
+      var call_args: List<Arg> = []
+      self.push_args(arg_ids, [Mode.Value].repeat(arg_ids.len()), &mut call_args)
+      self.assign(dest, Rvalue.Call(Callee.Value(f), call_args, ret))
+      if ret == self.s.tys.never {
+        self.terminate_and_continue(Terminator.Unreachable)
+      }
+    }
+  }
+}
+
+fn Lw.push_args(&mut self, args: List<Int>, modes: List<Mode>, out: &mut List<Arg>) {
+  for i in 0..args.len() {
+    let a = args[i]
+    let mode = if i < modes.len() { modes[i] } else { Mode.Value }
+    if mode == Mode.MutRef {
+      match self.fb.ast.exprs[a].kind {
+        MutArg(pl) => {
+          out.push(Arg.MutRef(self.place(pl)))
+          continue
+        }
+        _ => {}
+      }
+    }
+    var o = self.expr(a)
+    // Freeze place operands so later arguments cannot change them.
+    match o {
+      Copy(p) => if !p.proj.is_empty() {
+        let t = self.ty(a)
+        let l = self.temp(t)
+        self.assign(place_of(l), Rvalue.Use(Operand.Copy(p)))
+        o = op_local(l)
+      }
+      _ => {}
+    }
+    out.push(Arg.Value(o))
+  }
+}

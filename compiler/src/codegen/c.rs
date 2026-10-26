@@ -17,6 +17,9 @@ use std::fmt::Write;
 pub struct CGen<'l, 'a> {
     lw: &'l mut Lowerer<'a>,
     names: FxHashMap<Ty, String>,
+    /// Each type's number in generated names (glue, thunks), in order of first use, so the C
+    /// does not depend on how the checker numbered its types.
+    type_ids: FxHashMap<Ty, usize>,
     typedefs: String,
     types_done: FxHashSet<Ty>,
     types_in_progress: FxHashSet<Ty>,
@@ -87,6 +90,7 @@ pub fn generate(lw: &mut Lowerer) -> Result<CProgram, String> {
     let mut g = CGen {
         lw,
         names: FxHashMap::default(),
+        type_ids: FxHashMap::default(),
         typedefs: String::new(),
         types_done: FxHashSet::default(),
         types_in_progress: FxHashSet::default(),
@@ -249,6 +253,11 @@ impl<'l, 'a> CGen<'l, 'a> {
     fn fresh(&mut self) -> usize {
         self.counter += 1;
         self.counter
+    }
+
+    fn type_id(&mut self, t: Ty) -> usize {
+        let n = self.type_ids.len();
+        *self.type_ids.entry(t).or_insert(n)
     }
 
     fn enqueue(&mut self, f: MFnId) {
@@ -440,7 +449,7 @@ impl<'l, 'a> CGen<'l, 'a> {
         let cname = self.cty(t);
         let base = cname.replace(" *", "p").replace(' ', "_");
         let prefix = ["retain", "release", "eq", "cmp", "hash", "show", "TD"][kind as usize];
-        let n = format!("{prefix}_{base}_{}", t.0);
+        let n = format!("{prefix}_{base}_{}", self.type_id(t));
         if self.glue_done.insert((t, kind)) {
             self.gen_glue(t, kind, &n, &cname);
         }
@@ -2291,8 +2300,8 @@ impl<'l, 'a> CGen<'l, 'a> {
     fn task_thunk(&mut self, ret: Ty, arg: Option<Ty>) -> String {
         let rc = self.cty(ret);
         let name = match arg {
-            None => format!("task_{}", ret.0),
-            Some(a) => format!("task_{}_{}", a.0, ret.0),
+            None => format!("task_{}", self.type_id(ret)),
+            Some(a) => format!("task_{}_{}", self.type_id(a), self.type_id(ret)),
         };
         if self.task_thunks.insert((ret, arg)) {
             let _ = writeln!(self.glue_decls, "JIG_FN void {name}(jig_fn *f, const void *in, void *out);");
@@ -2314,7 +2323,7 @@ impl<'l, 'a> CGen<'l, 'a> {
     /// Runs a `net.serve` handler on the state in place: releases the old state, stores the
     /// new one and returns the reply.
     fn serve_thunk(&mut self, st: Ty) -> String {
-        let name = format!("serve_{}", st.0);
+        let name = format!("serve_{}", self.type_id(st));
         if self.serve_thunks.insert(st) {
             let sc = self.cty(st);
             let str_t = self.lw.tys.str;
@@ -2332,7 +2341,7 @@ impl<'l, 'a> CGen<'l, 'a> {
 
     fn sortby_thunk(&mut self, elem: Ty) -> String {
         let ec = self.cty(elem);
-        let name = format!("sortby_{}", elem.0);
+        let name = format!("sortby_{}", self.type_id(elem));
         if self.sortby_thunks.insert(elem) {
             let _ = writeln!(self.glue_decls, "JIG_FN bool {name}(jig_fn *f, const void *a, const void *b);");
             let _ = writeln!(self.glue, "JIG_FN bool {name}(jig_fn *f, const void *a, const void *b) {{\n    return ((bool (*)(jig_env *, {ec}, {ec}))f->code)(f->env, *({ec} const *)a, *({ec} const *)b);\n}}");

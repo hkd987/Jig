@@ -115,6 +115,8 @@ struct ParamDef {
   ty: Int
   mode: Mode
   span: syntax.Span
+  /// The refinement alias the parameter's type names (`amt: Cents`), if any.
+  refine: Option<Int>
 }
 
 struct FnDef {
@@ -133,6 +135,8 @@ struct FnDef {
   n_recv_generics: Int
   params: List<ParamDef>
   ret: Int
+  /// The refinement alias the return type names, if any.
+  ret_refine: Option<Int>
   eff: Int
   is_pub: Bool
   has_body: Bool
@@ -141,6 +145,7 @@ struct FnDef {
   /// For interface method signatures.
   iface: Option<Int>
   step_attr: Option<syntax.Step>
+  span: syntax.Span
   name_span: syntax.Span
 }
 
@@ -149,6 +154,8 @@ struct FieldDef {
   ty: Int
   is_pub: Bool
   span: syntax.Span
+  /// The refinement alias the field's type names, if any.
+  refine: Option<Int>
 }
 
 struct VariantDef {
@@ -169,6 +176,8 @@ struct AdtDef {
   /// An enum's variants.
   variants: List<VariantDef>
   is_pub: Bool
+  /// Enums whose payloads (transitively) contain the enum itself are boxed.
+  recursive: Bool
 }
 
 struct IfaceDef {
@@ -295,6 +304,8 @@ fn LocalDef.is_mutable(self) -> Bool {
 /// What checking one function or test produced.
 struct Body {
   locals: List<LocalDef>
+  /// The locals of `self` and each parameter, in order.
+  param_locals: List<Int>
   /// Effects the body performs.
   used_effects: Int
   /// Every function the body references, for reachability.
@@ -311,6 +322,7 @@ struct Body {
 fn new_body() -> Body {
   return Body {
     locals: []
+    param_locals: []
     used_effects: 0
     refs: []
     variants_built: []
@@ -326,8 +338,14 @@ struct Tables {
   expr_ty: List<Int>
   expr_res: List<Res>
   pat_ty: List<Int>
+  /// Type arguments of generic functions and variants at each use.
+  expr_inst: Map<Int, List<Int>>
+  /// The local each binding pattern binds.
+  pat_local: Map<Int, Int>
   /// For variant patterns: (adt, variant index).
   pat_variant: Map<Int, (Int, Int)>
+  /// The locals each closure captures.
+  closure_captures: Map<Int, List<Int>>
 }
 
 fn new_tables(n_exprs: Int, n_pats: Int, error: Int) -> Tables {
@@ -335,7 +353,10 @@ fn new_tables(n_exprs: Int, n_pats: Int, error: Int) -> Tables {
     expr_ty: [error].repeat(n_exprs)
     expr_res: [Res.Unresolved].repeat(n_exprs)
     pat_ty: [error].repeat(n_pats)
+    expr_inst: Map.new()
+    pat_local: Map.new()
     pat_variant: Map.new()
+    closure_captures: Map.new()
   }
 }
 

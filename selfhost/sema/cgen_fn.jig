@@ -1,0 +1,2145 @@
+// The C back end, continued: function bodies, statements, rvalues, calls and intrinsics
+// (ported from the bootstrap compiler's `codegen/c.rs`).
+
+import "syntax"
+
+fn Cg.fn_sig(&mut self, f: Int) -> Str {
+  let mf = self.lw.mir.fns[f]
+  let rc = self.cty(mf.ret)
+  var ps: List<Str> = []
+  for (l, m) in mf.params {
+    let c = self.cty(mf.locals[l])
+    if m == Mode.MutRef {
+      ps.push(c + " *l" + l.str())
+    } else {
+      ps.push(c + " l" + l.str())
+    }
+  }
+  if ps.is_empty() {
+    ps.push("void")
+  }
+  return "JIG_FN " + rc + " f" + f.str() + "(" + ps.join(", ") + ")"
+}
+
+fn Cg.declare_fn(&mut self, f: Int) {
+  if self.lw.mir.fns[f].intrinsic.is_some() {
+    return
+  }
+  let sig = self.fn_sig(f)
+  self.decls += sig + "; /* " + self.lw.mir.fns[f].name.replace("*/", "* /") + " */\n"
+}
+
+fn Cg.emit_fn(&mut self, f: Int) {
+  let mf = self.lw.mir.fns[f]
+  let sig = self.fn_sig(f)
+  var cx = FnCx {
+    out: ""
+    mutref: Set.new()
+    params: Set.new()
+    unique: unique_lists(mf, self.lw.s.tys)
+    borrowed: borrowed_locals(mf)
+    movable: Set.new()
+  }
+  for (l, m) in mf.params {
+    cx.params.insert(l)
+    if m == Mode.MutRef {
+      cx.mutref.insert(l)
+    }
+  }
+  var owners: Set<Int> = Set.new()
+  for l in 1..mf.locals.len() {
+    if !cx.params.contains(l) && !cx.borrowed.contains(l) && self.needs_rc(mf.locals[l]) {
+      owners.insert(l)
+    }
+  }
+  let moves = last_uses(mf, owners)
+  cx.out = "/* " + mf.name.replace("*/", "* /") + " */\n" + sig + " {\n"
+  for l in 0..mf.locals.len() {
+    if cx.params.contains(l) {
+      continue
+    }
+    let c = self.cty(mf.locals[l])
+    cx.out += "    " + c + " l" + l.str() + " = {0};\n"
+  }
+  var entry: List<Int> = []
+  for l in cx.unique.items() {
+    if cx.mutref.contains(l) {
+      entry.push(l)
+    }
+  }
+  entry.sort()
+  for l in entry {
+    cx.out += self.make_unique(mf, cx, l)
+  }
+  for b in 0..mf.blocks.len() {
+    let block = mf.blocks[b]
+    cx.out += "bb" + b.str() + ":;\n"
+    for i in 0..block.stmts.len() {
+      cx.movable = moves[b][i]
+      self.emit_stmt(mf, &mut cx, block.stmts[i].stmt, block.stmts[i].span)
+    }
+    cx.movable = Set.new()
+    self.emit_term(mf, &mut cx, block.term, block.term_span)
+  }
+  cx.out += "}\n\n"
+  self.fns.push(cx.out)
+}
+
+fn Cg.make_unique(&mut self, mf: MFn, cx: FnCx, l: Int) -> Str {
+  let lv = local_lval(cx, l)
+  let d = match self.kind(mf.locals[l]) {
+    List(e) => self.desc(e)
+    _ => ""
+  }
+  return "    if (" +
+    lv +
+    " && " +
+    lv +
+    "->rc != 1) jig_list_make_unique(&" +
+    lv +
+    ", " +
+    d +
+    ");\n"
+}
+
+fn local_lval(cx: FnCx, l: Int) -> Str {
+  if cx.mutref.contains(l) {
+    return "(*l" + l.str() + ")"
+  }
+  return "l" + l.str()
+}
+
+/// The type of a place.
+fn Cg.place_ty(&mut self, mf: MFn, p: Place) -> Int {
+  var t = mf.locals[p.local]
+  for e in p.proj {
+    t = match e {
+      Field(i) => self.field_tys(t)[i]
+      VariantField(v, i) => self.variant_tys(t)[v][i]
+      Index(_, _) => match self.kind(t) {
+        List(x) => x
+        _ => t
+      }
+    }
+  }
+  return t
+}
+
+/// A C lvalue (or rvalue when `!write`) for a place. Writes make shared lists unique.
+fn Cg.place_expr(&mut self, mf: MFn, cx: FnCx, p: Place, write: Bool, span: syntax.Span) -> Str {
+  var e = local_lval(cx, p.local)
+  var t = mf.locals[p.local]
+  for k in 0..p.proj.len() {
+    // A list that is already unique is written like it is read.
+    let w = write && !(k == 0 && cx.unique.contains(p.local))
+    match p.proj[k] {
+      Field(i) => {
+        e = e + ".f" + i.str()
+        t = self.field_tys(t)[i]
+      }
+      VariantField(v, i) => {
+        let acc = if self.is_recursive_enum(t) { "->" } else { "." }
+        e = e + acc + "u.v" + v.str() + ".f" + i.str()
+        t = self.variant_tys(t)[v][i]
+      }
+      Index(op, ispan) => {
+        let unchecked = ispan.lo == 0 && ispan.hi == 0
+        let elem = match self.kind(t) {
+          List(x) => x
+          _ => t
+        }
+        let ec = self.cty(elem)
+        let d = self.desc(elem)
+        let idx = self.operand(mf, cx, op, span)
+        let loc = self.loc(span)
+        if w && !unchecked {
+          e = "(*(" +
+            ec +
+            " *)jig_list_idx_mut(&" +
+            e +
+            ", " +
+            idx +
+            ", sizeof(" +
+            ec +
+            "), " +
+            d +
+            ", " +
+            loc +
+            "))"
+        } else if !w && !unchecked {
+          e = "(*(" +
+            ec +
+            " *)jig_list_idx(" +
+            e +
+            ", " +
+            idx +
+            ", sizeof(" +
+            ec +
+            "), " +
+            loc +
+            "))"
+        } else if w {
+          e = "(*(" +
+            ec +
+            " *)jig_list_ref_mut(&" +
+            e +
+            ", " +
+            idx +
+            ", sizeof(" +
+            ec +
+            "), " +
+            d +
+            "))"
+        } else {
+          e = "(*(" + ec + " *)jig_list_ref(" + e + ", " + idx + ", sizeof(" + ec + ")))"
+        }
+        t = elem
+      }
+    }
+  }
+  return e
+}
+
+fn Cg.operand(&mut self, mf: MFn, cx: FnCx, op: Operand, span: syntax.Span) -> Str {
+  return match op {
+    Copy(p) => self.place_expr(mf, cx, p, false, span)
+    Const(c) => self.constant(c)
+  }
+}
+
+fn Cg.operand_ty(&mut self, mf: MFn, op: Operand) -> Int {
+  return match op {
+    Copy(p) => self.place_ty(mf, p)
+    Const(c) => match c {
+      Int(_, _, k) => self.lw.s.tys.int_ty(k, 0)
+      Float(_) => self.lw.s.tys.float
+      Bool(_) => self.lw.s.tys.bool
+      Char(_) => self.lw.s.tys.char
+      Str(_) => self.lw.s.tys.str
+      Unit => self.lw.s.tys.unit_ty
+      Fn(f) => self.fn_value_ty(f)
+    }
+  }
+}
+
+fn Cg.fn_value_ty(&mut self, f: Int) -> Int {
+  let mf = self.lw.mir.fns[f]
+  var ps: List<Int> = []
+  for i in mf.n_captures..mf.params.len() {
+    ps.push(mf.locals[mf.params[i].0])
+  }
+  return self.lw.s.tys.func(ps, mf.ret, 0)
+}
+
+fn Cg.constant(&mut self, c: Const) -> Str {
+  return match c {
+    Int(neg, mag, k) => match k {
+      I64 => if neg && mag == 9223372036854775808 {
+        "INT64_MIN"
+      } else {
+        "INT64_C(" + const_int_text(neg, mag) + ")"
+      }
+      U64 => "UINT64_C(" + mag.str() + ")"
+      I32 => "((int32_t)" + const_int_text(neg, mag) + ")"
+      U32 => "((uint32_t)" + const_int_text(neg, mag) + "u)"
+      U8 => "((uint8_t)" + const_int_text(neg, mag) + ")"
+    }
+    Float(f) => {
+      if f.is_nan() {
+        "NAN"
+      } else if f > 1.7976931348623157e308 {
+        "INFINITY"
+      } else if f < -1.7976931348623157e308 {
+        "(-INFINITY)"
+      } else {
+        fmt_e(f)
+      }
+    }
+    Bool(b) => b.str()
+    Char(ch) => "((uint32_t)" + ch.str() + "u)"
+    Str(s) => self.str_lit(s)
+    Unit => "((jig_unit)0)"
+    Fn(f) => {
+      self.enqueue(f)
+      let w = self.wrapper(f)
+      "((jig_fn){(void *)" + w + ", NULL})"
+    }
+  }
+}
+
+/// An env-taking entry point for a function, so it can be called as a value.
+fn Cg.wrapper(&mut self, f: Int) -> Str {
+  let name = "w" + f.str()
+  if self.wrappers.contains(f) {
+    return name
+  }
+  self.wrappers.insert(f)
+  let mf = self.lw.mir.fns[f]
+  let rc = self.cty(mf.ret)
+  var ps = ["jig_env *env"]
+  var call: List<Str> = []
+  for i in 0..mf.n_captures {
+    call.push("e->c" + i.str())
+  }
+  for i in mf.n_captures..mf.params.len() {
+    let k = i - mf.n_captures
+    let c = self.cty(mf.locals[mf.params[i].0])
+    ps.push(c + " a" + k.str())
+    call.push("a" + k.str())
+  }
+  var s = ""
+  if mf.n_captures == 0 {
+    s = "JIG_FN " +
+      rc +
+      " " +
+      name +
+      "(" +
+      ps.join(", ") +
+      ") {\n    (void)env;\n    return f" +
+      f.str() +
+      "(" +
+      call.join(", ") +
+      ");\n}\n"
+  } else {
+    s = "JIG_FN " +
+      rc +
+      " " +
+      name +
+      "(" +
+      ps.join(", ") +
+      ") {\n    struct env" +
+      f.str() +
+      " *e = (struct env" +
+      f.str() +
+      " *)env;\n    return f" +
+      f.str() +
+      "(" +
+      call.join(", ") +
+      ");\n}\n"
+  }
+  self.decls += "JIG_FN " + rc + " " + name + "(" + ps.join(", ") + ");\n"
+  self.glue += s
+  return name
+}
+
+/// The environment struct and drop function for a closure.
+fn Cg.closure_env(&mut self, f: Int) {
+  let mf = self.lw.mir.fns[f]
+  var s = "struct env" + f.str() + " {\n    jig_env hdr;\n"
+  for i in 0..mf.n_captures {
+    let c = self.cty(mf.locals[mf.params[i].0])
+    s += "    " + c + " c" + i.str() + ";\n"
+  }
+  s += "};\n"
+  self.typedefs += s
+  var d = "JIG_FN void envdrop" +
+    f.str() +
+    "(jig_env *ep) {\n    struct env" +
+    f.str() +
+    " *e = (struct env" +
+    f.str() +
+    " *)ep;\n"
+  for i in 0..mf.n_captures {
+    let t = mf.locals[mf.params[i].0]
+    if self.needs_rc(t) {
+      let g = self.glue_name(t, g_release())
+      d += "    " + g + "(&e->c" + i.str() + ");\n"
+    }
+  }
+  d += "    jig_free_obj(e, sizeof(*e));\n}\n"
+  self.glue_decls += "JIG_FN void envdrop" + f.str() + "(jig_env *ep);\n"
+  self.glue += d
+}
+
+/// An owned copy of an operand's value (retained if it owns heap memory).
+fn Cg.owned(&mut self, mf: MFn, cx: &mut FnCx, op: Operand, span: syntax.Span) -> Str {
+  let t = self.operand_ty(mf, op)
+  let e = self.operand(mf, cx, op, span)
+  let is_const = match op {
+    Const(_) => true
+    _ => false
+  }
+  if !self.needs_rc(t) || is_const {
+    return e
+  }
+  let c = self.cty(t)
+  let n = self.fresh()
+  match op {
+    Copy(p) => if p.proj.is_empty() && cx.movable.contains(p.local) {
+      // Its last use: take the value and clear the local instead of counting.
+      cx.out += "    " +
+        c +
+        " t" +
+        n.str() +
+        " = " +
+        e +
+        "; memset(&" +
+        e +
+        ", 0, sizeof " +
+        e +
+        ");\n"
+      return "t" + n.str()
+    }
+    _ => {}
+  }
+  let g = self.glue_name(t, g_retain())
+  cx.out += "    " + c + " t" + n.str() + " = " + e + "; " + g + "(&t" + n.str() + ");\n"
+  return "t" + n.str()
+}
+
+fn Cg.release_stmt(&mut self, t: Int, lval: Str) -> Str {
+  if !self.needs_rc(t) {
+    return ""
+  }
+  let g = self.glue_name(t, g_release())
+  return g + "(&" + lval + ");"
+}
+
+fn has_index(p: Place) -> Bool {
+  for e in p.proj {
+    match e {
+      Index(_, _) => {
+        return true
+      }
+      _ => {}
+    }
+  }
+  return false
+}
+
+fn Cg.emit_stmt(&mut self, mf: MFn, cx: &mut FnCx, stmt: Stmt, span: syntax.Span) {
+  match stmt {
+    Assign(p, rv) => {
+      let t = self.place_ty(mf, p)
+      let c = self.cty(t)
+      // `s = s + t` appends in place when `s` is not shared.
+      match rv {
+        Call(Intrinsic(i), args, ret) => {
+          if i.op == Op.StrConcat && args.len() == 2 {
+            match (args[0], args[1]) {
+              (Value(Copy(src)), Value(rhs)) => if src == p && !has_index(p) {
+                let r = self.operand(mf, cx, rhs, span)
+                let dst = self.place_expr(mf, cx, p, true, span)
+                cx.out += "    jig_str_append(&" + dst + ", " + r + ");\n"
+                return
+              }
+              _ => {}
+            }
+          }
+          if ret == self.lw.s.tys.never {
+            let val = self.rvalue(mf, &mut cx, rv, t, span)
+            cx.out += "    (void)(" + val + ");\n"
+            return
+          }
+        }
+        Call(_, _, ret) => if ret == self.lw.s.tys.never {
+          // Never returns: evaluate for its effect; nothing is stored.
+          let val = self.rvalue(mf, &mut cx, rv, t, span)
+          cx.out += "    (void)(" + val + ");\n"
+          return
+        }
+        _ => {}
+      }
+      if p.proj.is_empty() && cx.borrowed.contains(p.local) {
+        // An alias of part of a parameter: no count, nothing to release.
+        match rv {
+          Use(op) => {
+            let src = self.operand(mf, cx, op, span)
+            cx.out += "    " + local_lval(cx, p.local) + " = " + src + ";\n"
+            return
+          }
+          _ => {}
+        }
+      }
+      let val = self.rvalue(mf, &mut cx, rv, t, span)
+      let rc = self.needs_rc(t)
+      if p.proj.is_empty() {
+        // The common case: a plain local. Evaluate, then release the old value.
+        let dst = local_lval(cx, p.local)
+        if rc {
+          let rel = self.release_stmt(t, dst)
+          let n = self.fresh()
+          cx.out += "    { " +
+            c +
+            " v" +
+            n.str() +
+            " = " +
+            val +
+            "; " +
+            rel +
+            " " +
+            dst +
+            " = v" +
+            n.str() +
+            "; }\n"
+        } else {
+          cx.out += "    " + dst + " = " + val + ";\n"
+        }
+        if cx.unique.contains(p.local) {
+          cx.out += self.make_unique(mf, cx, p.local)
+        }
+        return
+      }
+      let n = self.fresh()
+      cx.out += "    " + c + " v" + n.str() + " = " + val + ";\n"
+      let dst = self.place_expr(mf, cx, p, true, span)
+      let rel = self.release_stmt(t, "*d")
+      if rel.is_empty() {
+        cx.out += "    " + dst + " = v" + n.str() + ";\n"
+      } else {
+        cx.out += "    { " + c + " *d = &" + dst + "; " + rel + " *d = v" + n.str() + "; }\n"
+      }
+    }
+    Check(cond, kind, msg, values, cspan) => {
+      let c = self.operand(mf, cx, cond, cspan)
+      let what = match kind {
+        Assert => "assertion failed"
+        Precondition => "precondition failed"
+        Postcondition => "postcondition failed"
+        Invariant => "invariant failed"
+        Refinement => "refinement failed"
+      }
+      let loc = self.loc(cspan)
+      cx.out += "    if (!(" +
+        c +
+        ")) {\n        jig_buf b = {0};\n        jig_buf_push_cstr(&b, " +
+        c_string(what + ": " + msg) +
+        ");\n"
+      for v in values {
+        let e = self.operand(mf, cx, v.op, cspan)
+        let ct = self.cty(v.ty)
+        let g = self.glue_name(v.ty, g_show())
+        cx.out += "        jig_buf_push_cstr(&b, " +
+          c_string("\n  " + v.label + " = ") +
+          ");\n        { " +
+          ct +
+          " x = " +
+          e +
+          "; " +
+          g +
+          "(&b, &x, true); }\n"
+      }
+      cx.out += "        jig_panic_buf(&b, " + loc + ");\n    }\n"
+    }
+    Drop(l) => {
+      let t = mf.locals[l]
+      if self.needs_rc(t) && !cx.params.contains(l) && !cx.borrowed.contains(l) {
+        let lv = local_lval(cx, l)
+        let rel = self.release_stmt(t, lv)
+        cx.out += "    " + rel + " memset(&" + lv + ", 0, sizeof " + lv + ");\n"
+      }
+    }
+  }
+}
+
+fn Cg.emit_term(&mut self, mf: MFn, cx: &mut FnCx, term: Terminator, span: syntax.Span) {
+  match term {
+    Goto(b) => cx.out += "    goto bb" + b.str() + ";\n"
+    If(c, t, e) => {
+      let cs = self.operand(mf, cx, c, span)
+      cx.out += "    if (" + cs + ") goto bb" + t.str() + "; else goto bb" + e.str() + ";\n"
+    }
+    Switch(op, cases, default) => {
+      let v = self.operand(mf, cx, op, span)
+      cx.out += "    switch (" + v + ") {\n"
+      for (k, b) in cases {
+        cx.out += "    case " + k.str() + ": goto bb" + b.str() + ";\n"
+      }
+      cx.out += "    default: goto bb" + default.str() + ";\n    }\n"
+    }
+    Return => {
+      for l in 1..mf.locals.len() {
+        if cx.params.contains(l) || cx.borrowed.contains(l) {
+          continue
+        }
+        let rel = self.release_stmt(mf.locals[l], "l" + l.str())
+        if !rel.is_empty() {
+          cx.out += "    " + rel + "\n"
+        }
+      }
+      cx.out += "    return l0;\n"
+    }
+    Unreachable => {
+      let loc = self.loc(span)
+      cx.out += "    jig_unreachable(" + loc + ");\n"
+    }
+  }
+}
+
+// ---------- rvalues ----------
+
+fn Cg.rvalue(
+  &mut self,
+  mf: MFn,
+  cx: &mut FnCx,
+  rv: Rvalue,
+  dest_ty: Int,
+  span: syntax.Span,
+) -> Str {
+  match rv {
+    Use(op) => {
+      return self.owned(mf, &mut cx, op, span)
+    }
+    Binary(op, a, b, ty) => {
+      return self.binary(mf, &mut cx, op, a, b, ty, span)
+    }
+    Unary(op, a, ty) => {
+      let x = self.operand(mf, cx, a, span)
+      return match (op, self.kind(ty)) {
+        (Not, _) => "(!" + x + ")"
+        (Neg, Float(_)) => "(-" + x + ")"
+        (Neg, Int(k, _)) => {
+          let loc = self.loc(span)
+          "jig_neg_" + int_suffix(k) + "(" + x + ", " + loc + ")"
+        }
+        (BitNot, Int(k, _)) => "((" + int_cty(k) + ")~" + x + ")"
+        _ => x
+      }
+    }
+    Cast(a, from, to) => {
+      let x = self.operand(mf, cx, a, span)
+      return self.cast(x, from, to, span)
+    }
+    Inc(a, k) => {
+      let x = self.operand(mf, cx, a, span)
+      return "((" + int_cty(k) + ")(" + x + " + 1))"
+    }
+    Aggregate(kind, ty, ops) => {
+      var vals: List<Str> = []
+      for o in ops {
+        vals.push(self.owned(mf, &mut cx, o, span))
+      }
+      let c = self.cty(ty)
+      match kind {
+        Tuple | Struct(_) => {
+          if vals.is_empty() {
+            if ty == self.lw.s.tys.unit_ty {
+              return "((jig_unit)0)"
+            }
+            return "((" + c + "){0})"
+          }
+          var fields: List<Str> = []
+          for i in 0..vals.len() {
+            fields.push(".f" + i.str() + " = " + vals[i])
+          }
+          return "((" + c + "){" + fields.join(", ") + "})"
+        }
+        Variant(_, v) => {
+          var fields: List<Str> = []
+          for i in 0..vals.len() {
+            fields.push(".f" + i.str() + " = " + vals[i])
+          }
+          let rec = self.is_recursive_enum(ty)
+          if rec && vals.is_empty() {
+            // A variant without fields is one shared static value.
+            match self.static_boxes.get((ty, v)) {
+              Some(name) => {
+                return "(&" + name + ")"
+              }
+              None => {}
+            }
+            let name = "NV" + self.fresh().str()
+            self.data_defs += "JIG_LINK struct " +
+              c +
+              "_box " +
+              name +
+              " = {.rc = -1, .tag = " +
+              v.str() +
+              "};\n"
+            self.data_decls += "extern struct " + c + "_box " + name + ";\n"
+            self.static_boxes.insert((ty, v), name)
+            return "(&" + name + ")"
+          }
+          if rec {
+            let n = self.fresh().str()
+            cx.out += "    " +
+              c +
+              " bx" +
+              n +
+              " = jig_alloc_obj(sizeof(*bx" +
+              n +
+              ")); bx" +
+              n +
+              "->rc = 1; bx" +
+              n +
+              "->tag = " +
+              v.str() +
+              ";\n"
+            for i in 0..vals.len() {
+              cx.out += "    bx" + n + "->u.v" + v.str() + ".f" + i.str() + " = " + vals[i] + ";\n"
+            }
+            return "bx" + n
+          }
+          if vals.is_empty() {
+            return "((" + c + "){.tag = " + v.str() + "})"
+          }
+          return "((" +
+            c +
+            "){.tag = " +
+            v.str() +
+            ", .u.v" +
+            v.str() +
+            " = {" +
+            fields.join(", ") +
+            "}})"
+        }
+        List => {
+          let elem = match self.kind(ty) {
+            List(e) => e
+            _ => ty
+          }
+          let ec = self.cty(elem)
+          let d = self.desc(elem)
+          let n = self.fresh().str()
+          if vals.is_empty() {
+            return "((jig_list *)NULL)"
+          }
+          // A literal of constants is static data (reference count -1).
+          var constant = true
+          for o in ops {
+            let ok = match o {
+              Const(Int(_, _, _)) | Const(Float(_)) | Const(Bool(_)) | Const(Char(_)) | Const(Str(_)) => true
+              _ => false
+            }
+            if !ok {
+              constant = false
+            }
+          }
+          if constant {
+            let len = vals.len().str()
+            self.data_defs += "JIG_LINK " + ec + " LD" + n + "[] = {" + vals.join(", ") + "};\n"
+            self.data_defs += "JIG_LINK jig_list LL" +
+              n +
+              " = {-1, " +
+              len +
+              ", " +
+              len +
+              ", (char *)LD" +
+              n +
+              "};\n"
+            self.data_decls += "extern jig_list LL" + n + ";\n"
+            return "(&LL" + n + ")"
+          }
+          cx.out += "    jig_list *ls" +
+            n +
+            " = jig_list_with_capacity(" +
+            vals.len().str() +
+            ", " +
+            d +
+            ");\n"
+          for v in vals {
+            cx.out += "    { " +
+              ec +
+              " x = " +
+              v +
+              "; jig_list_push(&ls" +
+              n +
+              ", &x, " +
+              d +
+              "); }\n"
+          }
+          return "ls" + n
+        }
+      }
+    }
+    Discriminant(p) => {
+      let t = self.place_ty(mf, p)
+      let e = self.place_expr(mf, cx, p, false, span)
+      return if self.is_recursive_enum(t) {
+        "((int64_t)" + e + "->tag)"
+      } else {
+        "((int64_t)" + e + ".tag)"
+      }
+    }
+    Closure(f, caps) => {
+      self.enqueue(f)
+      self.closure_env(f)
+      let w = self.wrapper(f)
+      var vals: List<Str> = []
+      for o in caps {
+        vals.push(self.owned(mf, &mut cx, o, span))
+      }
+      let n = self.fresh().str()
+      cx.out += "    struct env" +
+        f.str() +
+        " *env" +
+        n +
+        " = jig_alloc_obj(sizeof(*env" +
+        n +
+        ")); env" +
+        n +
+        "->hdr.rc = 1; env" +
+        n +
+        "->hdr.drop = envdrop" +
+        f.str() +
+        ";\n"
+      for i in 0..vals.len() {
+        cx.out += "    env" + n + "->c" + i.str() + " = " + vals[i] + ";\n"
+      }
+      return "((jig_fn){(void *)" + w + ", (jig_env *)env" + n + "})"
+    }
+    Call(callee, args, ret) => {
+      return self.call(mf, &mut cx, callee, args, ret, dest_ty, span)
+    }
+  }
+}
+
+fn Cg.binary(
+  &mut self,
+  mf: MFn,
+  cx: &mut FnCx,
+  op: syntax.BinOp,
+  a: Operand,
+  b: Operand,
+  ty: Int,
+  span: syntax.Span,
+) -> Str {
+  let x = self.operand(mf, cx, a, span)
+  let y = self.operand(mf, cx, b, span)
+  let k = self.kind(ty)
+  if is_comparison(op) {
+    match k {
+      Int(_, _) | Char | Bool | Float(_) => {
+        return "(" + x + " " + op.text() + " " + y + ")"
+      }
+      Str => {
+        if op == syntax.BinOp.Eq || op == syntax.BinOp.Ne {
+          let r = "jig_str_eq(" + x + ", " + y + ")"
+          return if op == syntax.BinOp.Eq { r } else { "(!" + r + ")" }
+        }
+        return "(jig_str_cmp(" + x + ", " + y + ") " + op.text() + " 0)"
+      }
+      _ => {
+        let ct = self.cty(ty)
+        if op == syntax.BinOp.Eq || op == syntax.BinOp.Ne {
+          let g = self.glue_name(ty, g_eq())
+          let n = self.fresh().str()
+          cx.out += "    " + ct + " ca" + n + " = " + x + "; " + ct + " cb" + n + " = " + y + ";\n"
+          let r = g + "(&ca" + n + ", &cb" + n + ")"
+          return if op == syntax.BinOp.Eq { r } else { "(!" + r + ")" }
+        }
+        let g = self.glue_name(ty, g_cmp())
+        let n = self.fresh().str()
+        cx.out += "    " + ct + " ca" + n + " = " + x + "; " + ct + " cb" + n + " = " + y + ";\n"
+        return "(" + g + "(&ca" + n + ", &cb" + n + ") " + op.text() + " 0)"
+      }
+    }
+  }
+  match k {
+    Float(_) => {
+      return if op == syntax.BinOp.Rem {
+        "fmod(" + x + ", " + y + ")"
+      } else {
+        "(" + x + " " + op.text() + " " + y + ")"
+      }
+    }
+    Int(ik, _) => {
+      let s = int_suffix(ik)
+      let ct = int_cty(ik)
+      let loc = self.loc(span)
+      return match op {
+        Add => "jig_add_" + s + "(" + x + ", " + y + ", " + loc + ")"
+        Sub => "jig_sub_" + s + "(" + x + ", " + y + ", " + loc + ")"
+        Mul => "jig_mul_" + s + "(" + x + ", " + y + ", " + loc + ")"
+        Div => "jig_div_" + s + "(" + x + ", " + y + ", " + loc + ")"
+        Rem => "jig_rem_" + s + "(" + x + ", " + y + ", " + loc + ")"
+        BitAnd => "((" + ct + ")(" + x + " & " + y + "))"
+        BitOr => "((" + ct + ")(" + x + " | " + y + "))"
+        BitXor => "((" + ct + ")(" + x + " ^ " + y + "))"
+        Shl => "((" +
+          ct +
+          ")((uint64_t)(" +
+          x +
+          ") << jig_shamt((int64_t)(" +
+          y +
+          "), " +
+          int_bits(ik).str() +
+          ", " +
+          loc +
+          ")))"
+        Shr => "((" +
+          ct +
+          ")((" +
+          x +
+          ") >> jig_shamt((int64_t)(" +
+          y +
+          "), " +
+          int_bits(ik).str() +
+          ", " +
+          loc +
+          ")))"
+        _ => "(" + x + " " + op.text() + " " + y + ")"
+      }
+    }
+    _ => {
+      return "(" + x + " " + op.text() + " " + y + ")"
+    }
+  }
+}
+
+fn Cg.cast(&mut self, x: Str, from: Int, to: Int, span: syntax.Span) -> Str {
+  let kf = self.kind(from)
+  let kt = self.kind(to)
+  let loc = self.loc(span)
+  return match (kf, kt) {
+    (Float(_), Float(_)) => x
+    (Int(_, _), Float(_)) | (Char, Float(_)) => "((double)(" + x + "))"
+    (Float(_), Int(k, _)) => {
+      let (lo, hi) = int_float_bounds(k)
+      "({ double cf = trunc(" +
+        x +
+        "); if (isnan(cf) || cf < " +
+        lo +
+        " || cf > " +
+        hi +
+        ") jig_cast_range_f(" +
+        x +
+        ", \"" +
+        k.name() +
+        "\", " +
+        loc +
+        "); (" +
+        int_cty(k) +
+        ")cf; })"
+    }
+    (Int(a, _), Int(b, _)) => {
+      if a == b {
+        return x
+      }
+      let widen = (a.signed() == b.signed() && int_bits(b) >= int_bits(a)) ||
+        (!a.signed() && b.signed() && int_bits(b) > int_bits(a))
+      if widen {
+        "((" + int_cty(b) + ")(" + x + "))"
+      } else if a == IntTy.U64 {
+        "({ uint64_t cv = " +
+          x +
+          "; if (cv > (uint64_t)" +
+          b.max_text() +
+          ") jig_cast_range_u(cv, \"" +
+          b.name() +
+          "\", " +
+          loc +
+          "); (" +
+          int_cty(b) +
+          ")cv; })"
+      } else {
+        let max = if b == IntTy.U64 { "INT64_MAX" } else { "INT64_C(" + b.max_text() + ")" }
+        "({ int64_t cv = (int64_t)(" +
+          x +
+          "); if (cv < INT64_C(" +
+          b.min_text() +
+          ") || cv > " +
+          max +
+          ") jig_cast_range_i(cv, \"" +
+          b.name() +
+          "\", " +
+          loc +
+          "); (" +
+          int_cty(b) +
+          ")cv; })"
+      }
+    }
+    (Char, Int(b, _)) => {
+      if int_bits(b) > 32 || b == IntTy.U32 {
+        "((" + int_cty(b) + ")(" + x + "))"
+      } else {
+        "({ uint32_t cv = " +
+          x +
+          "; if (cv > " +
+          b.max_text() +
+          "u) jig_cast_range_i(cv, \"" +
+          b.name() +
+          "\", " +
+          loc +
+          "); (" +
+          int_cty(b) +
+          ")cv; })"
+      }
+    }
+    (Int(_, _), Char) => "jig_char_from_int((int64_t)(" + x + "), " + loc + ")"
+    _ => x
+  }
+}
+
+// ---------- calls ----------
+
+fn Cg.arg_exprs(&mut self, mf: MFn, cx: FnCx, args: List<Arg>, span: syntax.Span) -> List<Str> {
+  var out: List<Str> = []
+  for a in args {
+    match a {
+      Value(o) => out.push(self.operand(mf, cx, o, span))
+      MutRef(p) => out.push("&" + self.place_expr(mf, cx, p, true, span))
+    }
+  }
+  return out
+}
+
+struct Held {
+  index: Int
+  value: Str
+  ty: Int
+}
+
+/// Value arguments rooted in a local that is also passed `&mut` in the same call, each
+/// retained into a temporary.
+fn Cg.hold_aliased(
+  &mut self,
+  mf: MFn,
+  cx: &mut FnCx,
+  args: List<Arg>,
+  span: syntax.Span,
+) -> List<Held> {
+  var roots: Set<Int> = Set.new()
+  for a in args {
+    match a {
+      MutRef(p) => roots.insert(p.local)
+      _ => {}
+    }
+  }
+  var held: List<Held> = []
+  for i in 0..args.len() {
+    match args[i] {
+      Value(o) => match o {
+        Copy(p) => {
+          let t = self.operand_ty(mf, o)
+          if roots.contains(p.local) && self.needs_rc(t) {
+            let v = self.owned(mf, &mut cx, o, span)
+            held.push(Held { index: i, value: v, ty: t })
+          }
+        }
+        _ => {}
+      }
+      _ => {}
+    }
+  }
+  return held
+}
+
+fn Cg.arg_exprs_with(
+  &mut self,
+  mf: MFn,
+  cx: FnCx,
+  args: List<Arg>,
+  held: List<Held>,
+  span: syntax.Span,
+) -> List<Str> {
+  var a = self.arg_exprs(mf, cx, args, span)
+  for h in held {
+    a[h.index] = h.value
+  }
+  return a
+}
+
+/// Run the call now and release the held arguments after it.
+fn Cg.release_held(&mut self, cx: &mut FnCx, call: Str, ret: Int, held: List<Held>) -> Str {
+  if held.is_empty() {
+    return call
+  }
+  let n = self.fresh().str()
+  let c = self.cty(ret)
+  cx.out += "    " + c + " cr" + n + " = " + call + ";\n"
+  for h in held {
+    let rel = self.release_stmt(h.ty, h.value)
+    cx.out += "    " + rel + "\n"
+  }
+  return "cr" + n
+}
+
+fn Cg.call(
+  &mut self,
+  mf: MFn,
+  cx: &mut FnCx,
+  callee: Callee,
+  args: List<Arg>,
+  ret: Int,
+  dest_ty: Int,
+  span: syntax.Span,
+) -> Str {
+  match callee {
+    Fn(f) => {
+      self.enqueue(f)
+      // Value arguments are borrowed. One that shares a local with a `&mut` argument is
+      // counted for the call, so writes through the reference copy instead of changing it.
+      let held = self.hold_aliased(mf, &mut cx, args, span)
+      let a = self.arg_exprs_with(mf, cx, args, held, span)
+      let r = "f" + f.str() + "(" + a.join(", ") + ")"
+      if ret == self.lw.s.tys.never {
+        let n = self.fresh().str()
+        let c = self.cty(dest_ty)
+        cx.out += "    " + r + ";\n    " + c + " nv" + n + " = {0};\n"
+        return "nv" + n
+      }
+      return self.release_held(&mut cx, r, ret, held)
+    }
+    Value(op) => {
+      let ft = self.operand_ty(mf, op)
+      let fe = self.operand(mf, cx, op, span)
+      var ps: List<Int> = []
+      var r = ret
+      match self.kind(ft) {
+        Fn(xs, rt, _) => {
+          ps = xs
+          r = rt
+        }
+        _ => {}
+      }
+      let rc = self.cty(r)
+      var pcs = ["jig_env *"]
+      for p in ps {
+        pcs.push(self.cty(p))
+      }
+      let held = self.hold_aliased(mf, &mut cx, args, span)
+      let a = self.arg_exprs_with(mf, cx, args, held, span)
+      let n = self.fresh().str()
+      cx.out += "    jig_fn fv" + n + " = " + fe + ";\n"
+      var all = ["fv" + n + ".env"]
+      all.extend(a)
+      let c = "((" + rc + " (*)(" + pcs.join(", ") + "))fv" + n + ".code)(" + all.join(", ") + ")"
+      return self.release_held(&mut cx, c, ret, held)
+    }
+    Intrinsic(i) => {
+      return self.intrinsic(mf, &mut cx, i, args, ret, span)
+    }
+    Ffi(name) => {
+      return self.ffi_call(mf, &mut cx, name, args, ret, span)
+    }
+  }
+}
+
+/// A C type for a C function's parameter or result.
+fn Cg.ffi_cty(self, t: Int) -> Str {
+  return match self.kind(t) {
+    Int(k, _) => match k {
+      I32 => "int32_t"
+      U8 => "uint8_t"
+      U32 => "uint32_t"
+      U64 => "uint64_t"
+      I64 => "int64_t"
+    }
+    Float(_) => "double"
+    Bool => "bool"
+    Str => "const char *"
+    _ => "void"
+  }
+}
+
+/// A call to the C function `name`, declared under another C name bound to its symbol.
+fn Cg.ffi_call(
+  &mut self,
+  mf: MFn,
+  cx: &mut FnCx,
+  name: Str,
+  args: List<Arg>,
+  ret: Int,
+  span: syntax.Span,
+) -> Str {
+  var vals: List<Str> = []
+  var ctys: List<Str> = []
+  for a in args {
+    match a {
+      Value(op) => {
+        let t = self.operand_ty(mf, op)
+        let e = self.operand(mf, cx, op, span)
+        ctys.push(self.ffi_cty(t))
+        vals.push(if self.kind(t) == TyKind.Str { "jig_str_data(" + e + ")" } else { e })
+      }
+      _ => {}
+    }
+  }
+  let rc = self.ffi_cty(ret)
+  if !self.ffi_decls.contains(name) {
+    self.ffi_decls.insert(name)
+    let ps = if ctys.is_empty() { "void" } else { ctys.join(", ") }
+    self.decls += "extern " +
+      rc +
+      " jig_ffi_" +
+      name +
+      "(" +
+      ps +
+      ") __asm__(JIG_ASM_NAME(\"" +
+      name +
+      "\"));\n"
+  }
+  let c = "jig_ffi_" + name + "(" + vals.join(", ") + ")"
+  return match self.kind(ret) {
+    Str => "jig_str_from_cstr(" + c + ")"
+    Int(_, _) | Float(_) | Bool => c
+    _ => {
+      cx.out += "    " + c + ";\n"
+      "((jig_unit)0)"
+    }
+  }
+}
+
+fn Cg.opt_some(&mut self, opt_ty: Int, v: Str) -> Str {
+  let c = self.cty(opt_ty)
+  return "((" + c + "){.tag = 0, .u.v0 = {.f0 = " + v + "}})"
+}
+
+fn Cg.opt_none(&mut self, opt_ty: Int) -> Str {
+  let c = self.cty(opt_ty)
+  return "((" + c + "){.tag = 1})"
+}
+
+fn Cg.opt_of(&mut self, ret: Int, ok: Str, v: Str) -> Str {
+  let some = self.opt_some(ret, v)
+  let none = self.opt_none(ret)
+  return "(" + ok + " ? " + some + " : " + none + ")"
+}
+
+/// A `Result` value: `Ok(ok_val)` when `ok` holds, else `Err(err_val)`.
+fn Cg.result_of(&mut self, ret: Int, ok: Str, ok_val: Str, err_val: Str) -> Str {
+  let c = self.cty(ret)
+  return "(" +
+    ok +
+    " ? ((" +
+    c +
+    "){.tag = 0, .u.v0 = {.f0 = " +
+    ok_val +
+    "}}) : ((" +
+    c +
+    "){.tag = 1, .u.v1 = {.f0 = " +
+    err_val +
+    "}}))"
+}
+
+fn Cg.elem_of(self, t: Int) -> Int {
+  return match self.kind(t) {
+    List(e) | Set(e) => e
+    _ => self.lw.s.tys.unit_ty
+  }
+}
+
+fn Cg.arg_ty(&mut self, mf: MFn, a: Arg) -> Int {
+  return match a {
+    Value(o) => self.operand_ty(mf, o)
+    MutRef(p) => self.place_ty(mf, p)
+  }
+}
+
+fn Cg.owned_arg(
+  &mut self,
+  mf: MFn,
+  cx: &mut FnCx,
+  a: Arg,
+  fallback: Str,
+  span: syntax.Span,
+) -> Str {
+  return match a {
+    Value(o) => self.owned(mf, &mut cx, o, span)
+    MutRef(_) => fallback
+  }
+}
+
+fn Cg.intrinsic(
+  &mut self,
+  mf: MFn,
+  cx: &mut FnCx,
+  intr: Intrinsic,
+  args: List<Arg>,
+  ret: Int,
+  span: syntax.Span,
+) -> Str {
+  let loc = self.loc(span)
+  let a = self.arg_exprs(mf, cx, args, span)
+  let n = self.fresh().str()
+  let unit_v = "((jig_unit)0)"
+  match intr.op {
+    Panic => {
+      cx.out += "    jig_panic(jig_str_data(" + a[0] + "), " + loc + ");\n"
+      return "((" + self.cty(ret) + "){0})"
+    }
+    Assert => {
+      return "({ if (!(" + a[0] + ")) jig_panic(\"assertion failed\", " + loc + "); (jig_unit)0; })"
+    }
+    IntAbs => {
+      let k = intr.int.unwrap_or(IntTy.I64)
+      return "({ " +
+        int_cty(k) +
+        " x = " +
+        a[0] +
+        "; x < 0 ? jig_neg_" +
+        int_suffix(k) +
+        "(x, " +
+        loc +
+        ") : x; })"
+    }
+    IntMin => {
+      return "(" + a[0] + " < " + a[1] + " ? " + a[0] + " : " + a[1] + ")"
+    }
+    IntMax => {
+      return "(" + a[0] + " > " + a[1] + " ? " + a[0] + " : " + a[1] + ")"
+    }
+    IntPow => {
+      return "jig_ipow(" + a[0] + ", " + a[1] + ", " + loc + ")"
+    }
+    WrappingAdd | WrappingSub | WrappingMul => {
+      let k = intr.int.unwrap_or(IntTy.I64)
+      let uct = match k {
+        I64 | U64 => "uint64_t"
+        I32 | U32 => "uint32_t"
+        U8 => "uint8_t"
+      }
+      let o = match intr.op {
+        WrappingAdd => "+"
+        WrappingSub => "-"
+        _ => "*"
+      }
+      return "((" + int_cty(k) + ")((" + uct + ")" + a[0] + " " + o + " (" + uct + ")" + a[1] + "))"
+    }
+    FloatAbs => {
+      return "fabs(" + a[0] + ")"
+    }
+    Sqrt => {
+      return "sqrt(" + a[0] + ")"
+    }
+    Floor => {
+      return "floor(" + a[0] + ")"
+    }
+    Ceil => {
+      return "ceil(" + a[0] + ")"
+    }
+    Round => {
+      return "round(" + a[0] + ")"
+    }
+    FloatMin => {
+      return "fmin(" + a[0] + ", " + a[1] + ")"
+    }
+    FloatMax => {
+      return "fmax(" + a[0] + ", " + a[1] + ")"
+    }
+    IsNan => {
+      return "isnan(" + a[0] + ")"
+    }
+    IsDigit => {
+      return "jig_char_is_digit(" + a[0] + ")"
+    }
+    IsAlpha => {
+      return "jig_char_is_alpha(" + a[0] + ")"
+    }
+    IsAlnum => {
+      return "jig_char_is_alnum(" + a[0] + ")"
+    }
+    IsSpace => {
+      return "jig_char_is_space(" + a[0] + ")"
+    }
+    IsUpper => {
+      return "jig_char_is_upper(" + a[0] + ")"
+    }
+    IsLower => {
+      return "jig_char_is_lower(" + a[0] + ")"
+    }
+    CharToUpper => {
+      return "jig_char_to_upper(" + a[0] + ")"
+    }
+    CharToLower => {
+      return "jig_char_to_lower(" + a[0] + ")"
+    }
+    StrLen => {
+      return "jig_str_len(" + a[0] + ")"
+    }
+    StrIsEmpty => {
+      return "(jig_str_len(" + a[0] + ") == 0)"
+    }
+    StrContains => {
+      return "jig_str_contains(" + a[0] + ", " + a[1] + ")"
+    }
+    StartsWith => {
+      return "jig_str_starts_with(" + a[0] + ", " + a[1] + ")"
+    }
+    EndsWith => {
+      return "jig_str_ends_with(" + a[0] + ", " + a[1] + ")"
+    }
+    StrFind => {
+      cx.out += "    int64_t fi" + n + " = jig_str_find(" + a[0] + ", " + a[1] + ");\n"
+      let some = self.opt_some(ret, "fi" + n)
+      let none = self.opt_none(ret)
+      return "(fi" + n + " >= 0 ? " + some + " : " + none + ")"
+    }
+    TaskAll => {
+      self.threads = true
+      let rt = intr.tys[0]
+      let d = self.desc(rt)
+      let th = self.task_thunk(rt, -1)
+      return "jig_task_all(" + a[0] + ", " + th + ", " + d + ")"
+    }
+    TaskMap => {
+      self.threads = true
+      let it = intr.tys[0]
+      let rt = intr.tys[1]
+      let di = self.desc(it)
+      let dr = self.desc(rt)
+      let th = self.task_thunk(rt, it)
+      cx.out += "    jig_fn tf" + n + " = " + a[1] + ";\n"
+      return "jig_task_map(" + a[0] + ", &tf" + n + ", " + th + ", " + di + ", " + dr + ")"
+    }
+    TaskBoth => {
+      self.threads = true
+      let at = intr.tys[0]
+      let bt = intr.tys[1]
+      let ac = self.cty(at)
+      let bc = self.cty(bt)
+      let tc = self.cty(ret)
+      let ta = self.task_thunk(at, -1)
+      let tb = self.task_thunk(bt, -1)
+      cx.out += "    jig_fn tfa" +
+        n +
+        " = " +
+        a[0] +
+        ", tfb" +
+        n +
+        " = " +
+        a[1] +
+        "; " +
+        ac +
+        " tra" +
+        n +
+        "; " +
+        bc +
+        " trb" +
+        n +
+        ";\n    jig_task_both(&tfa" +
+        n +
+        ", &tfb" +
+        n +
+        ", " +
+        ta +
+        ", " +
+        tb +
+        ", &tra" +
+        n +
+        ", &trb" +
+        n +
+        ");\n"
+      return "((" + tc + "){.f0 = tra" + n + ", .f1 = trb" + n + "})"
+    }
+    Split => {
+      return "jig_str_split(" + a[0] + ", " + a[1] + ")"
+    }
+    SplitNext => {
+      return "jig_str_split_next(" + a[0] + ", " + a[1] + ", " + a[2] + ")"
+    }
+    Lines => {
+      return "jig_str_lines(" + a[0] + ")"
+    }
+    Trim => {
+      return "jig_str_trim(" + a[0] + ")"
+    }
+    Replace => {
+      return "jig_str_replace(" + a[0] + ", " + a[1] + ", " + a[2] + ")"
+    }
+    Repeat => {
+      return "jig_str_repeat(" + a[0] + ", " + a[1] + ", " + loc + ")"
+    }
+    StrToUpper => {
+      return "jig_str_to_upper(" + a[0] + ")"
+    }
+    StrToLower => {
+      return "jig_str_to_lower(" + a[0] + ")"
+    }
+    ToInt | ToFloat => {
+      let ct = if intr.op == Op.ToInt { "int64_t" } else { "double" }
+      let f = if intr.op == Op.ToInt { "jig_str_to_int" } else { "jig_str_to_float" }
+      cx.out += "    " +
+        ct +
+        " pv" +
+        n +
+        "; bool pok" +
+        n +
+        " = " +
+        f +
+        "(" +
+        a[0] +
+        ", &pv" +
+        n +
+        ");\n"
+      return self.opt_of(ret, "pok" + n, "pv" + n)
+    }
+    Bytes => {
+      return "jig_str_bytes(" + a[0] + ")"
+    }
+    Chars => {
+      return "jig_str_chars(" + a[0] + ")"
+    }
+    FromChars => {
+      return "jig_str_from_chars(" + a[0] + ")"
+    }
+    FromBytes => {
+      cx.out += "    bool bok" +
+        n +
+        "; jig_str *bs" +
+        n +
+        " = jig_str_from_bytes(" +
+        a[0] +
+        ", &bok" +
+        n +
+        ");\n"
+      return self.opt_of(ret, "bok" + n, "bs" + n)
+    }
+    StrConcat => {
+      return "jig_str_concat(" + a[0] + ", " + a[1] + ")"
+    }
+    StrConcatN => {
+      return "jig_str_concat_n(" + a.len().str() + ", (const jig_str *[]){" + a.join(", ") + "})"
+    }
+    StrByte => {
+      return "jig_str_byte(" + a[0] + ", " + a[1] + ", " + loc + ")"
+    }
+    StrSlice => {
+      return "jig_str_slice(" + a[0] + ", " + a[1] + ", " + a[2] + ", " + loc + ")"
+    }
+    Show => {
+      let t = intr.tys[0]
+      // Numbers print straight into a new string; an enum without payloads is its
+      // variant's name, a static string.
+      match self.kind(t) {
+        Int(k, _) => {
+          return if k == IntTy.U64 {
+            "jig_u64_str(" + a[0] + ")"
+          } else {
+            "jig_i64_str((int64_t)" + a[0] + ")"
+          }
+        }
+        Adt(ad, _) => match self.enum_name_table(ad) {
+          Some(table) => {
+            return table + "[(" + a[0] + ").tag]"
+          }
+          None => {}
+        }
+        _ => {}
+      }
+      let ct = self.cty(t)
+      let g = self.glue_name(t, g_show())
+      cx.out += "    jig_buf sb" +
+        n +
+        " = {0}; { " +
+        ct +
+        " x = " +
+        a[0] +
+        "; " +
+        g +
+        "(&sb" +
+        n +
+        ", &x, false); }\n"
+      return "jig_buf_to_str(&sb" + n + ")"
+    }
+    ListNew => {
+      return "((jig_list *)NULL)"
+    }
+    MapNew | SetNew => {
+      return "((jig_map *)NULL)"
+    }
+    ListLen => {
+      return "jig_list_len(" + a[0] + ")"
+    }
+    ListIsEmpty => {
+      return "(jig_list_len(" + a[0] + ") == 0)"
+    }
+    ListSlice => {
+      let e = self.elem_of(self.arg_ty(mf, args[0]))
+      let d = self.desc(e)
+      return "jig_list_slice(" + a[0] + ", " + a[1] + ", " + a[2] + ", " + d + ", " + loc + ")"
+    }
+    ListRepeat => {
+      let e = self.elem_of(self.arg_ty(mf, args[0]))
+      let d = self.desc(e)
+      return "jig_list_repeat(" + a[0] + ", " + a[1] + ", " + d + ", " + loc + ")"
+    }
+    Push | Insert => {
+      let e = self.elem_of(self.arg_ty(mf, args[0]))
+      let ec = self.cty(e)
+      let d = self.desc(e)
+      let last = args.len() - 1
+      let item = self.owned_arg(mf, &mut cx, args[last], a[last], span)
+      if intr.op == Op.Push {
+        cx.out += "    { " +
+          ec +
+          " x = " +
+          item +
+          "; jig_list_push_fast(" +
+          a[0] +
+          ", &x, sizeof(" +
+          ec +
+          "), " +
+          d +
+          "); }\n"
+      } else {
+        cx.out += "    { " +
+          ec +
+          " x = " +
+          item +
+          "; jig_list_insert(" +
+          a[0] +
+          ", " +
+          a[1] +
+          ", &x, " +
+          d +
+          ", " +
+          loc +
+          "); }\n"
+      }
+      return unit_v
+    }
+    Pop | Get => {
+      let e = self.elem_of(self.arg_ty(mf, args[0]))
+      let ec = self.cty(e)
+      let d = self.desc(e)
+      if intr.op == Op.Pop {
+        cx.out += "    " +
+          ec +
+          " pe" +
+          n +
+          "; bool pk" +
+          n +
+          " = jig_list_pop(" +
+          a[0] +
+          ", &pe" +
+          n +
+          ", " +
+          d +
+          ");\n"
+      } else {
+        cx.out += "    " +
+          ec +
+          " pe" +
+          n +
+          "; bool pk" +
+          n +
+          " = jig_list_get(" +
+          a[0] +
+          ", " +
+          a[1] +
+          ", &pe" +
+          n +
+          ", " +
+          d +
+          ");\n"
+      }
+      return self.opt_of(ret, "pk" + n, "pe" + n)
+    }
+    Remove => {
+      let e = self.elem_of(self.arg_ty(mf, args[0]))
+      let ec = self.cty(e)
+      let d = self.desc(e)
+      cx.out += "    " +
+        ec +
+        " re" +
+        n +
+        "; jig_list_remove(" +
+        a[0] +
+        ", " +
+        a[1] +
+        ", &re" +
+        n +
+        ", " +
+        d +
+        ", " +
+        loc +
+        ");\n"
+      return "re" + n
+    }
+    Clear | Reverse | Sort => {
+      let e = self.elem_of(self.arg_ty(mf, args[0]))
+      let d = self.desc(e)
+      var f = "jig_list_sort"
+      if intr.op == Op.Clear {
+        f = "jig_list_clear"
+      } else if intr.op == Op.Reverse {
+        f = "jig_list_reverse"
+      } else {
+        f = match self.kind(e) {
+          Int(k, _) => match k {
+            I64 => "jig_list_sort_i64"
+            I32 => "jig_list_sort_i32"
+            U8 => "jig_list_sort_u8"
+            U32 => "jig_list_sort_u32"
+            U64 => "jig_list_sort_u64"
+          }
+          Bool => "jig_list_sort_u8"
+          Char => "jig_list_sort_u32"
+          _ => "jig_list_sort"
+        }
+      }
+      cx.out += "    " + f + "(" + a[0] + ", " + d + ");\n"
+      return unit_v
+    }
+    Extend => {
+      let e = self.elem_of(self.arg_ty(mf, args[0]))
+      let d = self.desc(e)
+      cx.out += "    jig_list_extend(" + a[0] + ", " + a[1] + ", " + d + ");\n"
+      return unit_v
+    }
+    Swap => {
+      let e = self.elem_of(self.arg_ty(mf, args[0]))
+      let ec = self.cty(e)
+      let d = self.desc(e)
+      let check = "\n      if ((uint64_t)si >= (uint64_t)sn || (uint64_t)sj >= (uint64_t)sn) jig_swap_oob(si, sj, sn, " +
+        loc +
+        ");"
+      let unique = match args[0] {
+        MutRef(p) => p.proj.is_empty() && cx.unique.contains(p.local)
+        _ => false
+      }
+      let cow = if unique {
+        ""
+      } else {
+        "if ((*lp)->rc != 1) jig_list_make_unique(lp, " + d + "); "
+      }
+      cx.out += "    { jig_list **lp = " +
+        a[0] +
+        "; int64_t si = " +
+        a[1] +
+        ", sj = " +
+        a[2] +
+        ", sn = jig_list_len(*lp); (void)sn;" +
+        check +
+        "\n      if (si != sj) { " +
+        cow +
+        ec +
+        " *sp = (" +
+        ec +
+        " *)(*lp)->data; " +
+        ec +
+        " st = sp[si]; sp[si] = sp[sj]; sp[sj] = st; } }\n"
+      return unit_v
+    }
+    Truncate => {
+      let e = self.elem_of(self.arg_ty(mf, args[0]))
+      let d = self.desc(e)
+      cx.out += "    jig_list_truncate(" + a[0] + ", " + a[1] + ", " + d + ", " + loc + ");\n"
+      return unit_v
+    }
+    SortBy => {
+      let e = self.elem_of(self.arg_ty(mf, args[0]))
+      let d = self.desc(e)
+      let thunk = self.sortby_thunk(e)
+      cx.out += "    { jig_fn cmpf = " +
+        a[1] +
+        "; jig_list_sort_by(" +
+        a[0] +
+        ", " +
+        d +
+        ", " +
+        thunk +
+        ", &cmpf); }\n"
+      return unit_v
+    }
+    MapLen | SetLen => {
+      return "jig_map_len(" + a[0] + ")"
+    }
+    MapIsEmpty | SetIsEmpty => {
+      return "(jig_map_len(" + a[0] + ") == 0)"
+    }
+    MapGet | MapContains | MapInsert | MapRemove | Keys | Values | Entries => {
+      let mt = self.arg_ty(mf, args[0])
+      var kt = self.lw.s.tys.unit_ty
+      var vt = self.lw.s.tys.unit_ty
+      match self.kind(mt) {
+        Map(k, v) => {
+          kt = k
+          vt = v
+        }
+        _ => {}
+      }
+      let kc = self.cty(kt)
+      let vc = self.cty(vt)
+      let dk = self.desc(kt)
+      let dv = self.desc(vt)
+      match intr.op {
+        MapGet => {
+          cx.out += "    " +
+            kc +
+            " mk" +
+            n +
+            " = " +
+            a[1] +
+            "; " +
+            vc +
+            " mv" +
+            n +
+            "; bool mf" +
+            n +
+            " = jig_map_get(" +
+            a[0] +
+            ", &mk" +
+            n +
+            ", &mv" +
+            n +
+            ", " +
+            dk +
+            ", " +
+            dv +
+            ");\n"
+          return self.opt_of(ret, "mf" + n, "mv" + n)
+        }
+        MapContains => {
+          cx.out += "    " + kc + " mk" + n + " = " + a[1] + ";\n"
+          return "jig_map_contains(" + a[0] + ", &mk" + n + ", " + dk + ")"
+        }
+        MapInsert => {
+          let k = self.owned_arg(mf, &mut cx, args[1], a[1], span)
+          let v = self.owned_arg(mf, &mut cx, args[2], a[2], span)
+          cx.out += "    { " +
+            kc +
+            " k = " +
+            k +
+            "; " +
+            vc +
+            " v = " +
+            v +
+            "; jig_map_insert(" +
+            a[0] +
+            ", &k, &v, " +
+            dk +
+            ", " +
+            dv +
+            "); }\n"
+          return unit_v
+        }
+        MapRemove => {
+          cx.out += "    " +
+            kc +
+            " mk" +
+            n +
+            " = " +
+            a[1] +
+            "; " +
+            vc +
+            " mv" +
+            n +
+            "; bool mf" +
+            n +
+            " = jig_map_remove(" +
+            a[0] +
+            ", &mk" +
+            n +
+            ", &mv" +
+            n +
+            ", " +
+            dk +
+            ", " +
+            dv +
+            ");\n"
+          return self.opt_of(ret, "mf" + n, "mv" + n)
+        }
+        Keys => {
+          return "jig_map_keys(" + a[0] + ", " + dk + ")"
+        }
+        Values => {
+          return "jig_map_values(" + a[0] + ", " + dv + ")"
+        }
+        _ => {
+          // entries: a list of (K, V) tuples
+          let tup = self.lw.s.tys.tuple([kt, vt])
+          let tc = self.cty(tup)
+          let dt = self.desc(tup)
+          let rk = self.needs_rc(kt)
+          let rv = self.needs_rc(vt)
+          let gk = if rk { self.glue_name(kt, g_retain()) } else { "" }
+          let gv = if rv { self.glue_name(vt, g_retain()) } else { "" }
+          let ik = if rk { " " + gk + "(&x.f0);" } else { "" }
+          let iv = if rv { " " + gv + "(&x.f1);" } else { "" }
+          cx.out += "    jig_list *en" +
+            n +
+            " = NULL; { jig_map *m = " +
+            a[0] +
+            "; for (int64_t i = 0; i < jig_map_len(m); i++) { " +
+            tc +
+            " x = {*(" +
+            kc +
+            " *)jig_map_key_at(m, i, " +
+            dk +
+            "), *(" +
+            vc +
+            " *)jig_map_val_at(m, i, " +
+            dv +
+            ")};" +
+            ik +
+            iv +
+            " jig_list_push(&en" +
+            n +
+            ", &x, " +
+            dt +
+            "); } }\n"
+          return "en" + n
+        }
+      }
+    }
+    SetInsert | SetRemove | SetContains | Items => {
+      let st = self.arg_ty(mf, args[0])
+      let kt = self.elem_of(st)
+      let kc = self.cty(kt)
+      let dk = self.desc(kt)
+      let du = self.desc(self.lw.s.tys.unit_ty)
+      match intr.op {
+        SetInsert => {
+          let k = self.owned_arg(mf, &mut cx, args[1], a[1], span)
+          cx.out += "    { " +
+            kc +
+            " k = " +
+            k +
+            "; jig_unit u = 0; jig_map_insert(" +
+            a[0] +
+            ", &k, &u, " +
+            dk +
+            ", " +
+            du +
+            "); }\n"
+          return unit_v
+        }
+        SetRemove => {
+          cx.out += "    " + kc + " sk" + n + " = " + a[1] + "; jig_unit su" + n + ";\n"
+          return "jig_map_remove(" + a[0] + ", &sk" + n + ", &su" + n + ", " + dk + ", " + du + ")"
+        }
+        SetContains => {
+          cx.out += "    " + kc + " sk" + n + " = " + a[1] + ";\n"
+          return "jig_map_contains(" + a[0] + ", &sk" + n + ", " + dk + ")"
+        }
+        _ => {
+          return "jig_map_keys(" + a[0] + ", " + dk + ")"
+        }
+      }
+    }
+    Print => {
+      return "({ jig_print(" + a[0] + ", false, false); (jig_unit)0; })"
+    }
+    Println => {
+      return "({ jig_print(" + a[0] + ", true, false); (jig_unit)0; })"
+    }
+    Eprintln => {
+      return "({ jig_print(" + a[0] + ", true, true); (jig_unit)0; })"
+    }
+    ReadLine => {
+      cx.out += "    bool rk" + n + "; jig_str *rl" + n + " = jig_read_line(&rk" + n + ");\n"
+      return self.opt_of(ret, "rk" + n, "rl" + n)
+    }
+    ReadAll => {
+      return "jig_read_all()"
+    }
+    FsRead | FsWrite => {
+      let c = if intr.op == Op.FsRead {
+        "jig_fs_read(" + a[0] + ", &fk" + n + ")"
+      } else {
+        "jig_fs_write(" + a[0] + ", " + a[1] + ", &fk" + n + ")"
+      }
+      cx.out += "    bool fk" + n + "; jig_str *fr" + n + " = " + c + ";\n"
+      let ok_val = if intr.op == Op.FsRead { "fr" + n } else { "(jig_unit)0" }
+      return self.result_of(ret, "fk" + n, ok_val, "fr" + n)
+    }
+    FsExists => {
+      return "jig_fs_exists(" + a[0] + ")"
+    }
+    FsList => {
+      cx.out += "    bool lk" +
+        n +
+        "; jig_str *le" +
+        n +
+        " = NULL; jig_list *lr" +
+        n +
+        " = jig_fs_list(" +
+        a[0] +
+        ", &lk" +
+        n +
+        ", &le" +
+        n +
+        ");\n"
+      return self.result_of(ret, "lk" + n, "lr" + n, "le" + n)
+    }
+    Args => {
+      return "jig_args()"
+    }
+    EnvVar => {
+      cx.out += "    bool ek" +
+        n +
+        "; jig_str *ev" +
+        n +
+        " = jig_env_var(" +
+        a[0] +
+        ", &ek" +
+        n +
+        ");\n"
+      return self.opt_of(ret, "ek" + n, "ev" + n)
+    }
+    Exit => {
+      cx.out += "    jig_exit((int)" + a[0] + ");\n"
+      return "((" + self.cty(ret) + "){0})"
+    }
+    Sleep => {
+      return "jig_sleep_ms(" + a[0] + ", " + loc + ")"
+    }
+    NetRequest => {
+      cx.out += "    bool nk" +
+        n +
+        "; jig_str *nr" +
+        n +
+        " = jig_net_request(" +
+        a[0] +
+        ", " +
+        a[1] +
+        ", &nk" +
+        n +
+        ");\n"
+      return self.result_of(ret, "nk" + n, "nr" + n, "nr" + n)
+    }
+    NetServe => {
+      let st = intr.tys[0]
+      let sc = self.cty(st)
+      let th = self.serve_thunk(st)
+      let state = self.owned_arg(mf, &mut cx, args[1], a[1], span)
+      let rel = self.release_stmt(st, "sv" + n)
+      cx.out += "    " +
+        sc +
+        " sv" +
+        n +
+        " = " +
+        state +
+        "; jig_fn hf" +
+        n +
+        " = " +
+        a[2] +
+        ";\n    bool sk" +
+        n +
+        "; jig_str *se" +
+        n +
+        " = jig_net_serve(" +
+        a[0] +
+        ", &sv" +
+        n +
+        ", &hf" +
+        n +
+        ", " +
+        th +
+        ", " +
+        a[3] +
+        ", &sk" +
+        n +
+        ", " +
+        loc +
+        ");\n    if (!sk" +
+        n +
+        ") { " +
+        rel +
+        " }\n"
+      return self.result_of(ret, "sk" + n, "sv" + n, "se" + n)
+    }
+    SimStdout | SimStderr | SimSetStdin | SimSetArgs | SimSetEnv | SimSetFile | SimFile | SimRemoveFile | SimSetTime | SimAdvance | SimSeed | SimReply | SimRequests | SimConnect | SimAnswers => {
+      // E0607 keeps the simulation out of programs; nothing compiled can reach it.
+      let c = self.cty(ret)
+      cx.out += "    jig_panic(\"std/sim only works in tests\", " + loc + ");\n"
+      return "((" + c + "){0})"
+    }
+    NowMs => {
+      return "jig_now_ms()"
+    }
+    NowNs => {
+      return "jig_now_ns()"
+    }
+    RandInt => {
+      return "jig_rand_int(" + a[0] + ", " + a[1] + ", " + loc + ")"
+    }
+    RandFloat => {
+      return "jig_rand_float()"
+    }
+    Sin => {
+      return "sin(" + a[0] + ")"
+    }
+    Cos => {
+      return "cos(" + a[0] + ")"
+    }
+    Tan => {
+      return "tan(" + a[0] + ")"
+    }
+    Atan2 => {
+      return "atan2(" + a[0] + ", " + a[1] + ")"
+    }
+    Exp => {
+      return "exp(" + a[0] + ")"
+    }
+    Ln => {
+      return "log(" + a[0] + ")"
+    }
+    Log10 => {
+      return "log10(" + a[0] + ")"
+    }
+    Pow => {
+      return "pow(" + a[0] + ", " + a[1] + ")"
+    }
+  }
+}
+
+/// Calls a task's function value: `*out = f()`, or `*out = f(*in)` with an argument
+/// (`arg` is -1 for none).
+fn Cg.task_thunk(&mut self, ret: Int, arg: Int) -> Str {
+  let rc = self.cty(ret)
+  let name = if arg < 0 {
+    "task_" + self.type_id(ret).str()
+  } else {
+    "task_" + self.type_id(arg).str() + "_" + self.type_id(ret).str()
+  }
+  if !self.task_thunks.contains((ret, arg)) {
+    self.task_thunks.insert((ret, arg))
+    self.glue_decls += "JIG_FN void " + name + "(jig_fn *f, const void *in, void *out);\n"
+    var c = "((" + rc + " (*)(jig_env *))f->code)(f->env)"
+    if arg >= 0 {
+      let ac = self.cty(arg)
+      c = "((" + rc + " (*)(jig_env *, " + ac + "))f->code)(f->env, *(" + ac + " const *)in)"
+    }
+    self.glue += "JIG_FN void " +
+      name +
+      "(jig_fn *f, const void *in, void *out) {\n    (void)in;\n    *(" +
+      rc +
+      " *)out = " +
+      c +
+      ";\n}\n"
+  }
+  return name
+}
+
+/// Runs a `net.serve` handler on the state in place: releases the old state, stores the new
+/// one and returns the reply.
+fn Cg.serve_thunk(&mut self, st: Int) -> Str {
+  let name = "serve_" + self.type_id(st).str()
+  if !self.serve_thunks.contains(st) {
+    self.serve_thunks.insert(st)
+    let sc = self.cty(st)
+    let tup = self.lw.s.tys.tuple([st, self.lw.s.tys.str])
+    let tc = self.cty(tup)
+    let rel = self.release_stmt(st, "*(s)")
+    self.glue_decls += "JIG_FN jig_str *" + name + "(jig_fn *f, void *state, jig_str *req);\n"
+    self.glue += "JIG_FN jig_str *" +
+      name +
+      "(jig_fn *f, void *state, jig_str *req) {\n    " +
+      sc +
+      " *s = state;\n    " +
+      tc +
+      " r = ((" +
+      tc +
+      " (*)(jig_env *, " +
+      sc +
+      ", jig_str *))f->code)(f->env, *s, req);\n    " +
+      rel +
+      "\n    *s = r.f0;\n    return r.f1;\n}\n"
+  }
+  return name
+}
+
+fn Cg.sortby_thunk(&mut self, elem: Int) -> Str {
+  let ec = self.cty(elem)
+  let name = "sortby_" + self.type_id(elem).str()
+  if !self.sortby_thunks.contains(elem) {
+    self.sortby_thunks.insert(elem)
+    self.glue_decls += "JIG_FN bool " + name + "(jig_fn *f, const void *a, const void *b);\n"
+    self.glue += "JIG_FN bool " +
+      name +
+      "(jig_fn *f, const void *a, const void *b) {\n    return ((bool (*)(jig_env *, " +
+      ec +
+      ", " +
+      ec +
+      "))f->code)(f->env, *(" +
+      ec +
+      " const *)a, *(" +
+      ec +
+      " const *)b);\n}\n"
+  }
+  return name
+}

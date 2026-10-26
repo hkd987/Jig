@@ -406,6 +406,7 @@ fn Sema.check_field(&mut self, e: Int, base: Int, name: syntax.Name, expected: O
               }
               let ret = self.tys.subst(fd.ret, inst)
               self.set_res(e, Res.Fn(f))
+              self.set_inst(e, inst)
               self.add_ref(f)
               return self.tys.func(ptys, ret, fd.eff)
             }
@@ -611,6 +612,7 @@ fn Sema.construct_variant(
     None => {}
   }
   self.set_res(callee, Res.Variant(adt, v))
+  self.set_inst(callee, ta)
   self.note_variant_built(adt, v)
   let fields = self.variant_field_tys(adt, v)
   let vname = self.defs.adts[adt].variants[v].name
@@ -1020,6 +1022,7 @@ fn Sema.call_fn(
 ) -> Int {
   let span = self.expr_span(e)
   let inst = self.instantiate(f, recv, explicit, span)
+  self.set_inst(callee, inst)
   self.add_ref(f)
   let fd = self.defs.fns[f]
   let display = self.fn_display_name(f)

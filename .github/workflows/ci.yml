@@ -41,6 +41,17 @@ jobs:
       - name: Agent benchmark tasks (reference solutions in Jig, Rust and TypeScript)
         run: python3 bench/agents/run.py ./target/debug/jig --reference
 
+  bootstrap:
+    # D6: the checked-in C builds jigc with nothing but a C compiler, and jigc reproduces it.
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: bootstrap/jigc.c is a fixed point (${{ matrix.cc }})
+        run: CC=${{ matrix.cc }} sh bootstrap/update.sh --check
+
   memcheck:
     runs-on: ubuntu-latest
     steps:
