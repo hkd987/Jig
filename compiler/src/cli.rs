@@ -15,6 +15,7 @@ commands:
   build [--release] [-o out]  compile main to a native executable (C; LLVM via clang for release)
   trace [fn <name> | scenario <name> | uncovered] [--json]  which scenarios exercise which code
   fmt [--check]           format .jig files in place
+  get                     download the modules jig.mod requires, recording their commits in jig.sum
   explain <code>          explain a diagnostic code
   search <signature>      find functions by type, e.g. 'List<T> -> Option<T>'
   reference               print the language reference
@@ -424,6 +425,24 @@ pub fn main() -> i32 {
         Some("trace") => cmd_trace(rest),
         Some("test") => cmd_test(rest),
         Some("fmt") => cmd_fmt(rest),
+        Some("get") => {
+            let o = parse_opts(rest);
+            let start = std::fs::canonicalize(&o.path).unwrap_or(o.path.clone());
+            let Some(root) = crate::sema::load::find_project_root(&Sources::Disk, &start) else {
+                eprintln!("error: no jig.mod in {} or above", o.path.display());
+                return 2;
+            };
+            match crate::modules::get(&root) {
+                Ok(log) => {
+                    print!("{log}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    1
+                }
+            }
+        }
         Some("mcp") => crate::tools::mcp::serve(),
         Some("hook") => crate::tools::hooks::main(rest),
         // Internal: dumps compared against the self-hosted compiler.

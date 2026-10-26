@@ -183,7 +183,7 @@ pub fn check_bodies_on(prog: &mut Program, threads: usize) {
     }
     // Unused imports.
     for (pi, pkg) in pkgs.iter_enumerated() {
-        if pkg.is_std {
+        if pkg.is_std || pkg.external {
             continue;
         }
         for (fi, imports) in pkg.imports.iter().enumerate() {

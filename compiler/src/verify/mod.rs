@@ -178,6 +178,7 @@ fn targets(prog: &Program, filter: Option<&str>, std: bool) -> Vec<FnId> {
         .iter_enumerated()
         .filter(|(f, fd)| {
             prog.pkgs[fd.pkg].is_std == std
+                && !prog.pkgs[fd.pkg].external
                 && !in_test_file(prog, fd.span)
                 && fd.has_body
                 && fd.iface.is_none()

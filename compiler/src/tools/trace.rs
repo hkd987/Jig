@@ -47,7 +47,10 @@ fn reachable(prog: &Program, starts: impl IntoIterator<Item = FnId>) -> FxHashSe
 }
 
 pub fn trace(prog: &Program) -> Trace {
-    let user = |f: &FnId| !prog.pkgs[prog.defs.fns[*f].pkg].is_std;
+    let user = |f: &FnId| {
+        let p = &prog.pkgs[prog.defs.fns[*f].pkg];
+        !p.is_std && !p.external
+    };
     let mut scenarios = Vec::new();
     for sc in &prog.scenarios {
         let mut starts: Vec<FnId> = sc.steps.iter().map(|s| s.f).collect();

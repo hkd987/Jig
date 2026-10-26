@@ -88,6 +88,10 @@ struct Loader<'a> {
     edges: Vec<Vec<(PkgId, Span)>>,
     diags: Diags,
     project_root: Option<PathBuf>,
+    /// Required modules (`jig.mod`), and the module each package belongs to (`None`: the
+    /// project itself or the standard library).
+    modules: Vec<crate::modules::Resolved>,
+    pkg_module: Vec<Option<usize>>,
 }
 
 /// Load the package in `dir` and everything it imports. Packages are parsed in waves: every
@@ -109,7 +113,26 @@ pub fn load_program(sources: &Sources, dir: &Path) -> Program {
         edges: Vec::new(),
         diags: Diags::default(),
         project_root: project_root.clone(),
+        modules: Vec::new(),
+        pkg_module: Vec::new(),
     };
+    let mut links = Vec::new();
+    if let Some(r) = &project_root {
+        if let Some(text) = sources.read(&r.join("jig.mod")) {
+            let m = crate::modules::parse(&text);
+            for (line, e) in m.errors {
+                ld.diags.push(Diagnostic::error(codes::E0211, Span::DUMMY, format!("jig.mod line {line}: {e}")));
+            }
+            links = m.links;
+            if matches!(sources, Sources::Disk) && !m.requires.is_empty() {
+                let (mods, errors) = crate::modules::resolve(r);
+                for e in errors {
+                    ld.diags.push(Diagnostic::error(codes::E0211, Span::DUMMY, e));
+                }
+                ld.modules = mods;
+            }
+        }
+    }
     let prelude = ld.add_embedded(PRELUDE_PATH, "prelude.jig", PRELUDE_SOURCE);
     let root_path = match &project_root {
         Some(r) => {
@@ -123,7 +146,7 @@ pub fn load_program(sources: &Sources, dir: &Path) -> Program {
         }
         None => "main".to_string(),
     };
-    let root = ld.add_dir_package(&root_path, &dir, None);
+    let root = ld.add_dir_package(&root_path, &dir, None, None);
     loop {
         let wave = std::mem::take(&mut ld.queue);
         if wave.is_empty() {
@@ -135,8 +158,6 @@ pub fn load_program(sources: &Sources, dir: &Path) -> Program {
         }
     }
     ld.report_cycles(&[Some(prelude), root]);
-    let links =
-        project_root.as_ref().map(|r| read_links(sources, &r.join("jig.mod"), &mut ld.diags)).unwrap_or_default();
     let root = root.unwrap_or(prelude);
     let n = ld.pkgs.len();
     let mut tys = TyCtx::new();
@@ -162,31 +183,6 @@ pub fn load_program(sources: &Sources, dir: &Path) -> Program {
     }
 }
 
-/// The `link NAME` lines of `jig.mod`: C libraries for `ffi` functions.
-fn read_links(sources: &Sources, path: &Path, diags: &mut Diags) -> Vec<String> {
-    let Some(text) = sources.read(path) else { return Vec::new() };
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let mut words = line.split_whitespace();
-        if words.next() != Some("link") {
-            continue;
-        }
-        match (words.next(), words.next()) {
-            (Some(name), None)
-                if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') =>
-            {
-                out.push(name.to_string())
-            }
-            _ => diags.push(Diagnostic::error(
-                codes::E0203,
-                Span::DUMMY,
-                format!("`{}` in {}: write `link NAME` for the C library `libNAME`", line.trim(), path.display()),
-            )),
-        }
-    }
-    out
-}
-
 /// Parse one package's files into its AST.
 fn parse_package(sm: &SourceMap, ast: &mut Ast, files: &[FileId]) -> Vec<Diagnostic> {
     let mut interner = LocalInterner::default();
@@ -199,7 +195,7 @@ fn parse_package(sm: &SourceMap, ast: &mut Ast, files: &[FileId]) -> Vec<Diagnos
 }
 
 impl Loader<'_> {
-    fn new_package(&mut self, path: &str, dir: Option<PathBuf>, is_std: bool) -> PkgId {
+    fn new_package(&mut self, path: &str, dir: Option<PathBuf>, is_std: bool, module: Option<usize>) -> PkgId {
         let name = path.rsplit('/').next().unwrap_or(path).trim_start_matches('<').trim_end_matches('>');
         let pkg = Package {
             path: Symbol::intern(path),
@@ -207,6 +203,7 @@ impl Loader<'_> {
             dir,
             ast: Ast::default(),
             is_std,
+            external: module.is_some(),
             feature_files: Vec::new(),
             scope: FxHashMap::default(),
             imports: Vec::new(),
@@ -215,18 +212,25 @@ impl Loader<'_> {
         let id = self.pkgs.push(pkg);
         self.by_path.insert(Symbol::intern(path), id);
         self.edges.push(Vec::new());
+        self.pkg_module.push(module);
         id
     }
 
     fn add_embedded(&mut self, path: &str, file: &str, src: &str) -> PkgId {
-        let pid = self.new_package(path, None, true);
+        let pid = self.new_package(path, None, true, None);
         let fid = self.sm.add(PathBuf::from(format!("<std>/{file}")), src.to_string());
         self.queue.push((pid, vec![fid]));
         pid
     }
 
     /// Register the package in `dir` and read its files; it is parsed with the next wave.
-    fn add_dir_package(&mut self, path: &str, dir: &Path, import_span: Option<Span>) -> Option<PkgId> {
+    fn add_dir_package(
+        &mut self,
+        path: &str,
+        dir: &Path,
+        import_span: Option<Span>,
+        module: Option<usize>,
+    ) -> Option<PkgId> {
         let files = match self.sources.list_dir(dir) {
             Some(f) => f,
             None => {
@@ -249,7 +253,7 @@ impl Loader<'_> {
             ));
             return None;
         }
-        let pid = self.new_package(path, Some(dir.to_path_buf()), false);
+        let pid = self.new_package(path, Some(dir.to_path_buf()), false, module);
         let mut sources = Vec::new();
         for f in &files {
             let ext = f.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -343,7 +347,8 @@ impl Loader<'_> {
             for item_id in items {
                 let item = self.pkgs[pid].ast.items[item_id];
                 let ItemKind::Import { path, path_span } = item.kind else { continue };
-                let Some(target) = self.import(path.as_str(), path_span) else { continue };
+                let from = self.pkg_module[pid.0 as usize];
+                let Some(target) = self.import(path.as_str(), path_span, from) else { continue };
                 if target == pid {
                     self.diags.push(Diagnostic::error(codes::E0204, path_span, "a package cannot import itself"));
                     continue;
@@ -408,12 +413,13 @@ impl Loader<'_> {
         }
     }
 
-    fn import(&mut self, path: &str, span: Span) -> Option<PkgId> {
-        let key = Symbol::intern(path);
-        if let Some(&p) = self.by_path.get(&key) {
-            return Some(p);
-        }
+    /// The package an import names, loading it if needed. `from` is the module of the
+    /// importing package: its own packages are named relative to its root.
+    fn import(&mut self, path: &str, span: Span, from: Option<usize>) -> Option<PkgId> {
         if let Some(&(p, file, src)) = STD_SOURCES.iter().find(|(p, _, _)| *p == path) {
+            if let Some(&id) = self.by_path.get(&Symbol::intern(p)) {
+                return Some(id);
+            }
             return Some(self.add_embedded(p, file, src));
         }
         if path.starts_with("std/") || path == "std" {
@@ -424,22 +430,45 @@ impl Loader<'_> {
             );
             return None;
         }
-        let Some(root) = self.project_root.clone() else {
-            self.diags.push(
-                Diagnostic::error(
-                    codes::E0210,
-                    span,
-                    format!("cannot import `{path}`: no project root (a directory with `jig.mod`)"),
-                )
-                .note("create `jig.mod` containing `module <name>` in the project's top directory"),
-            );
-            return None;
-        };
         if path.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..") {
             self.diags.push(Diagnostic::error(codes::E0203, span, format!("invalid import path `{path}`")));
             return None;
         }
-        let dir = root.join(path);
-        self.add_dir_package(path, &dir, Some(span))
+        // A required module's package, a package of the importing module, or the project's.
+        let (full, dir, module) = if let Some((mi, rest)) = crate::modules::module_of(&self.modules, path) {
+            let m = &self.modules[mi];
+            if m.missing {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0211,
+                        span,
+                        format!("module `{}` {} is not downloaded", m.path, m.version),
+                    )
+                    .note("run `jig get` to download the modules `jig.mod` requires"),
+                );
+                return None;
+            }
+            (path.to_string(), m.dir.join(rest), Some(mi))
+        } else if let Some(mi) = from {
+            let m = &self.modules[mi];
+            (format!("{}/{path}", m.path), m.dir.join(path), Some(mi))
+        } else {
+            let Some(root) = self.project_root.clone() else {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0210,
+                        span,
+                        format!("cannot import `{path}`: no project root (a directory with `jig.mod`)"),
+                    )
+                    .note("create `jig.mod` containing `module <name>` in the project's top directory"),
+                );
+                return None;
+            };
+            (path.to_string(), root.join(path), None)
+        };
+        if let Some(&p) = self.by_path.get(&Symbol::intern(&full)) {
+            return Some(p);
+        }
+        self.add_dir_package(&full, &dir, Some(span), module)
     }
 }

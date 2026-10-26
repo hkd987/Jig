@@ -41,7 +41,7 @@ pub fn run_tests(prog: &mut Program, filter: Option<&str>) -> Vec<TestResult> {
         .defs
         .tests
         .iter_enumerated()
-        .filter(|(_, t)| !prog.pkgs[t.pkg].is_std)
+        .filter(|(_, t)| !prog.pkgs[t.pkg].is_std && !prog.pkgs[t.pkg].external)
         .filter(|(_, t)| filter.is_none_or(|f| t.label.as_str().contains(f)))
         .map(|(i, _)| i)
         .collect();

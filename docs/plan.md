@@ -174,7 +174,9 @@ core passes.
       lines in `jig.mod`; native code and the interpreter both call C (`examples/normal`
       uses libm's `erf`). The self-hosted compiler will reach the SMT solver and LLVM this
       way once it needs pointers to their handles.
-- [ ] Package manager.
+- [x] Package manager (D27): `require`/`replace` in `jig.mod`, `jig get` downloading git
+      tags into a module cache with commits pinned in `jig.sum`, highest-version selection,
+      imports through modules (`compiler/tests/modules.rs`).
 - [ ] Self-hosted compiler: lexer, parser, checker, MIR, backends, ported pass by pass;
       arena-and-index design carries over directly. `selfhost/` (`jigc`): the lexer and
       parser are done, every contract proved, and their token and AST dumps match the

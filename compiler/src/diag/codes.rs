@@ -100,6 +100,11 @@ codes! {
     E0210 = 210, "no-project-root", "package import outside a project",
         "Importing a non-standard package needs a project root: a directory containing a \
          `jig.mod` file with the line `module <name>`.";
+    E0211 = 211, "module", "module not available",
+        "`jig.mod` requires a module that is not in the module cache (run `jig get` to download \
+         every required version), or a line of `jig.mod` is not understood. Lines are \
+         `module NAME`, `link NAME`, `require PATH VERSION` (a git tag of `https://PATH`) and \
+         `replace PATH => DIR`.";
 
     // ---- E03: types ----
     E0301 = 301, "type-mismatch", "mismatched types",

@@ -34,6 +34,9 @@ pub struct Package {
     pub dir: Option<PathBuf>,
     pub ast: Ast,
     pub is_std: bool,
+    /// From a required module (`jig.mod`): checked, but not held to the project's dead-code
+    /// and lint rules, and not tested or proved with it.
+    pub external: bool,
     pub feature_files: Vec<FileId>,
     /// Package-level names.
     pub scope: FxHashMap<Symbol, Def>,

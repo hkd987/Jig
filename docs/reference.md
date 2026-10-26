@@ -9,9 +9,13 @@ no GC, no warnings: every lint is an error.
 
 - A package is a directory of `.jig` files. All files in it share one namespace, but
   imports are per file: each file imports the packages it names.
-- A project root holds a `jig.mod` file with one line: `module <name>`. Import paths are
+- A project root holds a `jig.mod` file starting `module <name>`. Import paths are
   relative to the root: `import "geom"` loads `<root>/geom/`. `std/...` is the standard
   library. Without `jig.mod`, a package can import only `std`.
+- Other projects are modules: `require github.com/x/y v1.2.0` in `jig.mod` (a git tag of
+  `https://github.com/x/y`), then `import "github.com/x/y/pkg"`. `jig get` downloads them and
+  records their commits in `jig.sum`; check and build never fetch. The highest version any
+  module requires is used. `replace github.com/x/y => ../y` uses a local directory.
 - The imported package is named by its last path segment: `geom.area(p)`.
 - Import cycles and unused imports are errors.
 - Items are private to their package unless marked `pub`. Struct fields are private unless

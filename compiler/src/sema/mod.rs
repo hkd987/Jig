@@ -54,6 +54,20 @@ pub fn analyze(sources: &Sources, dir: &Path) -> Program {
     analyze_on(sources, dir, None)
 }
 
+/// A required module's code answers to its own project's lints, not to this one's.
+fn drop_lints_in_modules(prog: &mut Program) {
+    let external: crate::util::FxHashSet<crate::diag::FileId> =
+        prog.pkgs.iter().filter(|p| p.external).flat_map(|p| p.ast.files.iter().map(|f| f.file)).collect();
+    if external.is_empty() {
+        return;
+    }
+    let sm = &prog.sm;
+    prog.diags.list.retain(|d| {
+        let lint = (500..700).contains(&d.code.0);
+        !lint || sm.file_of(d.span.lo).is_none_or(|f| !external.contains(&f))
+    });
+}
+
 /// `analyze`, checking bodies on `threads` threads (`None`: decide from the program's size and
 /// `JIG_THREADS`). The result does not depend on it.
 pub fn analyze_on(sources: &Sources, dir: &Path, threads: Option<usize>) -> Program {
@@ -70,6 +84,7 @@ pub fn analyze_on(sources: &Sources, dir: &Path, threads: Option<usize>) -> Prog
     prog.scenarios = crate::feature::bind::bind(&mut prog);
     let t3 = std::time::Instant::now();
     quiet_after_syntax_errors(&mut prog);
+    drop_lints_in_modules(&mut prog);
     prog.diags.sort();
     dead::check_dead_code(&mut prog);
     let t4 = std::time::Instant::now();

@@ -14,7 +14,7 @@ pub fn check_dead_code(prog: &mut Program) {
         return;
     }
     let Program { defs, bodies, test_bodies, pkgs, tables, tys, diags, root, sm, scenarios, .. } = prog;
-    let is_user = |pkg: PkgId| !pkgs[pkg].is_std;
+    let is_user = |pkg: PkgId| !pkgs[pkg].is_std && !pkgs[pkg].external;
     let library = defs.main.is_none();
 
     let mut roots: Vec<FnId> = Vec::new();
@@ -330,7 +330,7 @@ fn cross_package_types(
     let mut adts = FxHashSet::default();
     let mut ifaces = FxHashSet::default();
     for (pid, pkg) in pkgs.iter_enumerated() {
-        if pkg.is_std {
+        if pkg.is_std || pkg.external {
             continue;
         }
         let mut seen: FxHashSet<Ty> = FxHashSet::default();

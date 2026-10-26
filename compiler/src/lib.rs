@@ -6,6 +6,7 @@ pub mod diag;
 pub mod feature;
 pub mod fmt;
 pub mod mir;
+pub mod modules;
 pub mod proptest;
 pub mod runner;
 pub mod sema;
