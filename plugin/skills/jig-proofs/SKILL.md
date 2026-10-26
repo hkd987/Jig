@@ -8,7 +8,10 @@ description: Make Jig contracts and runtime-safety obligations prove with `jig p
 `jig prove` (the `prove` tool) checks every non-generic function on its own: it knows the
 function's body, its `requires`, the types of its parameters (including refinements and
 struct invariants), and the **contracts** of the functions it calls, never their bodies.
-A proved obligation costs nothing at run time; an unproven one keeps its runtime check.
+A proved obligation costs nothing at run time; an unproven one keeps its runtime check, in
+every build. A `requires` proved at every call site is not checked in the callee either
+(unless the function is also passed around as a value), so stating ranges as `requires`
+and proving the callers is how hot functions lose their overflow and bounds checks.
 
 Contract obligations (`requires` at call sites, `ensures`, invariants, refinements,
 `assert`) are what you must get through. Safety obligations (overflow, bounds, division,

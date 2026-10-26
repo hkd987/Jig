@@ -138,7 +138,10 @@ optimizing release backend.
 - [ ] Structured concurrency under the `spawn` effect.
 - [x] LLVM release backend: one C unit through `clang -O2` (D20), internal linkage so unused
       code is dropped; release hello world is 60 KB.
-- [ ] Benchmark suite vs. Rust (same programs in both languages), tracked in CI.
+- [x] Benchmark suite vs. Rust (same programs in both languages), tracked in CI:
+      `bench/vsrust`, eight programs.
+- [x] **Gate passed:** geometric mean 0.97x Rust by wall clock and 0.89x by instructions
+      (limit 1.10); CI fails above the limit; `docs/gates/phase3.md`.
 - [ ] Plugin: spec-first commands (draft scenarios → draft contracts → implement), trace tools.
 
 ## Phase 4 · Self-hosting and alpha
