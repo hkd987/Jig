@@ -134,6 +134,8 @@ pub enum Op {
     /// `x.str()` with derived formatting (type in `tys[0]`).
     Show,
     StrConcat,
+    /// `a + b + c + ...`: one string from all the arguments, allocated once.
+    StrConcatN,
     /// `s[i]`: the byte at `i`.
     StrByte,
     /// `s[a..b]`

@@ -98,6 +98,16 @@ jobs:
           cat vsrust.txt >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit $status
+      - name: Self-hosted compiler vs bootstrap (instruction counts)
+        run: |
+          status=0
+          python3 /tmp/bench/selfhost.py /tmp/jig-head --instructions --gate --out selfhost.json > selfhost.txt 2>&1 || status=$?
+          cat selfhost.txt
+          echo '### jigc vs jig (instructions)' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat selfhost.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit $status
       - name: Compare (fails on a >2% regression without sign-off)
         run: |
           if [ -f base.json ]; then

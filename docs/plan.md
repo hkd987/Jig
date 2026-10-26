@@ -167,6 +167,9 @@ core passes.
       parser are done, every contract proved, and their token and AST dumps match the
       bootstrap compiler's on every repository file and 400 mutations, most of them with
       syntax errors, so error recovery is compared too (`compiler/tests/selfhost.rs`).
+      `bench/selfhost.py` compares speed on the same corpus (CI gate: instruction ratio at
+      most 1.10); jigc is at 0.99 (lexer) and 0.74 (parser) of the bootstrap compiler's
+      instructions, 1.08–1.10 of its wall time.
 - [ ] Agent benchmark vs. Rust and TypeScript; opt-in trace corpus.
 - [ ] Bootstrap path decided (see open questions).
 

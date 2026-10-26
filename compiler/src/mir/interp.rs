@@ -1059,6 +1059,13 @@ impl<'l, 'a> Interp<'l, 'a> {
                 out.push_str(&t);
                 ret(Value::Str(Rc::from(out.as_str())))
             }
+            StrConcatN => {
+                let mut out = String::new();
+                for x in &a {
+                    out.push_str(&self.str_arg(x, span)?);
+                }
+                ret(Value::Str(Rc::from(out.as_str())))
+            }
             StrByte => {
                 let s = self.str_arg(&a[0], span)?;
                 let i = int(&a[1]);

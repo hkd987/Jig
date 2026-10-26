@@ -9,7 +9,7 @@ use crate::mir::intrinsics::Op;
 use crate::mir::lower::Lowerer;
 use crate::mir::*;
 use crate::sema::defs::{AdtKind, Mode, TyKey};
-use crate::sema::ty::{IntTy, Ty, TyKind};
+use crate::sema::ty::{AdtId, IntTy, Ty, TyKind};
 use crate::syntax::ast::{BinOp, UnOp};
 use crate::util::{sym, FxHashMap, FxHashSet, Symbol};
 use std::fmt::Write;
@@ -35,6 +35,8 @@ pub struct CGen<'l, 'a> {
     loc_parts: Vec<String>,
     loc_flushed: usize,
     str_lits: FxHashMap<Symbol, String>,
+    /// Variant names of enums without payloads, for `.str()` without formatting.
+    enum_names: FxHashMap<AdtId, String>,
     locs: FxHashMap<crate::diag::Span, String>,
     queued: FxHashSet<MFnId>,
     queue: Vec<MFnId>,
@@ -98,6 +100,7 @@ pub fn generate(lw: &mut Lowerer) -> Result<CProgram, String> {
         loc_parts: Vec::new(),
         loc_flushed: 0,
         str_lits: FxHashMap::default(),
+        enum_names: FxHashMap::default(),
         locs: FxHashMap::default(),
         queued: FxHashSet::default(),
         queue: Vec::new(),
@@ -802,6 +805,29 @@ impl<'l, 'a> CGen<'l, 'a> {
     }
 
     // ---------- statics ----------
+
+    /// A static table of an enum's variant names, if it is an enum whose variants have no
+    /// fields and that has no `str` method of its own.
+    fn enum_name_table(&mut self, ad: AdtId) -> Option<String> {
+        if let Some(n) = self.enum_names.get(&ad) {
+            return Some(n.clone());
+        }
+        if self.lw.defs.method(TyKey::Adt(ad), sym::STR_METHOD).is_some() {
+            return None;
+        }
+        let AdtKind::Enum { variants } = &self.lw.defs.adts[ad].kind else { return None };
+        if variants.is_empty() || variants.iter().any(|v| !v.fields.is_empty()) {
+            return None;
+        }
+        let names: Vec<Symbol> = variants.iter().map(|v| v.name).collect();
+        let strs: Vec<String> = names.into_iter().map(|n| self.str_lit(n)).collect();
+        let id = self.fresh();
+        let _ = writeln!(self.data_decls, "extern jig_str *const EN{id}[];");
+        let _ = writeln!(self.data_defs, "JIG_LINK jig_str *const EN{id}[] = {{{}}};", strs.join(", "));
+        let n = format!("EN{id}");
+        self.enum_names.insert(ad, n.clone());
+        Some(n)
+    }
 
     fn str_lit(&mut self, s: Symbol) -> String {
         if s.as_str().is_empty() {
@@ -1873,10 +1899,23 @@ impl<'l, 'a> CGen<'l, 'a> {
                 format!("(bok{n} ? {some} : {none})")
             }
             StrConcat => format!("jig_str_concat({}, {})", a[0], a[1]),
+            StrConcatN => format!("jig_str_concat_n({}, (const jig_str *[]){{{}}})", a.len(), a.join(", ")),
             StrByte => format!("jig_str_byte({}, {}, {loc})", a[0], a[1]),
             StrSlice => format!("jig_str_slice({}, {}, {}, {loc})", a[0], a[1], a[2]),
             Show => {
                 let t = intr.tys[0];
+                // Numbers print straight into a new string; an enum without payloads is its
+                // variant's name, a static string.
+                match self.lw.tys.kind(t).clone() {
+                    TyKind::Int(IntTy::U64, _) => return format!("jig_u64_str({})", a[0]),
+                    TyKind::Int(..) => return format!("jig_i64_str((int64_t){})", a[0]),
+                    TyKind::Adt(ad, _) => {
+                        if let Some(table) = self.enum_name_table(ad) {
+                            return format!("{table}[({}).tag]", a[0]);
+                        }
+                    }
+                    _ => {}
+                }
                 let ct = self.cty(t);
                 let g = self.glue_name(t, G_SHOW);
                 let _ = writeln!(cx.out, "    jig_buf sb{n} = {{0}}; {{ {ct} x = {}; {g}(&sb{n}, &x, false); }}", a[0]);

@@ -6,7 +6,7 @@ use crate::diag::{SourceMap, Span};
 use crate::sema::defs::*;
 use crate::sema::ty::*;
 use crate::syntax::ast::{self, Ast, ExprId, ExprKind, ForHead, ItemKind, PatId, PatKind, StmtId, StmtKind};
-use crate::util::{sym, FxHashMap, IndexVec, List, Symbol};
+use crate::util::{sym, FxHashMap, FxHashSet, IndexVec, List, Symbol};
 
 pub struct Lowerer<'a> {
     pub defs: &'a Defs,
@@ -1323,16 +1323,25 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                 self.cur = join;
             }
             Add if matches!(self.lw.tys.kind(t), TyKind::Str) => {
-                let a = self.expr(lhs);
-                let b = self.expr(rhs);
-                self.assign(
-                    dest,
-                    Rvalue::Call(
-                        Callee::Intrinsic(Intrinsic::new(Op::StrConcat, vec![])),
-                        vec![Arg::Value(a), Arg::Value(b)],
-                        t,
-                    ),
-                );
+                // A chain `a + b + c + ...` builds one string, allocated once, instead of a
+                // new string per `+`.
+                let mut parts = vec![rhs];
+                let mut e = lhs;
+                loop {
+                    match self.ast.exprs[e].kind {
+                        ExprKind::Binary { op: ast::BinOp::Add, lhs, rhs } => {
+                            parts.push(rhs);
+                            e = lhs;
+                        }
+                        ExprKind::Paren(x) => e = x,
+                        _ => break,
+                    }
+                }
+                parts.push(e);
+                parts.reverse();
+                let ops: Vec<Arg> = parts.iter().map(|&x| Arg::Value(self.expr(x))).collect();
+                let op = if ops.len() == 2 { Op::StrConcat } else { Op::StrConcatN };
+                self.assign(dest, Rvalue::Call(Callee::Intrinsic(Intrinsic::new(op, vec![])), ops, t));
             }
             _ => {
                 let lt = self.ty(lhs);
@@ -1427,7 +1436,11 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
         self.expr_into(scrut, Place::local(s));
         let join = self.new_block();
         let arms: Vec<ast::Arm> = self.ast.arms.get(arms).to_vec();
-        for arm in arms {
+        let lits = self.string_arms(st, &arms);
+        if lits > 0 {
+            self.match_strings(s, &arms[..lits], &dest, join);
+        }
+        for arm in &arms[lits..] {
             let next = self.new_block();
             self.push_scope();
             self.test_pat(arm.pat, Place::local(s), next);
@@ -1437,28 +1450,113 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                 self.terminate(Terminator::If(gop, body_bb, next));
                 self.cur = body_bb;
             }
-            self.cur_span = arm.span;
-            match &dest {
-                Some(d) => {
-                    let d = d.clone();
-                    match self.ast.exprs[arm.body].kind {
-                        ExprKind::Block(_) => self.block_into(arm.body, Some(d)),
-                        _ => self.expr_into(arm.body, d),
-                    }
-                }
-                None => match self.ast.exprs[arm.body].kind {
-                    ExprKind::Block(_) => self.block_into(arm.body, None),
-                    _ => {
-                        let _ = self.expr(arm.body);
-                    }
-                },
-            }
-            self.pop_scope();
-            self.goto(join);
+            self.arm_body(arm, &dest, join);
             self.cur = next;
         }
         self.terminate(Terminator::Unreachable);
         self.cur = join;
+    }
+
+    fn arm_body(&mut self, arm: &ast::Arm, dest: &Option<Place>, join: BlockId) {
+        self.cur_span = arm.span;
+        match dest {
+            Some(d) => {
+                let d = d.clone();
+                match self.ast.exprs[arm.body].kind {
+                    ExprKind::Block(_) => self.block_into(arm.body, Some(d)),
+                    _ => self.expr_into(arm.body, d),
+                }
+            }
+            None => match self.ast.exprs[arm.body].kind {
+                ExprKind::Block(_) => self.block_into(arm.body, None),
+                _ => {
+                    let _ = self.expr(arm.body);
+                }
+            },
+        }
+        self.pop_scope();
+        self.goto(join);
+    }
+
+    /// The string literals a pattern matches, if it is only literals (`"a"`, `"a" | "b"`).
+    fn string_lits(&self, pat: PatId, out: &mut Vec<Symbol>) -> bool {
+        match self.ast.pats[pat].kind {
+            PatKind::Lit(e) => match self.ast.exprs[e].kind {
+                ExprKind::Str(s) => {
+                    out.push(s);
+                    true
+                }
+                _ => false,
+            },
+            PatKind::Or(list) => self.ast.pat_lists.get(list).iter().all(|&p| self.string_lits(p, out)),
+            _ => false,
+        }
+    }
+
+    /// How many leading arms of a match on a string are guard-free string literals (zero if
+    /// fewer than four: a switch on the length only pays off for longer chains).
+    fn string_arms(&self, st: Ty, arms: &[ast::Arm]) -> usize {
+        if !matches!(self.lw.tys.kind(st), TyKind::Str) {
+            return 0;
+        }
+        let mut lits = Vec::new();
+        let n = arms.iter().take_while(|a| a.guard.is_none() && self.string_lits(a.pat, &mut lits)).count();
+        if lits.len() < 4 {
+            0
+        } else {
+            n
+        }
+    }
+
+    /// The literal arms of a string match: switch on the length, then compare with the
+    /// literals of that length in arm order, so the first matching arm still wins. No match
+    /// continues in the current block with the remaining arms.
+    fn match_strings(&mut self, s: Local, arms: &[ast::Arm], dest: &Option<Place>, join: BlockId) {
+        let mut by_len: Vec<(i128, Vec<(Symbol, usize)>)> = Vec::new();
+        for (i, arm) in arms.iter().enumerate() {
+            let mut lits = Vec::new();
+            self.string_lits(arm.pat, &mut lits);
+            for l in lits {
+                let n = l.as_str().len() as i128;
+                match by_len.iter_mut().find(|(k, _)| *k == n) {
+                    Some((_, v)) => v.push((l, i)),
+                    None => by_len.push((n, vec![(l, i)])),
+                }
+            }
+        }
+        let bodies: Vec<BlockId> = arms.iter().map(|_| self.new_block()).collect();
+        let rest = self.new_block();
+        let len = self.temp(self.lw.tys.int);
+        let str_ty = self.locals[s].ty;
+        self.assign(
+            Place::local(len),
+            Rvalue::Call(
+                Callee::Intrinsic(Intrinsic::new(Op::StrLen, vec![])),
+                vec![Arg::Value(Operand::local(s))],
+                self.lw.tys.int,
+            ),
+        );
+        let buckets: Vec<BlockId> = by_len.iter().map(|_| self.new_block()).collect();
+        let cases: Vec<(i128, BlockId)> = by_len.iter().zip(&buckets).map(|((n, _), &b)| (*n, b)).collect();
+        self.terminate(Terminator::Switch(Operand::local(len), cases, rest));
+        for ((_, lits), &b) in by_len.iter().zip(&buckets) {
+            self.cur = b;
+            for &(l, i) in lits {
+                let c = self.temp(self.lw.tys.bool);
+                let lit = Operand::Const(Const::Str(l));
+                self.assign(Place::local(c), Rvalue::Binary(ast::BinOp::Eq, Operand::local(s), lit, str_ty));
+                let next = self.new_block();
+                self.terminate(Terminator::If(Operand::local(c), bodies[i], next));
+                self.cur = next;
+            }
+            self.goto(rest);
+        }
+        for (arm, &b) in arms.iter().zip(&bodies) {
+            self.cur = b;
+            self.push_scope();
+            self.arm_body(arm, dest, join);
+        }
+        self.cur = rest;
     }
 
     /// Test `pat` against `place`; continue in the current block on success, jump to `fail`
@@ -1613,6 +1711,8 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
         self.assign(Place::local(l), Rvalue::Use(Operand::Copy(value)));
         let owner = ad.name;
         self.in_package(pkg, |b| b.check_with_names(pred, &[(sym::SELF_LOWER, l)], CheckKind::Refinement, owner));
+        // A copy left alive would make the next mutation of the value copy it.
+        self.push(Stmt::Drop(l));
     }
 
     /// Run `f` with the AST and tables of another package (for predicates written there).
@@ -1647,20 +1747,36 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
         if !has {
             return;
         }
-        // Predicates refer to fields by name: bind each to a fresh local, then check.
+        let mut preds: Vec<ExprId> = fdecls.iter().filter_map(|f| f.refine).collect();
+        preds.extend(invs);
+        // Predicates refer to fields by name: bind each field they mention to a fresh local,
+        // then check.
+        let mut used: FxHashSet<Symbol> = FxHashSet::default();
+        let mut stack = preds.clone();
+        while let Some(x) = stack.pop() {
+            if let ExprKind::Name(n) = self.ast.exprs[x].kind {
+                used.insert(n);
+            }
+            visit_children(self.ast, x, &mut stack);
+        }
         let mut bound: Vec<(Symbol, Local)> = Vec::new();
         for (i, f) in fdecls.iter().enumerate() {
+            if !used.contains(&f.name.sym) {
+                continue;
+            }
             let ft = self.lw.defs.adts[adt].fields()[i].ty;
             let l = self.temp(ft);
             self.assign(Place::local(l), Rvalue::Use(Operand::Copy(value.field(i as u32))));
             bound.push((f.name.sym, l));
         }
-        let mut preds: Vec<ExprId> = fdecls.iter().filter_map(|f| f.refine).collect();
-        preds.extend(invs);
         // The checker resolved these names to its own locals; map by name.
         for pred in preds {
             let owner = self.lw.defs.adts[adt].name;
             self.check_with_names(pred, &bound, CheckKind::Invariant, owner);
+        }
+        // Copies left alive would make the next mutation of the struct copy its fields.
+        for (_, l) in bound {
+            self.push(Stmt::Drop(l));
         }
     }
 

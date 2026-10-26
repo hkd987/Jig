@@ -1,0 +1,106 @@
+import "std/io"
+
+// Fast paths in native code: string matches switch on the length, `a + b + c` allocates
+// once, numbers and payload-free enums print without a buffer, and struct invariant checks
+// leave no copies behind. Each must behave exactly like the plain path.
+
+enum Color {
+  Red
+  Green
+  Blue
+}
+
+enum Mood {
+  Calm
+  Loud
+}
+
+fn Mood.str(self) -> Str {
+  return match self {
+    Calm => "calm"
+    Loud => "LOUD"
+  }
+}
+
+enum Shape {
+  Dot
+  Circle(r: Int)
+}
+
+struct Log {
+  lines: List<Str>
+  count: Int
+  invariant count == lines.len()
+}
+
+fn Log.add(&mut self, s: Str) {
+  self.lines.push(s)
+  self.count += 1
+}
+
+fn word(s: Str) -> Int {
+  return match s {
+    "" => 0
+    "a" | "an" | "the" => 1
+    "fn" => 2
+    "if" => 3
+    "élan" => 4
+    "match" => 5
+    _ if s.len() > 6 => 6
+    other => other.len() + 100
+  }
+}
+
+fn tag(s: Str) -> Str {
+  return match s {
+    "x" => "short"
+    "yy" => "pair"
+    "zzz" => "three"
+    "wwww" => "four"
+    _ => "other"
+  }
+}
+
+fn main() effects {io} {
+  for w in [
+    "",
+    "a",
+    "an",
+    "the",
+    "fn",
+    "if",
+    "élan",
+    "match",
+    "matches",
+    "longer words",
+    "ab",
+    "xyz",
+    "fm",
+  ] {
+    io.println(w + "=" + word(w).str())
+  }
+  io.println(tag("x") + tag("yy") + tag("zzz") + tag("wwww") + tag("v") + tag("yyy"))
+  var x = "mid"
+  x = "<" + x + ">" + x
+  io.println(x)
+  let e = ""
+  io.println("[" + e + e + "]" + e)
+  io.println((1 as I32).str() + " " + (-7).str() + " " + (255 as U8).str() + " " + (0).str())
+  let big: U64 = 18446744073709551615
+  io.println(big.str() + " " + (-9223372036854775807 - 1).str() + " " + (9223372036854775807).str())
+  io.println(
+    Color.Red.str() +
+      Color.Green.str() +
+      Color.Blue.str() +
+      " " +
+      Mood.Loud.str() +
+      " " +
+      Mood.Calm.str(),
+  )
+  io.println(Shape.Dot.str() + " " + Shape.Circle(3).str() + " " + [Color.Blue, Color.Red].str())
+  var log = Log { lines: [], count: 0 }
+  for i in 0..2000 {
+    log.add("line " + i.str())
+  }
+  io.println(log.count.str() + " " + log.lines[1999])
+}

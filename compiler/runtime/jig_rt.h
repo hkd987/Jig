@@ -165,6 +165,7 @@ static inline void jig_str_append(jig_str **sp, const jig_str *t) {
     }
     jig_str_append_slow(sp, t);
 }
+jig_str *jig_str_concat_n(int64_t n, const jig_str *const *xs);
 jig_str *jig_str_split_next(const jig_str *s, const jig_str *sep, int64_t *pos);
 bool jig_str_eq(const jig_str *a, const jig_str *b);
 int jig_str_cmp(const jig_str *a, const jig_str *b);
@@ -306,6 +307,8 @@ int64_t jig_ipow(int64_t base, int64_t exp, const char *loc);
 /* ---- formatting ---- */
 void jig_show_i64(jig_buf *b, int64_t v);
 void jig_show_u64(jig_buf *b, uint64_t v);
+jig_str *jig_i64_str(int64_t v);
+jig_str *jig_u64_str(uint64_t v);
 void jig_show_f64(jig_buf *b, double v);
 void jig_show_bool(jig_buf *b, bool v);
 void jig_show_char(jig_buf *b, uint32_t c, bool nested);

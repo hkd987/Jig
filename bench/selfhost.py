@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Self-hosted compiler vs. the bootstrap compiler on the same corpus (PRD: equal or faster).
+
+usage: selfhost.py JIG [--runs N] [--instructions] [--gate] [--limit X] [--out FILE]
+
+Builds `jigc` (selfhost/) with `jig build --release`, then runs each pass both compilers
+share, `jigc tokens|ast FILE` against `jig debug tokens|ast FILE`, on one file made of every
+`.jig` file in the repository, repeated. The two outputs must be identical. Times are the
+best of N runs; `--instructions` counts instructions with Valgrind instead (deterministic,
+for CI). The score is the geometric mean of the jigc/jig ratios; `--gate` fails above the
+limit.
+"""
+import argparse
+import json
+import math
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+# The repository: the current directory when run from a checkout (CI copies bench/ away).
+ROOT = os.getcwd() if os.path.isdir("selfhost") else os.path.dirname(HERE)
+PASSES = ["tokens", "ast"]
+
+
+def corpus(path, copies):
+    files = []
+    for d in ["compiler", "examples", "selfhost", "bench"]:
+        for dirpath, dirnames, names in os.walk(os.path.join(ROOT, d)):
+            dirnames[:] = sorted(n for n in dirnames if not n.startswith(".") and n != "target")
+            files += [os.path.join(dirpath, n) for n in sorted(names) if n.endswith(".jig")]
+    text = "".join(open(f, encoding="utf-8").read() for f in sorted(files))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text * copies)
+    return text.count("\n") * copies
+
+
+def output(cmd):
+    r = subprocess.run(cmd, capture_output=True)
+    if r.returncode != 0:
+        sys.exit(f"{' '.join(cmd)} failed:\n{r.stderr.decode()}")
+    return r.stdout
+
+
+def instructions(cmd):
+    r = subprocess.run(
+        ["valgrind", "--tool=cachegrind", "--cache-sim=no", "--cachegrind-out-file=/dev/null"] + cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    m = re.search(r"I\s+refs:\s+([\d,]+)", r.stderr)
+    if not m:
+        sys.exit(f"valgrind failed on {cmd[0]}:\n{r.stderr}")
+    return int(m.group(1).replace(",", ""))
+
+
+def best_time(cmd, runs):
+    best = float("inf")
+    for _ in range(runs):
+        t = time.perf_counter()
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, check=True)
+        best = min(best, time.perf_counter() - t)
+    return best
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("jig")
+    ap.add_argument("--runs", type=int, default=5)
+    ap.add_argument("--instructions", action="store_true")
+    ap.add_argument("--gate", action="store_true")
+    ap.add_argument("--limit", type=float, default=1.10)
+    ap.add_argument("--out")
+    a = ap.parse_args()
+    jig = os.path.abspath(a.jig)
+    work = tempfile.mkdtemp(prefix="jig-selfhost-")
+    jigc = os.path.join(work, "jigc")
+    output([jig, "build", os.path.join(ROOT, "selfhost"), "--release", "-o", jigc])
+    src = os.path.join(work, "corpus.jig")
+    lines = corpus(src, 2 if a.instructions else 8)
+    print(f"corpus: {lines} lines")
+    rows = []
+    for p in PASSES:
+        mine, theirs = [jigc, p, src], [jig, "debug", p, src]
+        if output(mine) != output(theirs):
+            sys.exit(f"{p}: jigc and jig disagree")
+        if a.instructions:
+            j, r = instructions(mine), instructions(theirs)
+        else:
+            j, r = best_time(mine, a.runs), best_time(theirs, a.runs)
+        rows.append({"name": p, "jigc": j, "jig": r, "ratio": j / r})
+        unit = "instr" if a.instructions else "s"
+        print(f"{p:8} jigc {j:>14.4f} {unit}  jig {r:>14.4f} {unit}  ratio {j / r:5.2f}", flush=True)
+    geo = math.exp(sum(math.log(r["ratio"]) for r in rows) / len(rows))
+    print(f"geometric mean ratio {geo:.3f} (limit {a.limit})")
+    if a.out:
+        with open(a.out, "w") as f:
+            json.dump({"metric": "instructions" if a.instructions else "seconds", "lines": lines, "passes": rows, "geomean": geo, "limit": a.limit}, f, indent=2)
+    if a.gate and geo > a.limit:
+        sys.exit(f"gate failed: jigc is {geo:.2f}x the bootstrap compiler (limit {a.limit})")
+
+
+if __name__ == "__main__":
+    main()

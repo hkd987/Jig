@@ -182,6 +182,12 @@ void jig_free(void *p) {
     pool_free[c] = b;
 }
 
+/* The bytes jig_alloc(n) really provides: its size class, less the header. */
+static size_t jig_alloc_size(size_t n) {
+    size_t need = n + 8;
+    return need <= POOL_MAX ? ((need + 15) & ~(size_t)15) - 8 : n;
+}
+
 static void *jig_realloc(void *p, size_t n) {
     if (!p) return jig_alloc(n);
     uint64_t *h = (uint64_t *)p - 1;
@@ -219,6 +225,8 @@ void jig_free_obj(void *p, size_t n) {
     (void)n;
     free(p);
 }
+
+static size_t jig_alloc_size(size_t n) { return n; }
 
 static void *jig_realloc(void *p, size_t n) {
     void *q = realloc(p, n ? n : 1);
@@ -408,12 +416,20 @@ jig_str *jig_buf_to_str(jig_buf *b) {
 
 /* ---------- strings ---------- */
 
+/* A string block with room for at least `len` bytes; its capacity is all the block holds, so
+ * appends can use the allocator's rounding. */
+static jig_str *jig_str_block(int64_t len) {
+    size_t sz = jig_alloc_size(sizeof(jig_str) + (size_t)len + 1);
+    jig_str *s = jig_alloc(sz);
+    s->rc = 1;
+    s->cap = (int64_t)(sz - sizeof(jig_str) - 1);
+    return s;
+}
+
 jig_str *jig_str_new(const char *data, int64_t len) {
     if (len == 0) return NULL;
-    jig_str *s = jig_alloc(sizeof(jig_str) + (size_t)len + 1);
-    s->rc = 1;
+    jig_str *s = jig_str_block(len);
     s->len = len;
-    s->cap = len;
     memcpy(s->data, data, (size_t)len);
     s->data[len] = 0;
     return s;
@@ -422,13 +438,27 @@ jig_str *jig_str_new(const char *data, int64_t len) {
 jig_str *jig_str_concat(const jig_str *a, const jig_str *b) {
     int64_t la = jig_str_len(a), lb = jig_str_len(b);
     if (la + lb == 0) return NULL;
-    jig_str *s = jig_alloc(sizeof(jig_str) + (size_t)(la + lb) + 1);
-    s->rc = 1;
+    jig_str *s = jig_str_block(la + lb);
     s->len = la + lb;
-    s->cap = la + lb;
     memcpy(s->data, jig_str_data(a), (size_t)la);
     memcpy(s->data + la, jig_str_data(b), (size_t)lb);
     s->data[la + lb] = 0;
+    return s;
+}
+
+jig_str *jig_str_concat_n(int64_t n, const jig_str *const *xs) {
+    int64_t len = 0;
+    for (int64_t i = 0; i < n; i++) len += jig_str_len(xs[i]);
+    if (len == 0) return NULL;
+    jig_str *s = jig_str_block(len);
+    s->len = len;
+    char *d = s->data;
+    for (int64_t i = 0; i < n; i++) {
+        int64_t k = jig_str_len(xs[i]);
+        jig_copy_small(d, jig_str_data(xs[i]), (size_t)k);
+        d += k;
+    }
+    *d = 0;
     return s;
 }
 
@@ -441,8 +471,9 @@ void jig_str_append_slow(jig_str **sp, const jig_str *t) {
         if (ls + lt > s->cap) {
             /* Grow geometrically so a loop of appends is linear. */
             int64_t cap = s->cap * 2 > ls + lt ? s->cap * 2 : ls + lt;
-            s = jig_realloc(s, sizeof(jig_str) + (size_t)cap + 1);
-            s->cap = cap;
+            size_t sz = jig_alloc_size(sizeof(jig_str) + (size_t)cap + 1);
+            s = jig_realloc(s, sz);
+            s->cap = (int64_t)(sz - sizeof(jig_str) - 1);
         }
         memcpy(s->data + ls, t->data, (size_t)lt);
         s->len = ls + lt;
@@ -451,11 +482,8 @@ void jig_str_append_slow(jig_str **sp, const jig_str *t) {
         return;
     }
     /* Shared, static, empty or appending to itself: a fresh string with room to grow. */
-    int64_t cap = ls + lt < 16 ? 16 : ls + lt;
-    jig_str *n = jig_alloc(sizeof(jig_str) + (size_t)cap + 1);
-    n->rc = 1;
+    jig_str *n = jig_str_block(ls + lt < 16 ? 16 : ls + lt);
     n->len = ls + lt;
-    n->cap = cap;
     memcpy(n->data, jig_str_data(s), (size_t)ls);
     memcpy(n->data + ls, jig_str_data(t), (size_t)lt);
     n->data[n->len] = 0;
@@ -1424,16 +1452,58 @@ int64_t jig_ipow(int64_t base, int64_t exp, const char *loc) {
 
 /* ---------- formatting ---------- */
 
+/* Decimal digits of `v`, written backwards so they end at `end`; returns their count. */
+static int jig_digits(char *end, uint64_t v) {
+    static const char pairs[201] =
+        "00010203040506070809101112131415161718192021222324252627282930313233343536373839"
+        "40414243444546474849505152535455565758596061626364656667686970717273747576777879"
+        "8081828384858687888990919293949596979899";
+    char *p = end;
+    while (v >= 100) {
+        unsigned r = (unsigned)(v % 100);
+        v /= 100;
+        p -= 2;
+        memcpy(p, pairs + 2 * r, 2);
+    }
+    if (v >= 10) {
+        p -= 2;
+        memcpy(p, pairs + 2 * v, 2);
+    } else {
+        *--p = (char)('0' + v);
+    }
+    return (int)(end - p);
+}
+
+/* `v` in decimal, ending at `end` (at least 20 bytes after the start); returns its length. */
+static int jig_fmt_i64(char *end, int64_t v) {
+    uint64_t u = v < 0 ? (uint64_t)0 - (uint64_t)v : (uint64_t)v;
+    int n = jig_digits(end, u);
+    if (v < 0) end[-++n] = '-';
+    return n;
+}
+
 void jig_show_i64(jig_buf *b, int64_t v) {
-    char tmp[32];
-    int n = snprintf(tmp, sizeof tmp, "%lld", (long long)v);
-    jig_buf_push(b, tmp, n);
+    char tmp[24];
+    int n = jig_fmt_i64(tmp + sizeof tmp, v);
+    jig_buf_push(b, tmp + sizeof tmp - n, n);
 }
 
 void jig_show_u64(jig_buf *b, uint64_t v) {
-    char tmp[32];
-    int n = snprintf(tmp, sizeof tmp, "%llu", (unsigned long long)v);
-    jig_buf_push(b, tmp, n);
+    char tmp[24];
+    int n = jig_digits(tmp + sizeof tmp, v);
+    jig_buf_push(b, tmp + sizeof tmp - n, n);
+}
+
+jig_str *jig_i64_str(int64_t v) {
+    char tmp[24];
+    int n = jig_fmt_i64(tmp + sizeof tmp, v);
+    return jig_str_new(tmp + sizeof tmp - n, n);
+}
+
+jig_str *jig_u64_str(uint64_t v) {
+    char tmp[24];
+    int n = jig_digits(tmp + sizeof tmp, v);
+    return jig_str_new(tmp + sizeof tmp - n, n);
 }
 
 /* Shortest round-trip formatting, matching Rust's `{:?}` for f64. */

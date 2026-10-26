@@ -3027,6 +3027,14 @@ impl<'a> Gen<'a> {
                 let (a, b) = (args.first()?.value().clone(), args.get(1)?.value().clone());
                 Some(self.concat(&a, &b))
             }
+            StrConcatN => {
+                let mut acc = args.first()?.value().clone();
+                for x in &args[1..] {
+                    let b = x.value().clone();
+                    acc = self.concat(&acc, &b);
+                }
+                Some(acc)
+            }
             ListNew => {
                 let elem = self.elem_ty(t);
                 let elems = self.fresh_at(elem, "e", 1);
