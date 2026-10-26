@@ -223,12 +223,23 @@ fn cmd_prove(args: &[String]) -> i32 {
     let verbose = o.rest.iter().any(|a| a == "--verbose");
     let no_cache = o.rest.iter().any(|a| a == "--no-cache");
     let filter = o.rest.iter().find(|a| !a.starts_with("--")).cloned();
-    let Some(mut prog) = analyze_or_report(&o) else { return 1 };
+    let std = o.rest.iter().any(|a| a == "--std");
+    let mut prog = if std {
+        let prog = crate::sema::analyze_std();
+        if prog.diags.has_errors() {
+            print_diags(&prog, &prog.diags.list, o.json);
+            return 1;
+        }
+        prog
+    } else {
+        let Some(prog) = analyze_or_report(&o) else { return 1 };
+        prog
+    };
     let opts = crate::verify::ProveOpts {
         cache_dir: if no_cache { None } else { Some(proof_cache_dir(&o)) },
         timeout_ms: 2000,
         filter,
-        std: o.rest.iter().any(|a| a == "--std"),
+        std,
     };
     let report = match crate::verify::prove(&mut prog, &opts) {
         Ok(r) => r,

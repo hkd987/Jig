@@ -1,0 +1,231 @@
+// List helpers, written in Jig. Every contract here is proved (`jig prove --std`).
+
+/// The sum of the numbers (traps on overflow).
+pub fn sum(xs: List<Int>) -> Int
+  ensures !xs.is_empty() || result == 0
+{
+  var total = 0
+  for i in 0..xs.len() invariant i > 0 || total == 0 {
+    total += xs[i]
+  }
+  return total
+}
+
+/// The largest element, or `None` for an empty list.
+pub fn max_of<T: Ord>(xs: List<T>) -> Option<T>
+  ensures result.is_some() == !xs.is_empty()
+{
+  if xs.is_empty() {
+    return None
+  }
+  var best = xs[0]
+  for i in 1..xs.len() {
+    if xs[i] > best {
+      best = xs[i]
+    }
+  }
+  return Some(best)
+}
+
+/// The smallest element, or `None` for an empty list.
+pub fn min_of<T: Ord>(xs: List<T>) -> Option<T>
+  ensures result.is_some() == !xs.is_empty()
+{
+  if xs.is_empty() {
+    return None
+  }
+  var best = xs[0]
+  for i in 1..xs.len() {
+    if xs[i] < best {
+      best = xs[i]
+    }
+  }
+  return Some(best)
+}
+
+/// A reversed copy.
+pub fn reversed<T>(xs: List<T>) -> List<T>
+  ensures result.len() == xs.len()
+{
+  var out: List<T> = []
+  for i in 0..xs.len() invariant out.len() == i {
+    out.push(xs[xs.len() - 1 - i])
+  }
+  return out
+}
+
+/// The first `n` elements (all of them if there are fewer).
+pub fn take<T>(xs: List<T>, n: Int) -> List<T>
+  requires n >= 0
+  ensures result.len() == min(n, xs.len())
+{
+  let k = min(n, xs.len())
+  var out: List<T> = []
+  for i in 0..k invariant out.len() == i {
+    out.push(xs[i])
+  }
+  return out
+}
+
+/// Everything after the first `n` elements.
+pub fn drop<T>(xs: List<T>, n: Int) -> List<T>
+  requires n >= 0
+  ensures result.len() == xs.len() - min(n, xs.len())
+{
+  let k = min(n, xs.len())
+  var out: List<T> = []
+  for i in k..xs.len() invariant out.len() == i - k {
+    out.push(xs[i])
+  }
+  return out
+}
+
+/// Pairs of elements at the same position, as many as the shorter list has.
+pub fn zip<A, B>(xs: List<A>, ys: List<B>) -> List<(A, B)>
+  ensures result.len() == min(xs.len(), ys.len())
+{
+  let n = min(xs.len(), ys.len())
+  var out: List<(A, B)> = []
+  for i in 0..n invariant out.len() == i {
+    out.push((xs[i], ys[i]))
+  }
+  return out
+}
+
+/// Each element with its index.
+pub fn enumerate<T>(xs: List<T>) -> List<(Int, T)>
+  ensures result.len() == xs.len()
+{
+  var out: List<(Int, T)> = []
+  for i in 0..xs.len() invariant out.len() == i {
+    out.push((i, xs[i]))
+  }
+  return out
+}
+
+/// The lists one after another.
+pub fn flatten<T>(xss: List<List<T>>) -> List<T>
+  ensures !xss.is_empty() || result.is_empty()
+{
+  var out: List<T> = []
+  for i in 0..xss.len() invariant i > 0 || out.is_empty() {
+    out.extend(xss[i])
+  }
+  return out
+}
+
+/// The first element `pred` accepts.
+pub fn find<T>(xs: List<T>, pred: fn(T) -> Bool) -> Option<T>
+  ensures result.is_none() || !xs.is_empty()
+{
+  for i in 0..xs.len() {
+    if pred(xs[i]) {
+      return Some(xs[i])
+    }
+  }
+  return None
+}
+
+/// The index of the first element `pred` accepts.
+pub fn position<T>(xs: List<T>, pred: fn(T) -> Bool) -> Option<Int>
+  ensures result.is_none() || (result.unwrap() >= 0 && result.unwrap() < xs.len())
+{
+  for i in 0..xs.len() {
+    if pred(xs[i]) {
+      return Some(i)
+    }
+  }
+  return None
+}
+
+/// How many elements `pred` accepts.
+pub fn count<T>(xs: List<T>, pred: fn(T) -> Bool) -> Int
+  ensures result >= 0 && result <= xs.len()
+{
+  var n = 0
+  for i in 0..xs.len() invariant n >= 0 && n <= i {
+    if pred(xs[i]) {
+      n += 1
+    }
+  }
+  return n
+}
+
+/// The elements `pred` accepts, then the rest, each in order.
+pub fn partition<T>(xs: List<T>, pred: fn(T) -> Bool) -> (List<T>, List<T>)
+  ensures result.0.len() + result.1.len() == xs.len()
+{
+  var yes: List<T> = []
+  var no: List<T> = []
+  for i in 0..xs.len() invariant yes.len() + no.len() == i {
+    if pred(xs[i]) {
+      yes.push(xs[i])
+    } else {
+      no.push(xs[i])
+    }
+  }
+  return (yes, no)
+}
+
+/// The list without consecutive repeats (`[1, 1, 2, 1]` becomes `[1, 2, 1]`).
+pub fn dedup<T: Eq>(xs: List<T>) -> List<T>
+  ensures result.len() <= xs.len()
+{
+  var out: List<T> = []
+  for i in 0..xs.len() invariant out.len() <= i {
+    if i == 0 || xs[i] != xs[i - 1] {
+      out.push(xs[i])
+    }
+  }
+  return out
+}
+
+/// The first occurrence of each distinct element, in order.
+pub fn unique<T: Hash>(xs: List<T>) -> List<T>
+  ensures result.len() <= xs.len()
+{
+  var seen: Set<T> = Set.new()
+  var out: List<T> = []
+  for i in 0..xs.len() invariant out.len() <= i {
+    if !seen.contains(xs[i]) {
+      seen.insert(xs[i])
+      out.push(xs[i])
+    }
+  }
+  return out
+}
+
+/// Consecutive pieces of `size` elements; the last may be shorter.
+pub fn chunks<T>(xs: List<T>, size: Int) -> List<List<T>>
+  requires size > 0
+  ensures !xs.is_empty() || result.is_empty()
+{
+  var out: List<List<T>> = []
+  var i = 0
+  for i < xs.len() invariant i >= 0 && i <= xs.len() && (i > 0 || out.is_empty()) {
+    let end = if size >= xs.len() - i { xs.len() } else { i + size }
+    out.push(xs[i..end])
+    i = end
+  }
+  return out
+}
+
+/// The index of `x` in a list sorted in ascending order, if it is there.
+pub fn binary_search<T: Ord>(xs: List<T>, x: T) -> Option<Int>
+  ensures result.is_none() || (result.unwrap() >= 0 && result.unwrap() < xs.len())
+{
+  var lo = 0
+  var hi = xs.len()
+  for lo < hi invariant lo >= 0 && hi <= xs.len() {
+    let mid = lo + (hi - lo) / 2
+    if xs[mid] == x {
+      return Some(mid)
+    }
+    if xs[mid] < x {
+      lo = mid + 1
+    } else {
+      hi = mid
+    }
+  }
+  return None
+}

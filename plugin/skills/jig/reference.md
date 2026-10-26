@@ -289,7 +289,7 @@ fn parse_port(s: Str) -> Result<Int, Str> {
 
 `jig prove` checks each function against its own contract and its callees' contracts, never
 their bodies, and also proves the absence of traps (overflow, division by zero, bounds,
-`unwrap`, reachable `panic`); it knows a list or string holds at most 2^62 items, so `i + 1`
+`unwrap`, reachable `panic`); it knows a list or string holds at most 2^60 items, so `i + 1`
 cannot overflow for an index `i`. The one thing read off a callee's body is what it can write:
 after `f(&mut x)` or `x.m()` with `&mut self`, fields `f` never assigns keep their values.
 Results are cached per function: changing a body re-proves only that function and, if what
@@ -420,7 +420,9 @@ its position; `Str.to_int` and `to_float` ignore surrounding spaces and accept a
 | `std/os` (`env`) | `args() -> List<Str> env(name) -> Option<Str> exit(code) -> Never` |
 | `std/time` (`clock`) | `now_ms() -> Int now_ns() -> Int sleep(ms)` |
 | `std/rand` (`rand`) | `int(lo, hi) -> Int float() -> Float` |
-| `std/math` (pure) | `PI E sin(x) cos(x) tan(x) exp(x) ln(x) log10(x) pow(x, y)` |
+| `std/math` (pure) | `PI E sin(x) cos(x) tan(x) exp(x) ln(x) log10(x) pow(x, y) gcd(a, b) clamp(x, lo, hi) sign(x) isqrt(n) pow_mod(b, e, m)` |
+| `std/lists` (pure) | `sum(xs) max_of(xs) min_of(xs) -> Option<T> reversed(xs) take(xs, n) drop(xs, n) zip(xs, ys) enumerate(xs) flatten(xss) find(xs, f) -> Option<T> position(xs, f) -> Option<Int> count(xs, f) partition(xs, f) -> (List<T>, List<T>) dedup(xs) unique(xs) chunks(xs, n) binary_search(xs, x) -> Option<Int>` |
+| `std/strings` (pure) | `split_once(s, sep) -> Option<(Str, Str)> strip_prefix(s, p) strip_suffix(s, p) -> Option<Str> trim_start(s) trim_end(s) is_blank(s) pad_left(s, width, c) pad_right(s, width, c) count(s, part) words(s) -> List<Str>` |
 | `std/net` (`net`) | `request(addr, req) -> Result<Str, Str> serve(addr, state, handle, limit) -> Result<S, Str>` with `handle: fn(S, Str) -> (S, Str)`; one request per connection, `addr` is `host:port` or `:port` |
 | `std/sim` (tests only) | `stdout() stderr() -> Str set_stdin(s) set_args(xs) set_env(k, v) set_file(path, s) file(path) -> Option<Str> remove_file(path) set_time(ms) advance(ms) seed(n) reply(addr, s) requests(addr) -> List<Str> connect(addr, req) answers(addr) -> List<Str>` |
 | `std/task` (`spawn`) | `all(jobs) -> List<T> map(items, f) -> List<U> both(f, g) -> (A, B)` |

@@ -162,11 +162,13 @@ core passes.
 
 **Gate:** the compiler compiles itself; public alpha release.
 
-- [ ] Std library completed in Jig, with > 80% proven contracts. The prelude's Jig functions
-      state contracts (22 of 25) and every obligation in them proves (`jig prove --std`,
-      enforced by `compiler/tests/prove.rs`), so builds do not check them again; the rest of
-      the library is still runtime intrinsics. Generic functions are proved with their type
-      parameters abstract.
+- [x] Std library in Jig, with > 80% proven contracts. The prelude's Jig functions and the
+      Jig packages `std/lists`, `std/strings` and the integer half of `std/math` state
+      contracts: 54 of 58 functions, 53 of which prove completely (91%); every contract
+      obligation proves (`jig prove --std`, enforced by `compiler/tests/prove.rs`), so builds
+      do not check std postconditions again. I/O, collections and formatting stay runtime
+      intrinsics. Generic functions are proved with their type parameters abstract, and the
+      prover models what string searches, slices and splits imply about lengths.
 - [ ] C interop behind the `ffi` effect (SMT solver and LLVM called through the C ABI).
 - [ ] Package manager.
 - [ ] Self-hosted compiler: lexer, parser, checker, MIR, backends, ported pass by pass;

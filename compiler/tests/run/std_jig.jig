@@ -1,0 +1,154 @@
+import "std/io"
+import "std/lists"
+import "std/math"
+import "std/strings"
+
+// The standard library's functions written in Jig: lists, strings and integer math.
+
+fn show(o: Option<Int>) -> Str {
+  return match o {
+    Some(v) => v.str()
+    None => "-"
+  }
+}
+
+fn is_even(x: Int) -> Bool {
+  return x % 2 == 0
+}
+
+fn main() effects {io} {
+  let xs = [3, 1, 4, 1, 5, 9, 2, 6]
+  let empty: List<Int> = []
+  io.println("sum " + lists.sum(xs).str() + " " + lists.sum(empty).str())
+  io.println(
+    "max " +
+      show(lists.max_of(xs)) +
+      " min " +
+      show(lists.min_of(xs)) +
+      " " +
+      show(lists.max_of(empty)),
+  )
+  io.println("reversed " + lists.reversed(xs).str())
+  io.println(
+    "take " +
+      lists.take(xs, 3).str() +
+      " " +
+      lists.take(xs, 99).len().str() +
+      " drop " +
+      lists.drop(xs, 6).str() +
+      " " +
+      lists.drop(xs, 99).str(),
+  )
+  io.println("zip " + lists.zip([1, 2, 3], ["a", "b"]).str())
+  io.println("enumerate " + lists.enumerate(["x", "y"]).str())
+  io.println("flatten " + lists.flatten([[1], [], [2, 3]]).str())
+  io.println(
+    "find " +
+      show(lists.find(xs, is_even)) +
+      " position " +
+      show(lists.position(xs, is_even)) +
+      " " +
+      show(lists.position(empty, is_even)),
+  )
+  io.println("count " + lists.count(xs, is_even).str())
+  let (evens, odds) = lists.partition(xs, is_even)
+  io.println("partition " + evens.str() + " " + odds.str())
+  io.println("dedup " + lists.dedup([1, 1, 2, 2, 2, 1]).str() + " unique " + lists.unique(xs).str())
+  io.println("chunks " + lists.chunks(xs, 3).str() + " " + lists.chunks(empty, 2).str())
+  let sorted = [1, 3, 5, 7, 9, 11]
+  io.println(
+    "binary_search " +
+      show(lists.binary_search(sorted, 7)) +
+      " " +
+      show(lists.binary_search(sorted, 4)) +
+      " " +
+      show(lists.binary_search(sorted, 1)) +
+      " " +
+      show(lists.binary_search(empty, 1)),
+  )
+
+  io.println(
+    "split_once " +
+      strings.split_once("key=value=x", "=").str() +
+      " " +
+      strings.split_once("none", "=").str(),
+  )
+  io.println(
+    "strip " +
+      strings.strip_prefix("prefix-rest", "prefix-").str() +
+      " " +
+      strings.strip_prefix("x", "y").str() +
+      " " +
+      strings.strip_suffix("file.jig", ".jig").str(),
+  )
+  io.println(
+    "trim [" +
+      strings.trim_start("  \t a b ") +
+      "] [" +
+      strings.trim_end(" a b \n ") +
+      "] [" +
+      strings.trim_end("   ") +
+      "]",
+  )
+  io.println(
+    "blank " +
+      strings.is_blank(" \t\n").str() +
+      " " +
+      strings.is_blank("").str() +
+      " " +
+      strings.is_blank(" x ").str(),
+  )
+  io.println(
+    "pad [" +
+      strings.pad_left("7", 3, '0') +
+      "] [" +
+      strings.pad_right("ab", 4, '.') +
+      "] [" +
+      strings.pad_left("long", 2, ' ') +
+      "]",
+  )
+  io.println(
+    "count " +
+      strings.count("abababa", "aba").str() +
+      " " +
+      strings.count("", "a").str() +
+      " " +
+      strings.count("é é é", "é").str(),
+  )
+  io.println(
+    "words " + strings.words("  the quick\tbrown\n\nfox  ").str() + " " + strings.words("").str(),
+  )
+
+  io.println(
+    "gcd " + math.gcd(12, 18).str() + " " + math.gcd(0, 5).str() + " " + math.gcd(0, 0).str(),
+  )
+  io.println(
+    "clamp " +
+      math.clamp(15, 0, 10).str() +
+      " " +
+      math.clamp(-3, 0, 10).str() +
+      " " +
+      math.clamp(4, 0, 10).str(),
+  )
+  io.println("sign " + math.sign(-8).str() + " " + math.sign(0).str() + " " + math.sign(3).str())
+  io.println(
+    "isqrt " +
+      math.isqrt(0).str() +
+      " " +
+      math.isqrt(15).str() +
+      " " +
+      math.isqrt(16).str() +
+      " " +
+      math.isqrt(9223372036854775807).str(),
+  )
+  io.println(
+    "pow_mod " +
+      math.pow_mod(2, 10, 1000).str() +
+      " " +
+      math.pow_mod(-3, 3, 7).str() +
+      " " +
+      math.pow_mod(5, 0, 1).str() +
+      " " +
+      math.pow_mod(123456789, 1000000, 3037000499).str(),
+  )
+}

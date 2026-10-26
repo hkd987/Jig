@@ -36,6 +36,20 @@ fn quiet_after_syntax_errors(prog: &mut defs::Program) {
     prog.diags.list.retain(|d| is_syntax(d) || sm.file_of(d.span.lo).is_none_or(|f| !quiet.contains(&f)));
 }
 
+/// The whole standard library, checked: a program that imports every standard package (for
+/// `jig prove --std`).
+pub fn analyze_std() -> Program {
+    let dir = std::path::PathBuf::from("/std");
+    let mut src: String = load::STD_SOURCES.iter().map(|(p, _, _)| format!("import \"{p}\"\n")).collect();
+    src.push_str("\nfn main() {\n}\n");
+    let mut files = crate::util::FxHashMap::default();
+    files.insert(dir.join("main.jig"), src);
+    let mut prog = analyze(&Sources::Memory(files), &dir);
+    // The imports are there to load the packages.
+    prog.diags.list.retain(|d| d.code != crate::diag::codes::E0502);
+    prog
+}
+
 pub fn analyze(sources: &Sources, dir: &Path) -> Program {
     analyze_on(sources, dir, None)
 }

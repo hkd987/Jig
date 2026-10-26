@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use vc::{Base, ObKind};
 
 /// Bump when the encoding changes, so stale cached proofs are not reused.
-const VC_VERSION: &str = "vc-3";
+const VC_VERSION: &str = "vc-5";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {

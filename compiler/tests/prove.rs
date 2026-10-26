@@ -184,17 +184,15 @@ fn std_proves_completely() {
         eprintln!("skipping: no SMT solver");
         return;
     }
-    let dir = PathBuf::from("/std-proof");
-    let mut m = jig::util::FxHashMap::default();
-    m.insert(dir.join("main.jig"), "fn main() {\n}\n".to_string());
-    let mut prog = jig::sema::analyze(&Sources::Memory(m), &dir);
-    assert!(!prog.diags.has_errors());
+    let mut prog = jig::sema::analyze_std();
+    assert!(!prog.diags.has_errors(), "{:?}", prog.diags.list.iter().map(|d| &d.message).collect::<Vec<_>>());
     let opts = ProveOpts { cache_dir: None, timeout_ms: 5000, filter: None, std: true };
     let r = prove(&mut prog, &opts).expect("prove");
     let text = render(&prog, &r, false);
-    let (cp, ct, sp, st) = r.counts();
-    assert!(ct > 20 && cp == ct && sp == st, "the standard library does not prove:\n{text}");
-    let (with, proved) = r.contract_coverage(&prog);
-    assert_eq!(with, proved, "{text}");
-    assert!(with * 10 >= r.fns.len() * 8, "fewer than 80% of std functions have contracts:\n{text}");
+    let (cp, ct, _, _) = r.counts();
+    assert!(ct > 100 && cp == ct, "the standard library's contracts do not all prove:\n{text}");
+    // The PRD's measure: functions with contracts whose every obligation proves. (A trap that
+    // can really happen, like `lists.sum` overflowing, keeps its runtime check.)
+    let (_, proved) = r.contract_coverage(&prog);
+    assert!(proved * 10 >= r.fns.len() * 8, "fewer than 80% of std functions prove completely:\n{text}");
 }

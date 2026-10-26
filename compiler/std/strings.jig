@@ -1,0 +1,139 @@
+// String helpers, written in Jig. Every contract here is proved (`jig prove --std`).
+// Lengths and positions are in bytes, as everywhere for `Str`.
+
+/// The text before and after the first `sep`.
+pub fn split_once(s: Str, sep: Str) -> Option<(Str, Str)>
+  ensures result.is_none() ||
+    result.unwrap().0.len() + result.unwrap().1.len() + sep.len() == s.len()
+{
+  return match s.find(sep) {
+    Some(i) => Some((s[0..i], s[i + sep.len()..s.len()]))
+    None => None
+  }
+}
+
+/// `s` without `prefix`, if it starts with it.
+pub fn strip_prefix(s: Str, prefix: Str) -> Option<Str>
+  ensures result.is_none() || result.unwrap().len() + prefix.len() == s.len()
+{
+  if !s.starts_with(prefix) {
+    return None
+  }
+  return Some(s[prefix.len()..s.len()])
+}
+
+/// `s` without `suffix`, if it ends with it.
+pub fn strip_suffix(s: Str, suffix: Str) -> Option<Str>
+  ensures result.is_none() || result.unwrap().len() + suffix.len() == s.len()
+{
+  if !s.ends_with(suffix) {
+    return None
+  }
+  return Some(s[0..s.len() - suffix.len()])
+}
+
+fn is_blank_byte(b: U8) -> Bool {
+  return b == 32 || b == 9 || b == 10 || b == 13
+}
+
+/// `s` without leading spaces, tabs and line breaks.
+pub fn trim_start(s: Str) -> Str
+  ensures result.len() <= s.len()
+{
+  var i = 0
+  for i < s.len() && is_blank_byte(s[i]) invariant i >= 0 && i <= s.len() {
+    i += 1
+  }
+  return s[i..s.len()]
+}
+
+/// `s` without trailing spaces, tabs and line breaks.
+pub fn trim_end(s: Str) -> Str
+  ensures result.len() <= s.len()
+{
+  var n = s.len()
+  for n > 0 && is_blank_byte(s[n - 1]) invariant n >= 0 && n <= s.len() {
+    n -= 1
+  }
+  return s[0..n]
+}
+
+/// Whether `s` is empty or only spaces, tabs and line breaks.
+pub fn is_blank(s: Str) -> Bool
+  ensures result || !s.is_empty()
+{
+  for i in 0..s.len() {
+    if !is_blank_byte(s[i]) {
+      return false
+    }
+  }
+  return true
+}
+
+/// `s` with copies of `fill` in front, until it is at least `width` bytes long.
+pub fn pad_left(s: Str, width: Int, fill: Char) -> Str
+  ensures result.len() >= s.len()
+{
+  if s.len() >= width {
+    return s
+  }
+  let need = width - s.len()
+  var pad = ""
+  let f = fill.str()
+  for pad.len() < need invariant pad.len() >= 0 {
+    pad = pad + f
+  }
+  return pad + s
+}
+
+/// `s` with copies of `fill` after it, until it is at least `width` bytes long.
+pub fn pad_right(s: Str, width: Int, fill: Char) -> Str
+  ensures result.len() >= s.len()
+{
+  var out = s
+  let f = fill.str()
+  for out.len() < width invariant out.len() >= s.len() {
+    out = out + f
+  }
+  return out
+}
+
+/// How many times `part` occurs in `s`, without overlaps.
+pub fn count(s: Str, part: Str) -> Int
+  requires !part.is_empty()
+  ensures result >= 0 && result <= s.len()
+{
+  var n = 0
+  var rest = s
+  for invariant n >= 0 && n <= s.len() - rest.len() {
+    match rest.find(part) {
+      Some(i) => {
+        n += 1
+        rest = rest[i + part.len()..rest.len()]
+      }
+      None => {
+        break
+      }
+    }
+  }
+  return n
+}
+
+/// The words of `s`: the pieces between runs of spaces, tabs and line breaks.
+pub fn words(s: Str) -> List<Str>
+  ensures forall k in 0..result.len(): !result[k].is_empty()
+{
+  var out: List<Str> = []
+  var start = 0
+  for i in 0..s.len() + 1
+    invariant start >= 0 && start <= i, forall k in 0..out.len(): !out[k].is_empty()
+  {
+    if i == s.len() || is_blank_byte(s[i]) {
+      if i > start {
+        out.push(s[start..i])
+      }
+      start = i + 1
+    }
+  }
+  return out
+}

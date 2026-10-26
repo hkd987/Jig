@@ -19,9 +19,10 @@ use crate::syntax::ast::{self, Ast, BinOp, ExprId, ExprKind, ForHead, PatId, Pat
 use crate::util::{sym, FxHashMap, FxHashSet, IndexVec, Symbol};
 
 /// The most elements a list (or bytes a string) can hold: every element takes at least a
-/// byte, and no 64-bit system gives a program more than 2^62 bytes of address space. It lets
-/// the prover show that `i + 1` cannot overflow when `i` is an index.
-const MAX_LEN: i128 = 1 << 62;
+/// byte, and no 64-bit system gives a program 2^60 bytes of address space (x86-64 and
+/// AArch64 give at most 2^56). It lets the prover show that `i + 1`, or the sum of two
+/// lengths, cannot overflow.
+const MAX_LEN: i128 = 1 << 60;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ObKind {
@@ -1735,11 +1736,7 @@ impl<'a> Gen<'a> {
         } else {
             String::new()
         };
-        if let Iter::Cond(Some(c)) = iter {
-            let cv = self.expr(fr, &mut it, c)?;
-            let ct = cv.term().unwrap_or("true").to_string();
-            self.assume(&mut it, ct);
-        }
+        // The invariants hold at the top of every iteration, before the condition runs.
         for &inv in &invs {
             if let Some(v) = self.expr(fr, &mut it, inv) {
                 if let Some(t) = v.term() {
@@ -1747,6 +1744,11 @@ impl<'a> Gen<'a> {
                     self.assume(&mut it, t);
                 }
             }
+        }
+        if let Iter::Cond(Some(c)) = iter {
+            let cv = self.expr(fr, &mut it, c)?;
+            let ct = cv.term().unwrap_or("true").to_string();
+            self.assume(&mut it, ct);
         }
         let it_base = it.pc.len();
         self.loops.push(LoopFrame { breaks: Vec::new(), conts: Vec::new() });
@@ -2282,7 +2284,6 @@ impl<'a> Gen<'a> {
     fn index(&mut self, fr: &Frame, st: &mut St, e: ExprId, base: ExprId, index: ExprId, t: Ty) -> Option<Sv> {
         let ast = self.ast(fr.pkg);
         let span = ast.exprs[e].span;
-        let bt = self.ty(fr, base);
         let b = self.expr(fr, st, base)?;
         if let ExprKind::Range { lo, hi } = ast.exprs[index].kind {
             let lo_v = match lo {
@@ -2312,10 +2313,10 @@ impl<'a> Gen<'a> {
                     Sv::Leaf(x) if x.base == Base::Str => Some(self.str_len(&x.t)),
                     _ => None,
                 };
+                // A slice that returns (a string slice also panics off a character boundary)
+                // has exactly the bytes or elements in its range.
                 if let Some(rl) = rlen {
-                    if matches!(self.kind(bt), TyKind::List(_)) {
-                        self.assume(st, format!("(= {rl} (- {hi} {lo}))"));
-                    }
+                    self.assume(st, format!("(= {rl} (- {hi} {lo}))"));
                 }
             }
             return Some(r);
@@ -3026,6 +3027,54 @@ impl<'a> Gen<'a> {
             StrConcat => {
                 let (a, b) = (args.first()?.value().clone(), args.get(1)?.value().clone());
                 Some(self.concat(&a, &b))
+            }
+            // What string searches imply about lengths.
+            StartsWith | EndsWith | StrContains => {
+                let (x, y) = (term(0)?, term(1)?);
+                let (lx, ly) = (self.str_len(&x), self.str_len(&y));
+                let r = self.fresh(t, "has");
+                let rt = r.term()?.to_string();
+                self.assume(st, format!("(=> {rt} (<= {ly} {lx}))"));
+                self.assume(st, format!("(=> (= {ly} 0) {rt})"));
+                Some(r)
+            }
+            StrFind => {
+                let (x, y) = (term(0)?, term(1)?);
+                let (lx, ly) = (self.str_len(&x), self.str_len(&y));
+                let r = self.fresh(t, "find");
+                if let Sv::Enum { tag, vars, .. } = &r {
+                    if let Some(i) = vars.first().and_then(|v| v.first()).and_then(|v| v.term()) {
+                        self.assume(st, format!("(=> (= {} 0) (and (>= {i} 0) (<= (+ {i} {ly}) {lx})))", tag.t));
+                    }
+                }
+                Some(r)
+            }
+            Trim => {
+                let x = term(0)?;
+                let r = self.fresh(t, "trim");
+                if let Some(rt) = r.term() {
+                    let (lr, lx) = (self.str_len(rt), self.str_len(&x));
+                    self.assume(st, format!("(<= {lr} {lx})"));
+                }
+                Some(r)
+            }
+            Bytes | Chars | Split => {
+                let x = term(0)?;
+                let lx = self.str_len(&x);
+                let r = self.fresh(t, "parts");
+                if let Sv::List { len, .. } = &r {
+                    let n = &len.t;
+                    let fact = match op {
+                        // One byte each.
+                        Bytes => format!("(= {n} {lx})"),
+                        // One to four bytes each.
+                        Chars => format!("(and (<= {n} {lx}) (=> (> {lx} 0) (> {n} 0)))"),
+                        // Always at least one piece.
+                        _ => format!("(>= {n} 1)"),
+                    };
+                    self.assume(st, fact);
+                }
+                Some(r)
             }
             StrConcatN => {
                 let mut acc = args.first()?.value().clone();
