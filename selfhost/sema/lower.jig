@@ -347,7 +347,9 @@ fn Lw.finish(&mut self) {
     for l in mut_params {
       match self.s.tys.kinds[self.fb.locals[l]] {
         Adt(adt, _) => if !self.s.defs.adts[adt].is_enum {
-          self.check_struct_predicates(adt, place_of(l))
+          // Assignments re-checked the predicates of the fields they wrote; what is left
+          // are the fields calls could change.
+          self.check_struct_predicates(adt, place_of(l), self.passed_mut(l))
         }
         _ => {}
       }

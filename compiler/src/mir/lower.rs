@@ -422,7 +422,10 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                 let t = self.locals[l].ty;
                 if let TyKind::Adt(adt, _) = *self.lw.tys.kind(t) {
                     if !self.lw.defs.adts[adt].is_enum() {
-                        self.check_struct_predicates(adt, Place::local(l));
+                        // Assignments re-checked the predicates of the fields they wrote;
+                        // what is left are the fields calls could change.
+                        let changed = self.passed_mut(l);
+                        self.check_struct_predicates(adt, Place::local(l), changed.as_deref());
                     }
                 }
             }
@@ -1649,8 +1652,29 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
         self.assign(dest.clone(), Rvalue::Aggregate(AggKind::Struct(adt), t, ops));
         let _ = (e, args);
         if self.lw.mir.opts.check_contracts {
-            self.check_struct_predicates(adt, dest);
+            self.check_struct_predicates(adt, dest, None);
         }
+    }
+
+    /// The fields of local `l` passed as `&mut` to a call so far (`None`: all of it).
+    fn passed_mut(&self, l: Local) -> Option<Vec<u32>> {
+        let mut fields = Vec::new();
+        for b in self.blocks.iter() {
+            for st in &b.stmts {
+                let Stmt::Assign(_, Rvalue::Call(_, args, _)) = &st.0 else { continue };
+                for a in args {
+                    let Arg::MutRef(q) = a else { continue };
+                    if q.local != l {
+                        continue;
+                    }
+                    match q.proj.first() {
+                        Some(PlaceElem::Field(i)) => fields.push(*i),
+                        _ => return None,
+                    }
+                }
+            }
+        }
+        Some(fields)
     }
 
     /// After an assignment through a projection, re-check the predicates of every struct on
@@ -1685,13 +1709,13 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                 }
             }
         }
-        // Struct predicates, innermost first.
+        // Struct predicates, innermost first: those that read the field written.
         for k in (0..n).rev() {
             let q = Place { local: p.local, proj: p.proj[..k].to_vec() };
             let qt = self.place_ty(&q);
-            if let TyKind::Adt(adt, _) = *self.lw.tys.kind(qt) {
+            if let (&TyKind::Adt(adt, _), PlaceElem::Field(i)) = (self.lw.tys.kind(qt), &p.proj[k]) {
                 if !self.lw.defs.adts[adt].is_enum() {
-                    self.check_struct_predicates(adt, q);
+                    self.check_struct_predicates(adt, q, Some(&[*i]));
                 }
             }
         }
@@ -1737,39 +1761,51 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
         self.tables = tables;
     }
 
-    /// Field refinements and struct invariants at construction.
-    fn check_struct_predicates(&mut self, adt: AdtId, value: Place) {
+    /// Field refinements and struct invariants: all of them at construction, or those that
+    /// read one of the `changed` fields (the others still hold).
+    fn check_struct_predicates(&mut self, adt: AdtId, value: Place, changed: Option<&[u32]>) {
         let ad = &self.lw.defs.adts[adt];
         let pkg = ad.pkg;
         let aliases: Vec<(u32, AliasId)> =
             ad.fields().iter().enumerate().filter_map(|(i, f)| f.refine.map(|al| (i as u32, al))).collect();
         for (i, al) in aliases {
-            self.check_alias(al, value.field(i));
+            if changed.is_none_or(|c| c.contains(&i)) {
+                self.check_alias(al, value.field(i));
+            }
         }
-        self.in_package(pkg, |b| b.check_struct_predicates_here(adt, value));
+        self.in_package(pkg, |b| b.check_struct_predicates_here(adt, value, changed));
     }
 
-    fn check_struct_predicates_here(&mut self, adt: AdtId, value: Place) {
+    fn check_struct_predicates_here(&mut self, adt: AdtId, value: Place, changed: Option<&[u32]>) {
         let ad = &self.lw.defs.adts[adt];
         let item = self.ast.items[ad.item];
         let ItemKind::Struct { fields, invariants, .. } = item.kind else { return };
         let fdecls: Vec<ast::FieldDecl> = self.ast.fields.get(fields).to_vec();
         let invs: Vec<ExprId> = self.ast.expr_lists.get(invariants).to_vec();
-        let has = !invs.is_empty() || fdecls.iter().any(|f| f.refine.is_some());
-        if !has {
-            return;
-        }
-        let mut preds: Vec<ExprId> = fdecls.iter().filter_map(|f| f.refine).collect();
-        preds.extend(invs);
+        let all: Vec<ExprId> = fdecls.iter().filter_map(|f| f.refine).chain(invs).collect();
         // Predicates refer to fields by name: bind each field they mention to a fresh local,
         // then check.
+        let mut preds: Vec<ExprId> = Vec::new();
         let mut used: FxHashSet<Symbol> = FxHashSet::default();
-        let mut stack = preds.clone();
-        while let Some(x) = stack.pop() {
-            if let ExprKind::Name(n) = self.ast.exprs[x].kind {
-                used.insert(n);
+        for pred in all {
+            let mut names: FxHashSet<Symbol> = FxHashSet::default();
+            let mut stack = vec![pred];
+            while let Some(x) = stack.pop() {
+                if let ExprKind::Name(n) = self.ast.exprs[x].kind {
+                    names.insert(n);
+                }
+                visit_children(self.ast, x, &mut stack);
             }
-            visit_children(self.ast, x, &mut stack);
+            let reads_changed = |(i, f): (usize, &ast::FieldDecl)| {
+                changed.is_none_or(|c| c.contains(&(i as u32))) && names.contains(&f.name.sym)
+            };
+            if changed.is_none() || fdecls.iter().enumerate().any(reads_changed) {
+                preds.push(pred);
+                used.extend(names);
+            }
+        }
+        if preds.is_empty() {
+            return;
         }
         let mut bound: Vec<(Symbol, Local)> = Vec::new();
         for (i, f) in fdecls.iter().enumerate() {
@@ -1822,7 +1858,8 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
     }
 
     /// A small evaluator for struct predicates: names, literals, comparisons, arithmetic,
-    /// logic, field access and `.len()`. Returns false if the predicate uses something else.
+    /// logic, and `.len()` and `.is_empty()` of strings and lists. Returns false if the
+    /// predicate uses something else.
     fn eval_pred_names(&mut self, e: ExprId, names: &[(Symbol, Local)], dest: Place) -> bool {
         let k = self.ast.exprs[e].kind;
         match k {
@@ -1839,6 +1876,27 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                 true
             }
             ExprKind::Paren(x) => self.eval_pred_names(x, names, dest),
+            ExprKind::Call { callee, args } if args.is_empty() => {
+                let ExprKind::Field { base, name } = self.ast.exprs[callee].kind else { return false };
+                let bt = self.ty(base);
+                let (op, tys) = match (self.lw.tys.kind(bt), name.sym.as_str()) {
+                    (TyKind::Str, "len") => (Op::StrLen, vec![]),
+                    (TyKind::Str, "is_empty") => (Op::StrIsEmpty, vec![]),
+                    (TyKind::List(el), "len") => (Op::ListLen, vec![*el]),
+                    (TyKind::List(el), "is_empty") => (Op::ListIsEmpty, vec![*el]),
+                    _ => return false,
+                };
+                let l = self.temp(bt);
+                if !self.eval_pred_names(base, names, Place::local(l)) {
+                    return false;
+                }
+                let t = self.ty(e);
+                let rv =
+                    Rvalue::Call(Callee::Intrinsic(Intrinsic::new(op, tys)), vec![Arg::Value(Operand::local(l))], t);
+                self.assign(dest, rv);
+                self.push(Stmt::Drop(l));
+                true
+            }
             ExprKind::Unary { op, expr } => {
                 let t = self.ty(expr);
                 let l = self.temp(t);

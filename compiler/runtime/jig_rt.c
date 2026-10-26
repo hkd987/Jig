@@ -542,11 +542,6 @@ uint64_t jig_str_hash(const jig_str *s) {
     return jig_hash_u64(h ^ w);
 }
 
-uint8_t jig_str_byte(const jig_str *s, int64_t i, const char *loc) {
-    if (i < 0 || i >= jig_str_len(s)) jig_index_oob(i, jig_str_len(s), loc);
-    return (uint8_t)s->data[i];
-}
-
 jig_str *jig_str_slice(const jig_str *s, int64_t lo, int64_t hi, const char *loc) {
     int64_t n = jig_str_len(s);
     if (lo < 0 || hi < lo || hi > n) {
@@ -1628,13 +1623,10 @@ uint32_t jig_char_to_lower(uint32_t c) {
     if ((c >= 'A' && c <= 'Z') || (c >= 0xC0 && c <= 0xDE && c != 0xD7)) return c + 32;
     return c;
 }
-uint32_t jig_char_from_int(int64_t v, const char *loc) {
-    if (v < 0 || v > 0x10FFFF || (v >= 0xD800 && v <= 0xDFFF)) {
-        char msg[96];
-        snprintf(msg, sizeof msg, "%lld is not a valid `Char`", (long long)v);
-        jig_panic(msg, loc);
-    }
-    return (uint32_t)v;
+void jig_char_invalid(int64_t v, const char *loc) {
+    char msg[96];
+    snprintf(msg, sizeof msg, "%lld is not a valid `Char`", (long long)v);
+    jig_panic(msg, loc);
 }
 
 /* ---------- effects ---------- */

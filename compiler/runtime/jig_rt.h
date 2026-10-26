@@ -176,7 +176,6 @@ jig_str *jig_str_split_next(const jig_str *s, const jig_str *sep, int64_t *pos);
 bool jig_str_eq(const jig_str *a, const jig_str *b);
 int jig_str_cmp(const jig_str *a, const jig_str *b);
 uint64_t jig_str_hash(const jig_str *s);
-uint8_t jig_str_byte(const jig_str *s, int64_t i, const char *loc);
 jig_str *jig_str_slice(const jig_str *s, int64_t lo, int64_t hi, const char *loc);
 bool jig_str_contains(const jig_str *s, const jig_str *t);
 bool jig_str_starts_with(const jig_str *s, const jig_str *t);
@@ -266,6 +265,11 @@ static inline void *jig_list_idx_mut(jig_list **lp, int64_t i, size_t sz, const 
     }
     return l->data + (size_t)i * sz;
 }
+static inline uint8_t jig_str_byte(const jig_str *s, int64_t i, const char *loc) {
+    int64_t n = jig_str_len(s);
+    if (__builtin_expect((uint64_t)i >= (uint64_t)n, 0)) jig_index_oob(i, n, loc);
+    return (uint8_t)s->data[i];
+}
 
 /* Push without a call when the list is unique and has room. Takes ownership of *elem. */
 static inline void jig_list_push_fast(jig_list **lp, void *elem, size_t sz, const jig_type *t) {
@@ -336,7 +340,11 @@ bool jig_char_is_upper(uint32_t c);
 bool jig_char_is_lower(uint32_t c);
 uint32_t jig_char_to_upper(uint32_t c);
 uint32_t jig_char_to_lower(uint32_t c);
-uint32_t jig_char_from_int(int64_t v, const char *loc);
+void jig_char_invalid(int64_t v, const char *loc) __attribute__((noreturn, cold));
+static inline uint32_t jig_char_from_int(int64_t v, const char *loc) {
+    if (__builtin_expect((uint64_t)v > 0x10FFFF || (v >= 0xD800 && v <= 0xDFFF), 0)) jig_char_invalid(v, loc);
+    return (uint32_t)v;
+}
 
 /* ---- effects ---- */
 void jig_print(const jig_str *s, bool newline, bool err);

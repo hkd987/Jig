@@ -242,7 +242,7 @@ fn Lw.lower_struct_lit(&mut self, inits: List<syntax.FieldInit>, t: Int, dest: P
     }
   }
   self.assign(dest, Rvalue.Aggregate(AggKind.Struct(adt), t, vals))
-  self.check_struct_predicates(adt, dest)
+  self.check_struct_predicates(adt, dest, None)
 }
 
 /// After an assignment through a projection, re-check the predicates of every struct on the
@@ -283,16 +283,56 @@ fn Lw.check_mutated(&mut self, p: Place) {
       _ => {}
     }
   }
-  // Struct predicates, innermost first.
+  // Struct predicates, innermost first: those that read the field written.
   var k = n - 1
   for k >= 0 {
     let q = Place { local: p.local, proj: p.proj[0..k] }
     let qt = self.place_ty(q)
-    match self.s.tys.kinds[qt] {
-      Adt(adt, _) => if !self.s.defs.adts[adt].is_enum { self.check_struct_predicates(adt, q) }
+    match (self.s.tys.kinds[qt], p.proj[k]) {
+      (Adt(adt, _), Field(i)) => if !self.s.defs.adts[adt].is_enum {
+        self.check_struct_predicates(adt, q, Some([i]))
+      }
       _ => {}
     }
     k -= 1
+  }
+}
+
+/// The fields of local `l` passed as `&mut` to a call so far (`None`: all of it).
+fn Lw.passed_mut(self, l: Int) -> Option<List<Int>> {
+  var fields: List<Int> = []
+  for b in self.fb.blocks {
+    for ss in b.stmts {
+      match ss.stmt {
+        Assign(_, Call(_, args, _)) => {
+          for a in args {
+            match a {
+              MutRef(q) => if q.local == l {
+                if q.proj.is_empty() {
+                  return None
+                }
+                match q.proj[0] {
+                  Field(i) => fields.push(i)
+                  _ => {
+                    return None
+                  }
+                }
+              }
+              _ => {}
+            }
+          }
+        }
+        _ => {}
+      }
+    }
+  }
+  return Some(fields)
+}
+
+fn has_field(changed: Option<List<Int>>, i: Int) -> Bool {
+  return match changed {
+    Some(c) => c.contains(i)
+    None => true
   }
 }
 
@@ -340,22 +380,23 @@ fn Lw.enter_file(&mut self, pkg: Int, file: Int) -> (syntax.Ast, Tables) {
   return saved
 }
 
-/// Field refinements and struct invariants at construction.
-fn Lw.check_struct_predicates(&mut self, adt: Int, value: Place) {
+/// Field refinements and struct invariants: all of them at construction, or those that read
+/// one of the `changed` fields (the others still hold).
+fn Lw.check_struct_predicates(&mut self, adt: Int, value: Place, changed: Option<List<Int>>) {
   let ad = self.s.defs.adts[adt]
   for i in 0..ad.fields.len() {
     match ad.fields[i].refine {
-      Some(al) => self.check_alias(al, value.field(i))
+      Some(al) => if has_field(changed, i) { self.check_alias(al, value.field(i)) }
       None => {}
     }
   }
   let (ast, tab) = self.enter_file(ad.pkg, ad.file)
-  self.check_struct_predicates_here(adt, value)
+  self.check_struct_predicates_here(adt, value, changed)
   self.fb.ast = ast
   self.fb.tab = tab
 }
 
-fn Lw.check_struct_predicates_here(&mut self, adt: Int, value: Place) {
+fn Lw.check_struct_predicates_here(&mut self, adt: Int, value: Place, changed: Option<List<Int>>) {
   let ad = self.s.defs.adts[adt]
   let (fdecls, invs) = match self.fb.ast.items[ad.item].kind {
     Struct(_, fields, invariants) => (fields, invariants)
@@ -363,27 +404,43 @@ fn Lw.check_struct_predicates_here(&mut self, adt: Int, value: Place) {
       return
     }
   }
-  var preds: List<Int> = []
+  var all: List<Int> = []
   for f in fdecls {
     match f.refine {
-      Some(r) => preds.push(r)
+      Some(r) => all.push(r)
       None => {}
     }
   }
-  if preds.is_empty() && invs.is_empty() {
-    return
-  }
-  preds.extend(invs)
+  all.extend(invs)
   // Predicates name fields: bind each field they mention to a fresh local, then check.
+  var preds: List<Int> = []
   var used: Set<Str> = Set.new()
-  var stack = preds
-  for !stack.is_empty() {
-    let x = stack.pop().unwrap_or(0)
-    match self.fb.ast.exprs[x].kind {
-      Name(n) => used.insert(n)
-      _ => {}
+  for pred in all {
+    var names: Set<Str> = Set.new()
+    var stack = [pred]
+    for !stack.is_empty() {
+      let x = stack.pop().unwrap_or(0)
+      match self.fb.ast.exprs[x].kind {
+        Name(n) => names.insert(n)
+        _ => {}
+      }
+      visit_children(self.fb.ast, x, &mut stack)
     }
-    visit_children(self.fb.ast, x, &mut stack)
+    var reads_changed = changed.is_none()
+    for i in 0..fdecls.len() {
+      if has_field(changed, i) && names.contains(fdecls[i].name.text) {
+        reads_changed = true
+      }
+    }
+    if reads_changed {
+      preds.push(pred)
+      for n in names.items() {
+        used.insert(n)
+      }
+    }
+  }
+  if preds.is_empty() {
+    return
   }
   var bound: List<(Str, Int)> = []
   for i in 0..fdecls.len() {
@@ -438,8 +495,9 @@ fn Lw.check_with_names(&mut self, pred: Int, names: List<(Str, Int)>, kind: Chec
   }
 }
 
-/// A small evaluator for struct predicates: names, literals, comparisons, arithmetic and
-/// logic. Returns false if the predicate uses something else.
+/// A small evaluator for struct predicates: names, literals, comparisons, arithmetic, logic,
+/// and `.len()` and `.is_empty()` of strings and lists. Returns false if the predicate uses
+/// something else.
 fn Lw.eval_pred_names(&mut self, e: Int, names: List<(Str, Int)>, dest: Place) -> Bool {
   match self.fb.ast.exprs[e].kind {
     Name(n) => {
@@ -458,6 +516,38 @@ fn Lw.eval_pred_names(&mut self, e: Int, names: List<(Str, Int)>, dest: Place) -
     }
     Paren(x) => {
       return self.eval_pred_names(x, names, dest)
+    }
+    Call(callee, args) => {
+      if !args.is_empty() {
+        return false
+      }
+      let (base, name) = match self.fb.ast.exprs[callee].kind {
+        Field(b, nm) => (b, nm.text)
+        _ => {
+          return false
+        }
+      }
+      let bt = self.ty(base)
+      let (op, tys) = match (self.s.tys.kinds[bt], name) {
+        (Str, "len") => (Op.StrLen, [])
+        (Str, "is_empty") => (Op.StrIsEmpty, [])
+        (List(el), "len") => (Op.ListLen, [el])
+        (List(el), "is_empty") => (Op.ListIsEmpty, [el])
+        _ => {
+          return false
+        }
+      }
+      let l = self.temp(bt)
+      if !self.eval_pred_names(base, names, place_of(l)) {
+        return false
+      }
+      let t = self.ty(e)
+      self.assign(
+        dest,
+        Rvalue.Call(Callee.Intrinsic(intrinsic(op, tys)), [Arg.Value(op_local(l))], t),
+      )
+      self.push(Stmt.Drop(l))
+      return true
     }
     Unary(op, inner) => {
       let t = self.ty(inner)

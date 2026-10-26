@@ -1633,6 +1633,8 @@ impl<'l, 'a> CGen<'l, 'a> {
                     )
                 }
             }
+            // Every byte is a valid `Char`.
+            (TyKind::Int(IntTy::U8, _), TyKind::Char) => format!("((uint32_t)({x}))"),
             (TyKind::Int(..), TyKind::Char) => format!("jig_char_from_int((int64_t)({x}), {loc})"),
             _ => x.to_string(),
         }

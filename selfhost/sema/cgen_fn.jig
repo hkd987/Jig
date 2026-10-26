@@ -956,6 +956,8 @@ fn Cg.cast(&mut self, x: Str, from: Int, to: Int, span: syntax.Span) -> Str {
           ")cv; })"
       }
     }
+    // Every byte is a valid `Char`.
+    (Int(U8, _), Char) => "((uint32_t)(" + x + "))"
     (Int(_, _), Char) => "jig_char_from_int((int64_t)(" + x + "), " + loc + ")"
     _ => x
   }
