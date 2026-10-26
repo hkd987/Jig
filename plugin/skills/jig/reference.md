@@ -321,6 +321,21 @@ test "add commutes"(x: Int, y: Int) requires x < 1000, y < 1000 {
 Tests do not justify code: a function called only from tests is dead code, unless it is in
 a file whose name ends in `_test.jig` (a test helper).
 
+Tests and scenarios run against a simulated world: output is captured, stdin is empty,
+files live in memory, the clock starts at a fixed time and moves 1 ms per reading (and by
+`time.sleep`), and randomness is seeded. `std/sim` sets it up and inspects it; code that
+`main` reaches may not use it (E0607).
+
+```
+test "the copy is stamped" {
+  sim.set_file("a.txt", "hi")
+  sim.set_time(1000)
+  sim.set_args(["stamp", "a.txt", "b.txt"])
+  main()
+  assert(sim.stdout() == "stamped b.txt\n" && sim.file("b.txt") == Some("1500\nhi"))
+}
+```
+
 ## Features and steps
 
 Scenarios are Gherkin `.feature` files in the package directory (`Feature`, `Scenario`,
@@ -394,9 +409,10 @@ its position; `Str.to_int` and `to_float` ignore surrounding spaces and accept a
 | `std/io` (`io`) | `print(s) println(s) eprintln(s) read_line() -> Option<Str> read_all() -> Str` |
 | `std/fs` (`fs`) | `read(path) -> Result<Str, Str> write(path, s) -> Result<(), Str> exists(path) -> Bool list(dir) -> Result<List<Str>, Str>` |
 | `std/os` (`env`) | `args() -> List<Str> env(name) -> Option<Str> exit(code) -> Never` |
-| `std/time` (`clock`) | `now_ms() -> Int now_ns() -> Int` |
+| `std/time` (`clock`) | `now_ms() -> Int now_ns() -> Int sleep(ms)` |
 | `std/rand` (`rand`) | `int(lo, hi) -> Int float() -> Float` |
 | `std/math` (pure) | `PI E sin(x) cos(x) tan(x) exp(x) ln(x) log10(x) pow(x, y)` |
+| `std/sim` (tests only) | `stdout() stderr() -> Str set_stdin(s) set_args(xs) set_env(k, v) set_file(path, s) file(path) -> Option<Str> remove_file(path) set_time(ms) advance(ms) seed(n)` |
 | `std/task` (`spawn`) | `all(jobs) -> List<T> map(items, f) -> List<U> both(f, g) -> (A, B)` |
 
 ## Toolchain

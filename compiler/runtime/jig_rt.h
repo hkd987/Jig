@@ -341,6 +341,7 @@ jig_list *jig_args(void);
 jig_str *jig_env_var(const jig_str *name, bool *ok);
 int64_t jig_now_ms(void);
 int64_t jig_now_ns(void);
+void jig_sleep_ms(int64_t ms, const char *loc);
 int64_t jig_rand_int(int64_t lo, int64_t hi, const char *loc);
 double jig_rand_float(void);
 

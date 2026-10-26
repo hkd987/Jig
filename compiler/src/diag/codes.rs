@@ -255,6 +255,10 @@ codes! {
         "No scenario in any `.feature` file uses this step function.";
     E0606 = 606, "unused-item", "item is never used",
         "This type, constant, interface or unit is never used by reachable code.";
+    E0607 = 607, "simulation-in-program", "program code uses the test simulation",
+        "`std/sim` sets up and inspects the simulated world that tests and scenarios run in. Code \
+         reachable from `main` (or a library's `pub` API) runs against the real world, so it \
+         cannot use it. Move the call into a test, a step or a test helper.";
 
     // ---- E07: verification ----
     E0701 = 701, "precondition", "precondition may not hold",

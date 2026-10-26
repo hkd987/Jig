@@ -1,0 +1,32 @@
+// The simulated world that tests and scenarios run against. Every effect in a test is
+// deterministic: output is captured, files live in memory, the clock moves only when asked
+// (and by 1 ms per reading) and randomness comes from a seed. These functions set that world
+// up and look at it. Tests, scenario steps and test helpers may use them; code reachable from
+// `main` may not.
+
+/// Everything printed so far with `io.print` and `io.println`.
+pub fn stdout() -> Str effects {io}
+/// Everything printed so far with `io.eprintln`.
+pub fn stderr() -> Str effects {io}
+/// The text `io.read_line` and `io.read_all` read next, replacing what is left.
+pub fn set_stdin(text: Str) effects {io}
+/// What `os.args()` returns (the program name first).
+pub fn set_args(args: List<Str>) effects {env}
+/// Set an environment variable for `os.env`.
+pub fn set_env(name: Str, value: Str) effects {env}
+/// Create or replace a file in the in-memory file system.
+pub fn set_file(path: Str, contents: Str) effects {fs}
+/// A file's current contents, if it exists.
+pub fn file(path: Str) -> Option<Str> effects {fs}
+/// Delete a file.
+pub fn remove_file(path: Str) effects {fs}
+/// Set the clock, in milliseconds since the Unix epoch.
+pub fn set_time(ms: Int) effects {clock}
+
+/// Move the clock forward.
+pub fn advance(ms: Int)
+  requires ms >= 0
+  effects {clock}
+
+/// Restart the random number generator from a seed.
+pub fn seed(n: Int) effects {rand}

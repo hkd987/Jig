@@ -1,0 +1,12 @@
+import "std/io"
+import "std/sim"
+
+// The test simulation is not part of the program: `main` may not reach it.
+
+fn report() -> Str effects {io} { //~ E0607
+  return sim.stdout()
+}
+
+fn main() effects {io} {
+  io.println(report())
+}

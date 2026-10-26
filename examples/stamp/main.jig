@@ -1,0 +1,23 @@
+import "std/fs"
+import "std/io"
+import "std/os"
+import "std/time"
+
+/// Copy the first argument's file to the second, stamping it.
+fn stamp(src: Str, dst: Str) -> Result<(), Str> effects {fs, clock} {
+  let text = fs.read(src)?
+  time.sleep(500)
+  return fs.write(dst, time.now_ms().str() + "\n" + text)
+}
+
+fn main() effects {io, fs, env, clock} {
+  let args = os.args()
+  if args.len() < 3 {
+    io.eprintln("usage: stamp SRC DST")
+    os.exit(2)
+  }
+  match stamp(args[1], args[2]) {
+    Ok(_) => io.println("stamped " + args[2])
+    Err(e) => io.eprintln(e)
+  }
+}

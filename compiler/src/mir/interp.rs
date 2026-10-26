@@ -1392,6 +1392,84 @@ impl<'l, 'a> Interp<'l, 'a> {
                 let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
                 ret(Value::Int(if intr.op == NowMs { d.as_millis() as i64 } else { d.as_nanos() as i64 }))
             }
+            Sleep => {
+                let ms = int(&a[0]);
+                if ms < 0 {
+                    return Err(self.panic(format!("precondition failed: ms >= 0\n  ms = {ms}"), span));
+                }
+                if self.fx.fake {
+                    self.fx.clock_ms += ms as i64;
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+                }
+                ret(Value::Unit)
+            }
+            SimStdout | SimStderr | SimSetStdin | SimSetArgs | SimSetEnv | SimSetFile | SimFile | SimRemoveFile
+            | SimSetTime | SimAdvance | SimSeed => {
+                if !self.fx.fake {
+                    return Err(self.panic("`std/sim` only works in tests".to_string(), span));
+                }
+                let s = |i: usize| -> String {
+                    match a.get(i) {
+                        Some(Value::Str(x)) => x.to_string(),
+                        _ => String::new(),
+                    }
+                };
+                let v = match intr.op {
+                    SimStdout => Value::Str(Rc::from(self.fx.stdout.as_str())),
+                    SimStderr => Value::Str(Rc::from(self.fx.stderr.as_str())),
+                    SimSetStdin => {
+                        self.fx.stdin = s(0).lines().map(|l| l.to_string()).collect();
+                        self.fx.stdin_pos = 0;
+                        Value::Unit
+                    }
+                    SimSetArgs => {
+                        self.fx.args = list(&a[0])
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|v| match v {
+                                Value::Str(x) => x.to_string(),
+                                _ => String::new(),
+                            })
+                            .collect();
+                        Value::Unit
+                    }
+                    SimSetEnv => {
+                        self.fx.env.insert(s(0), s(1));
+                        Value::Unit
+                    }
+                    SimSetFile => {
+                        self.fx.files.insert(s(0), s(1));
+                        Value::Unit
+                    }
+                    SimFile => match self.fx.files.get(&s(0)) {
+                        Some(c) => Self::some(Value::Str(Rc::from(c.as_str()))),
+                        None => Self::none(),
+                    },
+                    SimRemoveFile => {
+                        self.fx.files.remove(&s(0));
+                        Value::Unit
+                    }
+                    SimSetTime => {
+                        // Each reading moves the clock 1 ms first: the next reading is `ms`.
+                        self.fx.clock_ms = int(&a[0]) as i64 - 1;
+                        Value::Unit
+                    }
+                    SimAdvance => {
+                        let ms = int(&a[0]);
+                        if ms < 0 {
+                            return Err(self.panic(format!("precondition failed: ms >= 0\n  ms = {ms}"), span));
+                        }
+                        self.fx.clock_ms += ms as i64;
+                        Value::Unit
+                    }
+                    _ => {
+                        self.fx.rng = (int(&a[0]) as u64) | 1;
+                        Value::Unit
+                    }
+                };
+                ret(v)
+            }
             RandInt => {
                 let (lo, hi) = (int(&a[0]), int(&a[1]));
                 if lo >= hi {

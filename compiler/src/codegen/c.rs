@@ -2142,6 +2142,14 @@ impl<'l, 'a> CGen<'l, 'a> {
                 let c = self.cty(ret);
                 format!("(({c}){{0}})")
             }
+            Sleep => format!("jig_sleep_ms({}, {loc})", a[0]),
+            SimStdout | SimStderr | SimSetStdin | SimSetArgs | SimSetEnv | SimSetFile | SimFile | SimRemoveFile
+            | SimSetTime | SimAdvance | SimSeed => {
+                // E0607 keeps the simulation out of programs; nothing compiled can reach it.
+                let c = self.cty(ret);
+                let _ = writeln!(cx.out, "    jig_panic(\"std/sim only works in tests\", {loc});");
+                format!("(({c}){{0}})")
+            }
             NowMs => "jig_now_ms()".into(),
             NowNs => "jig_now_ns()".into(),
             RandInt => format!("jig_rand_int({}, {}, {loc})", a[0], a[1]),

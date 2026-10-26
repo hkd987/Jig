@@ -1,0 +1,13 @@
+import "std/sim"
+
+// Tests and their helpers may use it.
+
+fn seeded() effects {rand} {
+  sim.seed(42)
+}
+
+test "the simulation is available to tests" {
+  seeded()
+  sim.set_time(5000)
+  assert(sim.stdout() == "")
+}

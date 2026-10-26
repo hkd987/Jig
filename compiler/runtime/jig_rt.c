@@ -1705,6 +1705,13 @@ int64_t jig_now_ms(void) {
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+void jig_sleep_ms(int64_t ms, const char *loc) {
+    if (ms < 0) jig_panic("precondition failed: ms >= 0", loc);
+    struct timespec ts = {ms / 1000, (ms % 1000) * 1000000};
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+    }
+}
+
 int64_t jig_now_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);

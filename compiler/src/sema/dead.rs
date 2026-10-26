@@ -121,6 +121,36 @@ pub fn check_dead_code(prog: &mut Program) {
         }
     }
 
+    // The test simulation is not part of the program: nothing `main` reaches may use it.
+    {
+        let entry: Vec<FnId> = match defs.main {
+            Some(m) => vec![m],
+            None => roots.iter().copied().filter(|f| !used_steps.contains(f)).collect(),
+        };
+        let mut seen: FxHashSet<FnId> = FxHashSet::default();
+        let mut stack = entry;
+        while let Some(f) = stack.pop() {
+            if !seen.insert(f) {
+                continue;
+            }
+            let Some(body) = bodies[f].as_ref() else { continue };
+            for &r in &body.refs {
+                if pkgs[defs.fns[r].pkg].path.as_str() == "std/sim" && is_user(defs.fns[f].pkg) {
+                    let fd = &defs.fns[f];
+                    diags.push(
+                        Diagnostic::error(
+                            codes::E0607,
+                            fd.name_span,
+                            format!("`{}` uses `sim.{}`, but `main` reaches it", fd.name, defs.fns[r].name),
+                        )
+                        .note("`std/sim` is for tests, steps and test helpers"),
+                    );
+                }
+                stack.push(r);
+            }
+        }
+    }
+
     let test_refs: FxHashSet<FnId> = test_bodies.iter().flatten().flat_map(|b| b.refs.iter().copied()).collect();
     // Test helpers: functions in `*_test.jig` files, reached from tests.
     let in_test_file = |f: FnId| {

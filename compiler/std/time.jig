@@ -4,3 +4,8 @@
 pub fn now_ms() -> Int effects {clock}
 /// Monotonic nanoseconds, for measuring durations.
 pub fn now_ns() -> Int effects {clock}
+
+/// Wait. In tests the simulated clock moves forward instead.
+pub fn sleep(ms: Int)
+  requires ms >= 0
+  effects {clock}

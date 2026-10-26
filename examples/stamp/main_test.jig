@@ -1,0 +1,17 @@
+import "std/sim"
+
+test "stamping copies the file with the time" {
+  sim.set_file("a.txt", "hello")
+  sim.set_time(1000)
+  sim.set_args(["stamp", "a.txt", "b.txt"])
+  main()
+  assert(sim.stdout() == "stamped b.txt\n")
+  assert(sim.file("b.txt") == Some("1500\nhello"))
+}
+
+test "a missing file is reported" {
+  sim.set_args(["stamp", "nope.txt", "b.txt"])
+  main()
+  assert(sim.stderr() == "nope.txt: no such file\n")
+  assert(sim.file("b.txt").is_none())
+}
