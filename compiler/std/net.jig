@@ -1,0 +1,14 @@
+// Networking over TCP, one request per connection: the client sends its request and closes
+// its sending side, the server reads it to the end, answers and closes. Addresses are
+// "host:port"; ":port" means this machine.
+
+/// Send `request` to the server at `addr` and return its reply.
+pub fn request(addr: Str, request: Str) -> Result<Str, Str> effects {net}
+
+/// Serve on `addr`, one connection at a time. Each request goes to `handle` with the
+/// current state, which returns the new state and the reply. Returns the final state after
+/// `limit` requests (0: keep serving). In tests it answers the simulated connections queued
+/// with `sim.connect`, then returns.
+pub fn serve<S>(addr: Str, state: S, handle: fn(S, Str) -> (S, Str), limit: Int) -> Result<S, Str>
+  requires limit >= 0
+  effects {net}

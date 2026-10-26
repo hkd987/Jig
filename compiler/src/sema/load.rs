@@ -19,6 +19,7 @@ pub const STD_SOURCES: &[(&str, &str, &str)] = &[
     ("std/math", "math.jig", include_str!("../../std/math.jig")),
     ("std/task", "task.jig", include_str!("../../std/task.jig")),
     ("std/sim", "sim.jig", include_str!("../../std/sim.jig")),
+    ("std/net", "net.jig", include_str!("../../std/net.jig")),
 ];
 pub const PRELUDE_SOURCE: &str = include_str!("../../std/prelude.jig");
 pub const PRELUDE_PATH: &str = "<prelude>";

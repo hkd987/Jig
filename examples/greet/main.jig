@@ -1,0 +1,40 @@
+import "std/io"
+import "std/net"
+import "std/os"
+
+// `greet serve ADDR N` answers N requests; `greet ask ADDR NAME` sends one.
+
+/// The server's state: how many people it has greeted.
+struct Greeter {
+  count: Int
+  invariant count >= 0
+}
+
+fn greet(g: Greeter, name: Str) -> (Greeter, Str) {
+  let n = if g.count < 1000000 { g.count + 1 } else { g.count }
+  return (Greeter { count: n }, "hello " + name.trim() + " #" + n.str())
+}
+
+fn main() effects {io, env, net} {
+  let args = os.args()
+  if args.len() < 4 {
+    io.eprintln("usage: greet serve ADDR N | greet ask ADDR NAME")
+    os.exit(2)
+  }
+  if args[1] == "serve" {
+    let n = args[3].to_int().unwrap_or(1)
+    if n < 0 {
+      io.eprintln("N must not be negative")
+      os.exit(2)
+    }
+    match net.serve(args[2], Greeter { count: 0 }, greet, n) {
+      Ok(g) => io.println("greeted " + g.count.str())
+      Err(e) => io.eprintln(e)
+    }
+  } else {
+    match net.request(args[2], args[3]) {
+      Ok(reply) => io.println(reply)
+      Err(e) => io.eprintln(e)
+    }
+  }
+}

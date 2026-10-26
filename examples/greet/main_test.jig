@@ -1,0 +1,29 @@
+import "std/sim"
+
+test "the server counts the people it greets" {
+  sim.connect(":7000", "ann")
+  sim.connect(":7000", "bob\n")
+  sim.set_args(["greet", "serve", ":7000", "2"])
+  main()
+  assert(sim.answers(":7000") == ["hello ann #1", "hello bob #2"])
+  assert(sim.stdout() == "greeted 2\n")
+}
+
+test "the client prints the reply" {
+  sim.reply("example.com:80", "hello cy #9")
+  sim.set_args(["greet", "ask", "example.com:80", "cy"])
+  main()
+  assert(sim.requests("example.com:80") == ["cy"])
+  assert(sim.stdout() == "hello cy #9\n")
+}
+
+test "a refused connection is reported" {
+  sim.set_args(["greet", "ask", ":9", "dee"])
+  main()
+  assert(sim.stderr() == ":9: Connection refused\n")
+}
+
+test "greeting is pure"(k: Int) requires k >= 0, k < 1000000 {
+  let (g, reply) = greet(Greeter { count: k }, " eve ")
+  assert(g.count == k + 1 && reply == "hello eve #" + (k + 1).str())
+}

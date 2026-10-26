@@ -41,6 +41,7 @@ pub struct CGen<'l, 'a> {
     wrappers: FxHashSet<MFnId>,
     sortby_thunks: FxHashSet<Ty>,
     task_thunks: FxHashSet<(Ty, Option<Ty>)>,
+    serve_thunks: FxHashSet<Ty>,
     threads: bool,
     counter: usize,
 }
@@ -103,6 +104,7 @@ pub fn generate(lw: &mut Lowerer) -> Result<CProgram, String> {
         wrappers: FxHashSet::default(),
         sortby_thunks: FxHashSet::default(),
         task_thunks: FxHashSet::default(),
+        serve_thunks: FxHashSet::default(),
         threads: false,
         counter: 0,
     };
@@ -2143,8 +2145,33 @@ impl<'l, 'a> CGen<'l, 'a> {
                 format!("(({c}){{0}})")
             }
             Sleep => format!("jig_sleep_ms({}, {loc})", a[0]),
+            NetRequest => {
+                let _ =
+                    writeln!(cx.out, "    bool nk{n}; jig_str *nr{n} = jig_net_request({}, {}, &nk{n});", a[0], a[1]);
+                let c = self.cty(ret);
+                format!("(nk{n} ? (({c}){{.tag = 0, .u.v0 = {{.f0 = nr{n}}}}}) : (({c}){{.tag = 1, .u.v1 = {{.f0 = nr{n}}}}}))")
+            }
+            NetServe => {
+                let st = intr.tys[0];
+                let sc = self.cty(st);
+                let th = self.serve_thunk(st);
+                let state = match &args[1] {
+                    Arg::Value(o) => self.owned(mf, cx, o, span),
+                    Arg::MutRef(_) => a[1].clone(),
+                };
+                let rel = self.release_stmt(st, &format!("sv{n}"));
+                let _ = writeln!(
+                    cx.out,
+                    "    {sc} sv{n} = {state}; jig_fn hf{n} = {};\n    bool sk{n}; jig_str *se{n} = jig_net_serve({}, &sv{n}, &hf{n}, {th}, {}, &sk{n}, {loc});\n    if (!sk{n}) {{ {rel} }}",
+                    a[2],
+                    a[0],
+                    a[3]
+                );
+                let c = self.cty(ret);
+                format!("(sk{n} ? (({c}){{.tag = 0, .u.v0 = {{.f0 = sv{n}}}}}) : (({c}){{.tag = 1, .u.v1 = {{.f0 = se{n}}}}}))")
+            }
             SimStdout | SimStderr | SimSetStdin | SimSetArgs | SimSetEnv | SimSetFile | SimFile | SimRemoveFile
-            | SimSetTime | SimAdvance | SimSeed => {
+            | SimSetTime | SimAdvance | SimSeed | SimReply | SimRequests | SimConnect | SimAnswers => {
                 // E0607 keeps the simulation out of programs; nothing compiled can reach it.
                 let c = self.cty(ret);
                 let _ = writeln!(cx.out, "    jig_panic(\"std/sim only works in tests\", {loc});");
@@ -2185,6 +2212,25 @@ impl<'l, 'a> CGen<'l, 'a> {
             let _ = writeln!(
                 self.glue,
                 "JIG_FN void {name}(jig_fn *f, const void *in, void *out) {{\n    (void)in;\n    *({rc} *)out = {call};\n}}"
+            );
+        }
+        name
+    }
+
+    /// Runs a `net.serve` handler on the state in place: releases the old state, stores the
+    /// new one and returns the reply.
+    fn serve_thunk(&mut self, st: Ty) -> String {
+        let name = format!("serve_{}", st.0);
+        if self.serve_thunks.insert(st) {
+            let sc = self.cty(st);
+            let str_t = self.lw.tys.str;
+            let tup = self.lw.tys.tuple(vec![st, str_t]);
+            let tc = self.cty(tup);
+            let rel = self.release_stmt(st, "*(s)");
+            let _ = writeln!(self.glue_decls, "JIG_FN jig_str *{name}(jig_fn *f, void *state, jig_str *req);");
+            let _ = writeln!(
+                self.glue,
+                "JIG_FN jig_str *{name}(jig_fn *f, void *state, jig_str *req) {{\n    {sc} *s = state;\n    {tc} r = (({tc} (*)(jig_env *, {sc}, jig_str *))f->code)(f->env, *s, req);\n    {rel}\n    *s = r.f0;\n    return r.f1;\n}}"
             );
         }
         name

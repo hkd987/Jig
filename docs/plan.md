@@ -134,7 +134,10 @@ optimizing release backend.
 - [x] Traceability: `jig trace` answers "which scenarios cover this function", "what is
       reachable but uncovered", "what dies if this scenario is deleted"; JSON + text; MCP
       `trace` tool.
-- [ ] Deterministic simulation for `clock`, `rand`, `net`, `fs`, `spawn`.
+- [x] Deterministic simulation for `clock`, `rand`, `net`, `fs`, `spawn`: tests run against a
+      simulated world that `std/sim` sets up and inspects (captured output, stdin, args, env,
+      in-memory files, a clock moved by `time.sleep`, a seed, queued network replies and
+      connections); tasks are deterministic by construction; `std/net` (D23) over real TCP.
 - [x] Structured concurrency under the `spawn` effect: fork-join `std/task` (`all`, `map`,
       `both`, D4); tasks may only spawn, so they are deterministic; a persistent worker pool
       with nested batches; atomic reference counts only in programs that use tasks.

@@ -30,3 +30,12 @@ pub fn advance(ms: Int)
 
 /// Restart the random number generator from a seed.
 pub fn seed(n: Int) effects {rand}
+/// The simulated server at `addr` answers the next request with `reply`; without a queued
+/// reply, requests to it fail as refused.
+pub fn reply(addr: Str, reply: Str) effects {net}
+/// The requests sent to `addr` so far.
+pub fn requests(addr: Str) -> List<Str> effects {net}
+/// A client sends `request` to the server at `addr` (answered by `net.serve`).
+pub fn connect(addr: Str, request: Str) effects {net}
+/// The replies the server at `addr` has sent.
+pub fn answers(addr: Str) -> List<Str> effects {net}

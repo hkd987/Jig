@@ -195,6 +195,12 @@ pub struct Effects {
     pub files: FxHashMap<String, String>,
     pub clock_ms: i64,
     pub rng: u64,
+    /// Simulated network: queued replies and received requests per server address, and
+    /// queued client requests and sent replies per address `net.serve` listens on.
+    pub net_replies: FxHashMap<String, std::collections::VecDeque<String>>,
+    pub net_requests: FxHashMap<String, Vec<String>>,
+    pub net_incoming: FxHashMap<String, std::collections::VecDeque<String>>,
+    pub net_answers: FxHashMap<String, Vec<String>>,
 }
 
 impl Effects {
@@ -210,6 +216,10 @@ impl Effects {
             files: FxHashMap::default(),
             clock_ms: 1_700_000_000_000,
             rng: seed | 1,
+            net_replies: FxHashMap::default(),
+            net_requests: FxHashMap::default(),
+            net_incoming: FxHashMap::default(),
+            net_answers: FxHashMap::default(),
         }
     }
     pub fn real(args: Vec<String>) -> Effects {
@@ -1404,8 +1414,60 @@ impl<'l, 'a> Interp<'l, 'a> {
                 }
                 ret(Value::Unit)
             }
+            NetRequest => {
+                let addr = self.str_arg(&a[0], span)?.to_string();
+                let req = self.str_arg(&a[1], span)?.to_string();
+                if self.fx.fake {
+                    self.fx.net_requests.entry(addr.clone()).or_default().push(req);
+                    return ret(match self.fx.net_replies.get_mut(&addr).and_then(|q| q.pop_front()) {
+                        Some(r) => Self::ok(Value::Str(Rc::from(r.as_str()))),
+                        None => Self::err(format!("{addr}: Connection refused")),
+                    });
+                }
+                ret(match net_request(&addr, &req) {
+                    Ok(r) => Self::ok(Value::Str(Rc::from(r.as_str()))),
+                    Err(e) => Self::err(format!("{addr}: {}", os_error(&e))),
+                })
+            }
+            NetServe => {
+                let addr = self.str_arg(&a[0], span)?.to_string();
+                let mut state = a[1].clone();
+                let handle = a[2].clone();
+                let limit = int(&a[3]);
+                if limit < 0 {
+                    return Err(self.panic(format!("precondition failed: limit >= 0\n  limit = {limit}"), span));
+                }
+                let mut served = 0i128;
+                if self.fx.fake {
+                    while limit == 0 || served < limit {
+                        let Some(req) = self.fx.net_incoming.get_mut(&addr).and_then(|q| q.pop_front()) else { break };
+                        let (s2, reply) = self.serve_one(&handle, state, &req, span)?;
+                        state = s2;
+                        self.fx.net_answers.entry(addr.clone()).or_default().push(reply);
+                        served += 1;
+                    }
+                    return ret(Self::ok(state));
+                }
+                let listener = match std::net::TcpListener::bind(listen_addr(&addr)) {
+                    Ok(l) => l,
+                    Err(e) => return ret(Self::err(format!("{addr}: {}", os_error(&e)))),
+                };
+                while limit == 0 || served < limit {
+                    let (mut conn, _) = match listener.accept() {
+                        Ok(c) => c,
+                        Err(e) => return ret(Self::err(format!("{addr}: {}", os_error(&e)))),
+                    };
+                    let mut req = String::new();
+                    let _ = std::io::Read::read_to_string(&mut conn, &mut req);
+                    let (s2, reply) = self.serve_one(&handle, state, &req, span)?;
+                    state = s2;
+                    let _ = std::io::Write::write_all(&mut conn, reply.as_bytes());
+                    served += 1;
+                }
+                ret(Self::ok(state))
+            }
             SimStdout | SimStderr | SimSetStdin | SimSetArgs | SimSetEnv | SimSetFile | SimFile | SimRemoveFile
-            | SimSetTime | SimAdvance | SimSeed => {
+            | SimSetTime | SimAdvance | SimSeed | SimReply | SimRequests | SimConnect | SimAnswers => {
                 if !self.fx.fake {
                     return Err(self.panic("`std/sim` only works in tests".to_string(), span));
                 }
@@ -1463,6 +1525,19 @@ impl<'l, 'a> Interp<'l, 'a> {
                         self.fx.clock_ms += ms as i64;
                         Value::Unit
                     }
+                    SimReply => {
+                        self.fx.net_replies.entry(s(0)).or_default().push_back(s(1));
+                        Value::Unit
+                    }
+                    SimConnect => {
+                        self.fx.net_incoming.entry(s(0)).or_default().push_back(s(1));
+                        Value::Unit
+                    }
+                    SimRequests | SimAnswers => {
+                        let m = if intr.op == SimRequests { &self.fx.net_requests } else { &self.fx.net_answers };
+                        let xs = m.get(&s(0)).cloned().unwrap_or_default();
+                        Value::List(Rc::new(xs.iter().map(|x| Value::Str(Rc::from(x.as_str()))).collect()))
+                    }
                     _ => {
                         self.fx.rng = (int(&a[0]) as u64) | 1;
                         Value::Unit
@@ -1491,6 +1566,20 @@ impl<'l, 'a> Interp<'l, 'a> {
             Ln => ret(Value::Float(flt(&a[0]).ln())),
             Log10 => ret(Value::Float(flt(&a[0]).log10())),
             Pow => ret(Value::Float(flt(&a[0]).powf(flt(&a[1])))),
+        }
+    }
+
+    /// One request through a `net.serve` handler: the new state and the reply.
+    fn serve_one(&mut self, handle: &Value, state: Value, req: &str, span: Span) -> R<(Value, String)> {
+        match self.call_value(handle, vec![state, Value::Str(Rc::from(req))], span)? {
+            Value::Tuple(t) if t.len() == 2 => {
+                let reply = match &t[1] {
+                    Value::Str(r) => r.to_string(),
+                    _ => String::new(),
+                };
+                Ok((t[0].clone(), reply))
+            }
+            v => Err(self.panic(format!("internal error: handler returned {v:?}"), span)),
         }
     }
 
@@ -1554,6 +1643,36 @@ impl<'l, 'a> Interp<'l, 'a> {
         }
         xs.clone_from_slice(&buf[..n]);
     }
+}
+
+/// An OS error as the C library words it (what native builds print).
+fn os_error(e: &std::io::Error) -> String {
+    let s = e.to_string();
+    match s.find(" (os error") {
+        Some(i) => s[..i].to_string(),
+        None => s,
+    }
+}
+
+/// ":port" listens on every interface.
+fn listen_addr(addr: &str) -> String {
+    if addr.starts_with(':') {
+        format!("0.0.0.0{addr}")
+    } else {
+        addr.to_string()
+    }
+}
+
+/// One request over TCP: send, close the sending side, read the reply to the end.
+fn net_request(addr: &str, req: &str) -> std::io::Result<String> {
+    use std::io::{Read, Write};
+    let target = if addr.starts_with(':') { format!("127.0.0.1{addr}") } else { addr.to_string() };
+    let mut s = std::net::TcpStream::connect(target)?;
+    s.write_all(req.as_bytes())?;
+    s.shutdown(std::net::Shutdown::Write)?;
+    let mut out = String::new();
+    s.read_to_string(&mut out)?;
+    Ok(out)
 }
 
 fn int_of(v: &Value) -> i128 {

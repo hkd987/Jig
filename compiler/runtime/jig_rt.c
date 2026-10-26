@@ -5,6 +5,8 @@
 #include "jig_rt.h"
 
 #include <dirent.h>
+#include <netdb.h>
+#include <sys/socket.h>
 #include <pthread.h>
 #include <errno.h>
 #include <math.h>
@@ -1710,6 +1712,137 @@ void jig_sleep_ms(int64_t ms, const char *loc) {
     struct timespec ts = {ms / 1000, (ms % 1000) * 1000000};
     while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
     }
+}
+
+/* ---------- net ---------- */
+
+static jig_str *net_err(const jig_str *addr, const char *what) {
+    jig_buf b = {0};
+    jig_buf_push_str(&b, addr);
+    jig_buf_push_cstr(&b, ": ");
+    jig_buf_push_cstr(&b, what);
+    return jig_buf_to_str(&b);
+}
+
+/* "host:port" (":port" is this machine) resolved for connecting or listening. */
+static struct addrinfo *net_resolve(const jig_str *addr, bool listen, const char **err) {
+    int64_t n = jig_str_len(addr), colon = -1;
+    const char *d = jig_str_data(addr);
+    for (int64_t i = 0; i < n; i++)
+        if (d[i] == ':') colon = i;
+    if (colon < 0 || colon == n - 1) {
+        *err = "expected host:port";
+        return NULL;
+    }
+    char host[256], port[32];
+    if (colon >= (int64_t)sizeof host || n - colon - 1 >= (int64_t)sizeof port) {
+        *err = "address too long";
+        return NULL;
+    }
+    memcpy(host, d, (size_t)colon);
+    host[colon] = 0;
+    memcpy(port, d + colon + 1, (size_t)(n - colon - 1));
+    port[n - colon - 1] = 0;
+    struct addrinfo hints = {0}, *res = NULL;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if (listen) hints.ai_flags = AI_PASSIVE;
+    const char *h = colon ? host : (listen ? NULL : "127.0.0.1");
+    int rc = getaddrinfo(h, port, &hints, &res);
+    if (rc != 0) {
+        *err = gai_strerror(rc);
+        return NULL;
+    }
+    return res;
+}
+
+static bool net_send_all(int fd, const char *p, size_t n) {
+    while (n) {
+        ssize_t k = send(fd, p, n, MSG_NOSIGNAL);
+        if (k < 0 && errno == EINTR) continue;
+        if (k <= 0) return false;
+        p += k;
+        n -= (size_t)k;
+    }
+    return true;
+}
+
+static jig_str *net_read_all(int fd) {
+    jig_buf b = {0};
+    char tmp[1 << 14];
+    for (;;) {
+        ssize_t k = recv(fd, tmp, sizeof tmp, 0);
+        if (k < 0 && errno == EINTR) continue;
+        if (k <= 0) break;
+        jig_buf_push(&b, tmp, (int64_t)k);
+    }
+    return jig_buf_to_str(&b);
+}
+
+jig_str *jig_net_request(const jig_str *addr, const jig_str *req, bool *ok) {
+    const char *err = NULL;
+    struct addrinfo *res = net_resolve(addr, false, &err);
+    *ok = false;
+    if (!res) return net_err(addr, err);
+    int fd = -1;
+    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) continue;
+        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+    if (fd < 0) return net_err(addr, strerror(errno));
+    if (!net_send_all(fd, jig_str_data(req), (size_t)jig_str_len(req))) {
+        close(fd);
+        return net_err(addr, strerror(errno));
+    }
+    shutdown(fd, SHUT_WR);
+    jig_str *reply = net_read_all(fd);
+    close(fd);
+    *ok = true;
+    return reply;
+}
+
+jig_str *jig_net_serve(const jig_str *addr, void *state, jig_fn *f, jig_serve_call call, int64_t limit, bool *ok,
+                       const char *loc) {
+    if (limit < 0) jig_panic("precondition failed: limit >= 0", loc);
+    const char *err = NULL;
+    struct addrinfo *res = net_resolve(addr, true, &err);
+    *ok = false;
+    if (!res) return net_err(addr, err);
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    int one = 1;
+    if (fd >= 0) setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    if (fd < 0 || bind(fd, res->ai_addr, res->ai_addrlen) != 0 || listen(fd, 64) != 0) {
+        jig_str *e = net_err(addr, strerror(errno));
+        if (fd >= 0) close(fd);
+        freeaddrinfo(res);
+        return e;
+    }
+    freeaddrinfo(res);
+    for (int64_t served = 0; limit == 0 || served < limit; served++) {
+        int c = accept(fd, NULL, NULL);
+        if (c < 0) {
+            if (errno == EINTR) {
+                served--;
+                continue;
+            }
+            jig_str *e = net_err(addr, strerror(errno));
+            close(fd);
+            return e;
+        }
+        jig_str *req = net_read_all(c);
+        jig_str *reply = call(f, state, req);
+        net_send_all(c, jig_str_data(reply), (size_t)jig_str_len(reply));
+        close(c);
+        jig_str_release(req);
+        jig_str_release(reply);
+    }
+    close(fd);
+    *ok = true;
+    return NULL;
 }
 
 int64_t jig_now_ns(void) {

@@ -124,6 +124,12 @@ pub enum Op {
     SimSetTime,
     SimAdvance,
     SimSeed,
+    SimReply,
+    SimRequests,
+    SimConnect,
+    SimAnswers,
+    NetRequest,
+    NetServe,
     // compiler-generated
     /// `x.str()` with derived formatting (type in `tys[0]`).
     Show,
@@ -296,8 +302,14 @@ pub fn lookup(pkg_path: &str, recv: Option<TyKey>, name: &str) -> Option<(Op, Op
             "set_time" => SimSetTime,
             "advance" => SimAdvance,
             "seed" => SimSeed,
+            "reply" => SimReply,
+            "requests" => SimRequests,
+            "connect" => SimConnect,
+            "answers" => SimAnswers,
             _ => return None,
         },
+        ("std/net", None, "request") => NetRequest,
+        ("std/net", None, "serve") => NetServe,
         ("std/rand", None, "int") => RandInt,
         ("std/rand", None, "float") => RandFloat,
         ("std/task", None, n) => match n {

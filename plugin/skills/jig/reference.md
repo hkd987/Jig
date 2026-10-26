@@ -323,8 +323,10 @@ a file whose name ends in `_test.jig` (a test helper).
 
 Tests and scenarios run against a simulated world: output is captured, stdin is empty,
 files live in memory, the clock starts at a fixed time and moves 1 ms per reading (and by
-`time.sleep`), and randomness is seeded. `std/sim` sets it up and inspects it; code that
-`main` reaches may not use it (E0607).
+`time.sleep`), randomness is seeded, and the network is simulated (`sim.reply` queues a
+server's answer to `net.request`; `sim.connect` queues a request for `net.serve`, which
+answers what is queued and returns). `std/sim` sets this world up and inspects it; code
+that `main` reaches may not use it (E0607).
 
 ```
 test "the copy is stamped" {
@@ -412,7 +414,8 @@ its position; `Str.to_int` and `to_float` ignore surrounding spaces and accept a
 | `std/time` (`clock`) | `now_ms() -> Int now_ns() -> Int sleep(ms)` |
 | `std/rand` (`rand`) | `int(lo, hi) -> Int float() -> Float` |
 | `std/math` (pure) | `PI E sin(x) cos(x) tan(x) exp(x) ln(x) log10(x) pow(x, y)` |
-| `std/sim` (tests only) | `stdout() stderr() -> Str set_stdin(s) set_args(xs) set_env(k, v) set_file(path, s) file(path) -> Option<Str> remove_file(path) set_time(ms) advance(ms) seed(n)` |
+| `std/net` (`net`) | `request(addr, req) -> Result<Str, Str> serve(addr, state, handle, limit) -> Result<S, Str>` with `handle: fn(S, Str) -> (S, Str)`; one request per connection, `addr` is `host:port` or `:port` |
+| `std/sim` (tests only) | `stdout() stderr() -> Str set_stdin(s) set_args(xs) set_env(k, v) set_file(path, s) file(path) -> Option<Str> remove_file(path) set_time(ms) advance(ms) seed(n) reply(addr, s) requests(addr) -> List<Str> connect(addr, req) answers(addr) -> List<Str>` |
 | `std/task` (`spawn`) | `all(jobs) -> List<T> map(items, f) -> List<U> both(f, g) -> (A, B)` |
 
 ## Toolchain
