@@ -1,0 +1,366 @@
+# Jig language reference
+
+Jig is a strict, Go-shaped systems language with verification built in. Humans write
+feature scenarios and contracts; agents write implementations; the compiler proves the
+contracts or, failing that, tests them. No nil, no zero values, no implicit conversions,
+no GC, no warnings: every lint is an error.
+
+## Files and packages
+
+- A package is a directory of `.jig` files. All files in it share one namespace.
+- A project root holds a `jig.mod` file with one line: `module <name>`. Import paths are
+  relative to the root: `import "geom"` loads `<root>/geom/`. `std/...` is the standard
+  library. Without `jig.mod`, a package can import only `std`.
+- The imported package is named by its last path segment: `geom.area(p)`.
+- Import cycles and unused imports are errors.
+- Items are private to their package unless marked `pub`. Struct fields are private unless
+  marked `pub`.
+
+## Lexical rules
+
+- Comments: `// line`, `/// doc comment`. No block comments.
+- Statements end at a newline when the line's last token is an identifier, a literal,
+  `return`, `break`, `continue`, `)`, `]`, `}`, `>` or `?`. Put binary operators at the
+  end of a line to continue it.
+- Literals: `42`, `1_000`, `0xff`, `0b1010`, `3.14`, `1e-9`, `true`, `false`, `'a'`
+  (`Char`, or `U8` when a `U8` is expected), `"text\n"` (escapes `\n \t \r \0 \\ \" \'
+  \u{1F600}`).
+- Naming is enforced: types, variants and interfaces `UpperCamel`; functions, variables,
+  fields and packages `snake_case`; constants `UPPER_SNAKE`.
+
+## Types
+
+| Type | Meaning |
+| --- | --- |
+| `Int` | 64-bit signed integer |
+| `I32`, `U8`, `U32`, `U64` | sized integers |
+| `Float` | 64-bit IEEE float |
+| `Bool`, `Char` | boolean, Unicode scalar value |
+| `Str` | immutable UTF-8 string |
+| `()` | unit |
+| `(A, B)` | tuple; fields `t.0`, `t.1` |
+| `List<T>` | growable array |
+| `Map<K, V>`, `Set<T>` | hash map/set, iterate in insertion order |
+| `Option<T>` | `Some(value)` or `None` |
+| `Result<T, E>` | `Ok(value)` or `Err(error)` |
+| `fn(A) -> B effects {io}` | function value |
+| `Never` | type of `panic(...)`; converts to any type |
+
+There is no nil and no default value: every variable and field is initialized explicitly.
+Numbers never convert implicitly; use `as`: `n as Float`, `f as Int` (truncates),
+`x as U8` (traps if out of range), `c as U32`.
+
+### Structs, enums, aliases, constants
+
+```
+pub struct Point {
+  pub x: Int
+  pub y: Int
+}
+
+pub struct Span {
+  lo: Int
+  hi: Int
+  invariant lo <= hi            // checked on construction and mutation
+}
+
+pub enum Shape {
+  Circle(r: Float)
+  Rect(w: Float, h: Float)
+  Empty
+}
+
+pub enum Tree<T> {              // recursive payloads are boxed automatically
+  Leaf
+  Node(left: Tree<T>, value: T, right: Tree<T>)
+}
+
+type Cents = Int where self >= 0   // refinement alias
+type Grid = List<List<Int>>        // plain alias
+const MAX_USERS: Int = 1_000
+```
+
+Construct with all fields named: `Point { x: 1, y: 2 }`. Variants are qualified when
+constructed: `Shape.Circle(1.0)`, `Shape.Empty`. The prelude variants `Some`, `None`,
+`Ok` and `Err` need no qualifier.
+
+### Units of measure
+
+```
+unit m
+unit s
+fn speed(d: Float<m>, t: Float<s>) -> Float<m/s> {
+  return d / t
+}
+```
+
+`+`, `-` and comparisons need equal units; `*` and `/` combine them. Literals take the unit
+their context expects. `x as Float<m>` adds a unit; `d as Float` removes it.
+
+## Values and memory
+
+Jig has **mutable value semantics**. Assignment and argument passing copy the value
+(copies of `Str`, `List`, `Map` and `Set` are cheap: they share storage until one is
+mutated). Two variables never observe each other's changes. There are no pointers.
+
+- `let x = …` is immutable; `var x = …` is mutable. A `var` that is never mutated is an error.
+- `&mut` lets a function mutate the caller's variable. It appears only on parameters and at
+  the call site, and cannot be stored:
+
+```
+fn bump(n: &mut Int) {
+  n += 1
+}
+var count = 0
+bump(&mut count)
+```
+
+- Two `&mut` arguments to one call must be different places (`f(&mut a, &mut a.x)` is an
+  error).
+- For graphs and cyclic data, store nodes in a `List` and refer to them by index.
+
+## Functions
+
+```
+pub fn transfer(from: &mut Acct, to: &mut Acct, amt: Cents)
+  requires amt > 0, from.bal >= amt
+  ensures from.bal + to.bal == old(from.bal + to.bal)
+  effects {}
+{
+  from.bal -= amt
+  to.bal += amt
+}
+```
+
+- Every parameter and the return type are annotated. A missing `-> T` means `()`.
+- Function bodies return with an explicit `return`. Every path of a non-`()` function
+  must return.
+- Generics: `fn first<T>(xs: List<T>) -> Option<T>`. Type arguments are inferred at call
+  sites. Bounds name interfaces: `fn largest<T: Ord>(xs: List<T>) -> Option<T>`.
+- Methods are declared on a type of the same package and called with a dot:
+
+```
+fn Point.norm2(self) -> Int {
+  return self.x * self.x + self.y * self.y
+}
+fn Acct.deposit(&mut self, amt: Cents) {
+  self.bal += amt
+}
+fn Point.origin() -> Point {                 // associated function: Point.origin()
+  return Point { x: 0, y: 0 }
+}
+```
+
+- Closures capture copies of variables. Their body yields its last expression:
+  `xs.map(fn(x) { x * 2 })`. Parameter types may be omitted when the expected type is known.
+- `if` and `match` are expressions; their blocks also yield their last expression.
+
+### Interfaces
+
+Interfaces are structural: a type satisfies one if it has the methods. They are used as
+generic bounds and are resolved at compile time.
+
+```
+pub interface Shape {
+  fn area(self) -> Float
+}
+fn total<T: Shape>(xs: List<T>) -> Float { … }
+```
+
+Built-in interfaces: `Eq` (`==`, `!=`), `Ord` (`<`, `<=`, `>`, `>=`), `Hash`, `Show`
+(`.str()`). Every type except functions satisfies `Eq` and `Show`; every type except
+functions and `Float` satisfies `Hash` and `Ord`. Structs and enums compare field by field
+in declaration order. Define `fn T.str(self) -> Str` to customize `Show`.
+
+## Effects
+
+A function is pure unless it declares effects. A function may only call functions whose
+effects are a subset of its own.
+
+| Effect | Grants |
+| --- | --- |
+| `io` | console input and output |
+| `fs` | files and directories |
+| `net` | network |
+| `clock` | wall and monotonic time |
+| `rand` | randomness |
+| `env` | process arguments, environment variables, exit |
+| `spawn` | threads |
+| `ffi` | C functions |
+
+```
+import "std/io"
+fn main() effects {io} {
+  io.println("hello")
+}
+```
+
+Function types carry effects: `fn(Int) -> Int effects {io}`. A pure function value cannot
+perform effects. Tests run effects against deterministic fakes.
+
+## Statements and expressions
+
+```
+let p = Point { x: 1, y: 2 }
+var total = 0
+total += p.x
+let (q, r) = divmod(17, 5)
+let big = if total > 10 { "big" } else { "small" }
+
+for i in 0..10 { … }               // half-open range
+for x in xs { … }                  // each element, by value
+for (k, v) in m { … }              // map entries in insertion order
+for i in 0..n invariant total >= 0 { … }
+for queue.len() > 0 { … }          // while
+for { … }                          // loop; leave with break or return
+```
+
+Operators, tightest first: postfix (`f()`, `x[i]`, `x.f`, `?`), `as`, unary (`-`, `!`, `~`),
+`* / % << >> &`, `+ - | ^`, comparisons, `&&`, `||`. Integer overflow, division by zero,
+out-of-range shifts and out-of-bounds indexing trap unless the compiler proves they cannot
+happen. A call statement whose result is not `()` is an error; write `let _ = f()`.
+
+### Match
+
+`match` must be exhaustive; an arm that can never match is an error. Patterns: `_`, a binding
+name, literals, variants with sub-patterns (unqualified), tuples, alternatives `A | B`,
+guards `if cond`.
+
+```
+fn area(s: Shape) -> Float {
+  return match s {
+    Circle(r) => 3.14159 * r * r
+    Rect(w, h) => w * h
+    Empty => 0.0
+  }
+}
+```
+
+### Errors
+
+Use `Result` and `Option`; `?` returns early with the `Err` or `None`. The error types must
+match exactly.
+
+```
+fn parse_port(s: Str) -> Result<Int, Str> {
+  let n = s.to_int().ok_or("not a number")?
+  if n < 1 || n > 65535 {
+    return Err("out of range: " + n.str())
+  }
+  return Ok(n)
+}
+```
+
+`panic(msg)` aborts the program. `assert(cond)` is a proof obligation and a runtime check.
+
+## Contracts and refinements
+
+- `requires` lists preconditions; callers must establish them.
+- `ensures` lists postconditions; `result` is the return value and `old(e)` is `e` on entry.
+- `invariant` on a `for` loop must hold before each iteration; on a struct, whenever a
+  value is constructed or mutated.
+- `T where pred` refines a type: `amt: Int where amt > 0`, or `self` in an alias.
+- Contract expressions are pure. They may call pure functions, and use
+  `forall i in a..b: pred` and `exists i in a..b: pred`.
+
+`jig prove` checks each function against its own contract and its callees' contracts, never
+their bodies. A proven contract has no runtime cost. An unproven one becomes a runtime
+check in debug builds plus a generated property test, and the report gives a
+counterexample.
+
+## Tests
+
+`test` blocks live next to the code they test and run in a deterministic runner with fake
+effects. A `test` with parameters is a property test with generated inputs.
+
+```
+test "transfer keeps the total" {
+  var a = Acct { id: 1, bal: 100 }
+  var b = Acct { id: 2, bal: 0 }
+  transfer(&mut a, &mut b, 40)
+  assert(a.bal == 60 && b.bal == 40)
+}
+
+test "add commutes"(x: Int, y: Int) requires x < 1000, y < 1000 {
+  assert(add(x, y) == add(y, x))
+}
+```
+
+Tests do not justify code: a function called only from tests is dead code.
+
+## Features and steps
+
+Scenarios are Gherkin `.feature` files in the package directory (`Feature`, `Scenario`,
+`Scenario Outline` with `Examples`, `Given`/`When`/`Then`/`And`/`But`). Steps bind to
+functions at compile time; `{name}` placeholders bind to parameters of the same name and
+are type-checked (`Str` matches a quoted string, numbers match literals).
+
+```
+Feature: Transfers
+  Scenario: transfer moves funds
+    Given an account "A" with balance 100
+    When "A" transfers 40 to "B"
+    Then "A" has balance 60
+```
+
+```
+pub struct World {
+  accts: Map<Str, Acct>
+}
+fn World.new() -> World { … }
+
+step "an account {name} with balance {amt}"
+fn given_account(w: &mut World, name: Str, amt: Cents) { … }
+```
+
+A missing, ambiguous or mistyped step is a compile error, and so is a step no scenario uses.
+
+## Dead code and traceability
+
+Roots are `main`, the `pub` API of a library package, and step functions used by a scenario.
+Unreachable functions, unused fields, unused exports and impossible match arms fail the
+build. `jig trace` answers: which scenarios exercise a function, which code is reachable but
+covered by no scenario, and what becomes dead if a scenario is deleted.
+
+## Standard library
+
+Prelude (no import): `assert(c)`, `panic(msg) -> Never`, `min(a, b)`, `max(a, b)`.
+
+| Type | Methods |
+| --- | --- |
+| integers | `str() abs() min(b) max(b) pow(n) wrapping_add(b) wrapping_sub(b) wrapping_mul(b)` |
+| `Float` | `str() abs() sqrt() floor() ceil() round() is_nan()` |
+| `Char` | `str() is_digit() is_alpha() is_space()` |
+| `Str` | `len() is_empty() s[i] -> U8, s[a..b] -> Str, + contains(t) starts_with(t) ends_with(t) find(t) -> Option<Int> split(sep) -> List<Str> lines() trim() replace(a, b) repeat(n) to_upper() to_lower() to_int() -> Option<Int> to_float() -> Option<Float> bytes() -> List<U8> chars() -> List<Char>` |
+| `List<T>` | `List.new() [a, b] len() is_empty() xs[i] xs[a..b] push(x) pop() -> Option<T> get(i) -> Option<T> first() last() insert(i, x) remove(i) -> T clear() extend(ys) reverse() swap(i, j) truncate(n) contains(x) index_of(x) -> Option<Int> sort() sort_by(f) map(f) filter(f) fold(init, f) any(f) all(f) join(sep)` (`join` on `List<Str>`) |
+| `Map<K, V>` | `Map.new() len() is_empty() get(k) -> Option<V> insert(k, v) remove(k) -> Option<V> contains(k) keys() values() entries()` |
+| `Set<T>` | `Set.new() len() insert(x) remove(x) contains(x) items()` |
+| `Option<T>` | `is_some() is_none() unwrap() unwrap_or(d) ok_or(e) map(f)` |
+| `Result<T, E>` | `is_ok() is_err() unwrap() unwrap_or(d) ok() map(f) map_err(f)` |
+
+`unwrap()` requires `is_some()`/`is_ok()`: it is a proof obligation like any `requires`.
+
+| Package | Functions |
+| --- | --- |
+| `std/io` (`io`) | `print(s) println(s) eprintln(s) read_line() -> Option<Str> read_all() -> Str` |
+| `std/fs` (`fs`) | `read(path) -> Result<Str, Str> write(path, s) -> Result<(), Str> exists(path) -> Bool list(dir) -> Result<List<Str>, Str>` |
+| `std/os` (`env`) | `args() -> List<Str> var(name) -> Option<Str> exit(code) -> Never` |
+| `std/time` (`clock`) | `now_ms() -> Int now_ns() -> Int` |
+| `std/rand` (`rand`) | `int(lo, hi) -> Int float() -> Float` |
+| `std/math` (pure) | `PI E sin(x) cos(x) tan(x) exp(x) ln(x) log10(x) pow(x, y)` |
+
+## Toolchain
+
+| Command | Does |
+| --- | --- |
+| `jig check [--json]` | parse, types, effects, lints, dead code; milliseconds |
+| `jig prove [--json]` | SMT proofs per function, cached |
+| `jig test [--json] [filter]` | unit tests, property tests, scenarios |
+| `jig build [--release]` | native binary (Cranelift debug, LLVM release) |
+| `jig run [-- args]` | build and run |
+| `jig fmt [--check]` | canonical formatting; no options |
+| `jig trace <query>` | traceability reports |
+| `jig explain <code>` | long explanation of a diagnostic code |
+
+Every diagnostic has a stable code (`E0301`), a span, a message, and where possible a
+counterexample and candidate fixes. `--json` prints one JSON object per line.
