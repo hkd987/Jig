@@ -14,7 +14,8 @@ bootstrap compiler on every `.jig` file in the repository plus a few hundred mut
 | Parser | `compiler/src/syntax/parser.rs` | `syntax/ast.jig`, `syntax/parser.jig` | `jigc ast FILE` = `jig debug ast FILE` |
 | Checker: loading, collection, types, effects, exhaustiveness, lints, dead code, feature binding | `compiler/src/sema/`, `compiler/src/feature/` | `sema/` | `jigc check DIR STD` = `jig debug check DIR` |
 | MIR lowering, ownership analyses, C back end | `compiler/src/mir/lower.rs`, `compiler/src/codegen/` | `sema/mir.jig`, `sema/lower*.jig`, `sema/own.jig`, `sema/cgen*.jig` | `jigc c DIR STD` = `jig debug c DIR` |
-| Formatter, prover, test runner, interpreter | | not yet | |
+| Formatter | `compiler/src/fmt/` | `syntax/fmt.jig`, `syntax/fmt_expr.jig` | `jigc fmt FILE` = `jig fmt FILE` |
+| Prover, test runner, interpreter | | not yet | |
 
 `jigc` compiles itself: `jigc cc selfhost compiler/std` prints a self-contained C file that a
 C compiler builds into a `jigc` printing the same file again. That file is checked in as
@@ -43,6 +44,13 @@ with typed placeholders, as in the bootstrap compiler's `feature/`; the steps an
 constructors that scenarios use are roots of the dead-code check. The test also compares
 300 projects with mutated `.feature` files and step patterns (keywords, tables, outlines,
 placeholder values that do not parse or do not fit, missing and ambiguous steps).
+
+The formatter (`syntax/fmt.jig`, `syntax/fmt_expr.jig`) is the bootstrap compiler's two
+passes: comments get slots in the contexts that hold them, then each node prints flat when
+it fits in 100 columns and broken otherwise. The test formats every `.jig` file in the
+repository and 600 copies with their layout mutated (indentation stripped, lines joined
+and split, names lengthened past the width, comments and blank lines inserted, spacing
+changed); `jigc fmt` must write exactly what `jig fmt` writes, or refuse the same files.
 
 The back end (about 6,600 lines of Jig for 7,300 of Rust) lowers to the same MIR, runs the
 same ownership analyses (borrowed locals, last uses, unique lists) and prints the same C:

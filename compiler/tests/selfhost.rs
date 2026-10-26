@@ -804,3 +804,144 @@ fn jigc_modules_match_bootstrap() {
     }
     assert!(failures.is_empty(), "{} cases differ:\n{}", failures.len(), failures.join("\n"));
 }
+
+/// A mutation that changes a file's layout and little else: indentation stripped or added,
+/// lines joined or split where a line break is insignificant, spacing changed, identifiers
+/// made long enough to force breaks, comments and blank lines inserted.
+fn mutate_layout(s: &str, rng: &mut Rng) -> String {
+    let mut lines: Vec<String> = s.lines().map(|l| l.to_string()).collect();
+    if lines.is_empty() {
+        return s.to_string();
+    }
+    let k = rng.below(lines.len());
+    match rng.below(10) {
+        0 => {
+            for l in lines.iter_mut() {
+                *l = l.trim_start().to_string();
+            }
+        }
+        1 => {
+            let n = 1 + rng.below(6);
+            lines[k] = format!("{}{}", " ".repeat(n), lines[k]);
+        }
+        // Join a line ending in an opener or a comma with the next one.
+        2 => {
+            let ends = |l: &str| {
+                let t = l.trim_end();
+                (t.ends_with('(') || t.ends_with('[') || t.ends_with(',')) && !t.contains("//")
+            };
+            let cands: Vec<usize> = (0..lines.len().saturating_sub(1)).filter(|&i| ends(&lines[i])).collect();
+            if let Some(&i) = cands.get(rng.below(cands.len().max(1))) {
+                let next = lines.remove(i + 1);
+                lines[i] = format!("{} {}", lines[i].trim_end(), next.trim_start());
+            }
+        }
+        // Break after an opener or a comma.
+        3 => {
+            let l = lines[k].clone();
+            let cuts: Vec<usize> = l.match_indices(['(', '[', ',']).map(|(i, _)| i + 1).collect();
+            if !l.contains("//") && !l.contains('"') {
+                if let Some(&c) = cuts.get(rng.below(cuts.len().max(1))) {
+                    lines[k] = l[..c].to_string();
+                    lines.insert(k + 1, l[c..].to_string());
+                }
+            }
+        }
+        // A long name.
+        4 => {
+            let ids = idents(&lines[k]);
+            if let Some(&(i, j)) = ids.get(rng.below(ids.len().max(1))) {
+                let w = &lines[k][i..j];
+                if !matches!(w, "fn" | "let" | "var" | "if" | "else" | "for" | "in" | "return" | "match") {
+                    let long = format!("{w}_{}", "very_long_name_".repeat(1 + rng.below(4)));
+                    let w = w.to_string();
+                    for l in lines.iter_mut() {
+                        let ids = idents(l);
+                        for &(a, b) in ids.iter().rev() {
+                            if l[a..b] == w {
+                                l.replace_range(a..b, &long);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        5 => {
+            let c = ["// a note", "/// docs", "// TODO: more", "//"][rng.below(4)];
+            let indent = lines[k].len() - lines[k].trim_start().len();
+            lines.insert(k, format!("{}{c}", " ".repeat(indent)));
+        }
+        6 => {
+            if !lines[k].contains("//") && !lines[k].contains('"') {
+                lines[k].push_str(" // trailing");
+            }
+        }
+        7 => lines.insert(k, String::new()),
+        8 => {
+            if lines[k].trim().is_empty() {
+                lines.remove(k);
+            }
+        }
+        _ => {
+            let edits = [(", ", ","), (" = ", "="), ("(", "( "), (" {", "{"), (": ", ":"), (" + ", "+")];
+            let (from, to) = edits[rng.below(edits.len())];
+            if !lines[k].contains('"') && !lines[k].contains("//") {
+                lines[k] = lines[k].replacen(from, to, 1);
+            }
+        }
+    }
+    lines.join("\n") + "\n"
+}
+
+/// `jigc fmt` writes what `jig fmt` writes: on every `.jig` file in the repository and on 600
+/// copies with their layout mutated (or broken: then both refuse).
+#[test]
+fn jigc_formatter_matches_bootstrap() {
+    if !have_cc() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    let root = repo_root();
+    let exe = jigc();
+    let mut files = Vec::new();
+    for d in ["compiler", "examples", "selfhost", "bench"] {
+        jig_files(&root.join(d), &mut files);
+    }
+    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("selfhost-fmt");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    let compare = |src: &str, name: &str| -> Option<String> {
+        let path = work.join(name);
+        std::fs::write(&path, src).unwrap();
+        let out = Command::new(exe).arg("fmt").arg(&path).output().unwrap();
+        let actual = out.status.success().then(|| String::from_utf8_lossy(&out.stdout).to_string());
+        let expected = jig::fmt::format_source(src).ok();
+        if actual == expected {
+            return None;
+        }
+        let (e, a) = (expected.unwrap_or_default(), actual.unwrap_or_default());
+        let (el, al): (Vec<&str>, Vec<&str>) = (e.lines().collect(), a.lines().collect());
+        let first = el.iter().zip(&al).position(|(x, y)| x != y).unwrap_or(el.len().min(al.len()));
+        Some(format!(
+            "{name}: line {} differs (bootstrap {:?}, jigc {:?}) {}",
+            first + 1,
+            el.get(first),
+            al.get(first),
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    };
+    let mut failures: Vec<String> = Vec::new();
+    let sources: Vec<String> = files.iter().map(|f| std::fs::read_to_string(f).unwrap()).collect();
+    for (i, src) in sources.iter().enumerate() {
+        failures.extend(compare(src, &format!("file{i}.jig")));
+    }
+    let mut rng = Rng(0xd1b5_4a32_d192_ed03);
+    for k in 0..600 {
+        let mut src = sources[rng.below(sources.len())].clone();
+        for _ in 0..1 + rng.below(4) {
+            src = mutate_layout(&src, &mut rng);
+        }
+        failures.extend(compare(&src, &format!("mut{k}.jig")));
+    }
+    assert!(failures.is_empty(), "{} cases differ:\n{}", failures.len(), failures.join("\n"));
+}

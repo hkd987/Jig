@@ -192,8 +192,9 @@ and 0.1.0-alpha is ready to tag (`.github/workflows/release.yml`).
       end are done too: `jigc c` prints byte-identical C to `jig debug c` for every example,
       run test, agent benchmark solution and `jigc` itself, and `jigc` compiles itself to a
       fixed point (below). It binds `.feature` scenarios as well (300 mutated feature
-      files and step patterns compared) and resolves imports through required modules.
-      Left to port: the formatter, the prover, the test runner and the interpreter.
+      files and step patterns compared), resolves imports through required modules, and
+      formats like `jig fmt` (every repository file and 600 layout mutations compared).
+      Left to port: the prover, the test runner and the interpreter.
 - [ ] Agent benchmark vs. Rust and TypeScript. `bench/agents`: six tasks with acceptance cases
       and reference solutions in all three languages (checked in CI), and a harness that runs
       an agent per task and language and reports tasks solved and turns. Results need agent

@@ -1,0 +1,1092 @@
+// The canonical formatter, ported from the bootstrap compiler's `fmt/`: one layout for every
+// program, no options.
+//
+// Formatting is two passes over one parsed file. The first gives every comment a slot in a
+// context: a list that prints one element per line when broken (the file's items, a block's
+// statements, a match's arms, struct fields, call arguments, parameters, a function's
+// clauses). A comment between two elements leads the next one, or trails the previous one
+// when it shares its line; a comment inside an element that no nested context claims leads
+// that element. The second walks the AST: a node takes its flat layout when that fits in
+// the width and it has no comments to place, and a broken layout otherwise.
+//
+// Layout functions return text whose first line starts at the caller's column and whose
+// later lines carry their own indentation. They take `ind`, the indentation of the line the
+// node starts on, `col`, the column it starts at, and `trail`, the width of what follows it
+// on its last line.
+
+/// Target line width.
+const WIDTH: Int = 100
+
+/// Flat layouts are abandoned once they grow past this many bytes: they cannot fit.
+const FLAT_LIMIT: Int = 400
+
+/// A list whose elements print one per line when broken, and so can hold comments.
+enum Key {
+  /// The file's items.
+  File
+  /// Struct fields, enum variants, interface methods, or function and test parameters.
+  Item(id: Int)
+  /// A function's `requires`, `ensures` and `effects` clauses.
+  Clauses(id: Int)
+  /// Block statements, match arms, struct literal fields, call arguments, list and tuple
+  /// elements, or closure parameters.
+  Expr(id: Int)
+}
+
+/// Where in a context a comment prints. Elements are named by their start offset.
+enum Slot {
+  /// At the end of the opening line (`{ // ...`).
+  Open
+  /// On its own line before the element.
+  Lead(at: Int)
+  /// At the end of the element's last line.
+  Trail(at: Int)
+  /// On its own line before the closing delimiter.
+  End
+}
+
+/// One element of a context, already rendered at the list's indentation.
+struct LineElem {
+  lo: Int
+  hi: Int
+  text: Str
+}
+
+/// Which blank lines a list keeps.
+enum Blanks {
+  /// At most one where the author left one or more.
+  Keep
+  Never
+  /// File items: one between items, except between consecutive single-line items of the
+  /// same kind (-1: none), which keep the author's choice.
+  Items(kinds: List<Int>)
+}
+
+struct Printer {
+  ast: Ast
+  src: Str
+  base: Int
+  comments: List<Comment>
+  /// Offsets of line starts that follow a blank line.
+  blank_lines: List<Int>
+  claimed: List<Bool>
+  /// Comment indices per slot, in source order.
+  slots: Map<(Key, Slot), List<Int>>
+  /// Contexts holding at least one comment: these never print flat.
+  has: Set<Key>
+}
+
+/// Format `src`, or say why it cannot be: it does not parse.
+pub fn format_source(src: Str) -> Result<Str, Str> {
+  let parsed = parse(src, 0)
+  if !parsed.errors.is_empty() {
+    let d = parsed.errors[0]
+    return Err(d.code + " at byte " + d.lo.str() + ": " + d.msg)
+  }
+  let lx = lex(src, 0)
+  var claimed: List<Bool> = []
+  for _ in lx.comments {
+    claimed.push(false)
+  }
+  var p = Printer {
+    ast: parsed.ast
+    src: src
+    base: 0
+    comments: lx.comments
+    blank_lines: lx.blank_lines
+    claimed: claimed
+    slots: Map.new()
+    has: Set.new()
+  }
+  p.claim_file()
+  let out = tidy(p.print_file())
+  // Never lose a comment: a mismatch is a formatter bug, and the source is left as it was.
+  var before: List<Str> = []
+  for i in 0..p.comments.len() {
+    before.push(p.comment(i))
+  }
+  before.sort()
+  return Ok(if comment_texts(out) == before { out } else { src })
+}
+
+/// Strip trailing white space and end with exactly one newline (none for an empty file).
+fn tidy(s: Str) -> Str {
+  var out = ""
+  for line in s.lines() {
+    out += trim_end_space(line)
+    out += "\n"
+  }
+  var end = out.len()
+  for end > 0 && out[end - 1] == 10 {
+    end -= 1
+  }
+  if end == 0 {
+    return ""
+  }
+  return out[0..end] + "\n"
+}
+
+/// Unicode white space, as Rust's `char::is_whitespace`.
+fn is_space_char(c: Char) -> Bool {
+  let v = c as Int
+  return (v >= 9 && v <= 13) ||
+    v == 32 ||
+    v == 133 ||
+    v == 160 ||
+    v == 5760 ||
+    (v >= 8192 && v <= 8202) ||
+    v == 8232 ||
+    v == 8233 ||
+    v == 8239 ||
+    v == 8287 ||
+    v == 12288
+}
+
+/// Bytes in `c`'s UTF-8 encoding.
+fn char_len(c: Char) -> Int {
+  let v = c as Int
+  return if v < 128 { 1 } else if v < 2048 { 2 } else if v < 65536 { 3 } else { 4 }
+}
+
+fn trim_end_space(s: Str) -> Str {
+  var end = 0
+  var i = 0
+  for c in s.chars() {
+    i += char_len(c)
+    if !is_space_char(c) {
+      end = i
+    }
+  }
+  return s[0..end]
+}
+
+/// The text after the last line break of `s` (all of it if there is none).
+fn last_line(s: Str) -> Str {
+  var i = s.len()
+  for i > 0 {
+    i -= 1
+    if s[i] == 10 {
+      return s[i + 1..s.len()]
+    }
+  }
+  return s
+}
+
+/// The sorted texts of the comments in `src`.
+fn comment_texts(src: Str) -> List<Str> {
+  var v: List<Str> = []
+  for c in lex(src, 0).comments {
+    v.push(if c.hi <= src.len() && c.lo <= c.hi { src[c.lo..c.hi] } else { "" })
+  }
+  v.sort()
+  return v
+}
+
+/// The width in columns of a single-line string.
+fn width(s: Str) -> Int {
+  var n = 0
+  for i in 0..s.len() {
+    let b = s[i] as Int
+    if b < 128 || b >= 192 {
+      n += 1
+    }
+  }
+  return n
+}
+
+/// The column after printing `s` from column `col`.
+fn end_col(col: Int, s: Str) -> Int {
+  var i = s.len()
+  for i > 0 {
+    i -= 1
+    if s[i] == 10 {
+      return width(s[i + 1..s.len()])
+    }
+  }
+  return col + width(s)
+}
+
+fn spaces(n: Int) -> Str {
+  return " ".repeat(n)
+}
+
+fn newline(s: &mut Str, n: Int) {
+  s += "\n" + spaces(n)
+}
+
+fn hex_digits(v: Int) -> Str {
+  let digits = "0123456789abcdef"
+  if v == 0 {
+    return "0"
+  }
+  var out = ""
+  var x = v
+  for x > 0 {
+    out = digits[x % 16..x % 16 + 1] + out
+    x = x / 16
+  }
+  return out
+}
+
+/// `s` with escapes, inside `quote`s.
+fn escape(s: Str, quote: Char) -> Str {
+  var out = ""
+  for c in s.chars() {
+    let v = c as Int
+    if c == '\n' {
+      out += "\\n"
+    } else if c == '\t' {
+      out += "\\t"
+    } else if c == '\r' {
+      out += "\\r"
+    } else if c == '\0' {
+      out += "\\0"
+    } else if c == '\\' {
+      out += "\\\\"
+    } else if c == quote {
+      out += "\\" + Str.from_chars([c])
+    } else if v < 32 || v == 127 {
+      out += "\\u{" + hex_digits(v) + "}"
+    } else {
+      out += Str.from_chars([c])
+    }
+  }
+  return out
+}
+
+fn push_str_lit(o: &mut Str, s: Str) {
+  o += "\"" + escape(s, '"') + "\""
+}
+
+fn push_char_lit(o: &mut Str, c: Int) {
+  let valid = c >= 0 && c <= 1114111 && (c < 55296 || c > 57343)
+  let ch = if valid { c as Char } else { '�' }
+  o += "'" + escape(Str.from_chars([ch]), '\'') + "'"
+}
+
+// ---------- the printer's helpers ----------
+
+fn Printer.text(self, lo: Int, hi: Int) -> Str {
+  let a = max(lo - self.base, 0)
+  let b = max(max(hi - self.base, 0), a)
+  if b > self.src.len() {
+    return ""
+  }
+  return self.src[a..b]
+}
+
+fn Printer.span_text(self, s: Span) -> Str {
+  return self.text(s.lo, s.hi)
+}
+
+fn Printer.comment(self, ci: Int) -> Str {
+  let c = self.comments[ci]
+  return self.text(c.lo, c.hi)
+}
+
+fn Printer.slot(self, key: Key, slot: Slot) -> List<Int> {
+  return self.slots.get((key, slot)).unwrap_or([])
+}
+
+fn Printer.has(self, key: Key) -> Bool {
+  return self.has.contains(key)
+}
+
+/// Did the author leave a blank line between offsets `a` and `b`?
+fn Printer.blank_between(self, a: Int, b: Int) -> Bool {
+  for x in self.blank_lines {
+    if x > a {
+      return x <= b
+    }
+  }
+  return false
+}
+
+fn Printer.same_line(self, a: Int, b: Int) -> Bool {
+  return !self.text(a, b).contains("\n")
+}
+
+fn Printer.byte(self, pos: Int) -> Int {
+  let i = max(pos - self.base, 0)
+  return if i < self.src.len() { self.src[i] as Int } else { 0 }
+}
+
+/// The offset of the first byte at or after `pos` that is not white space, a comment, or
+/// (if `commas`) a comma.
+fn Printer.skip_trivia(self, pos: Int, commas: Bool) -> Int {
+  let s = self.src
+  var i = max(pos - self.base, 0)
+  for i < s.len() {
+    let b = s[i]
+    if b == 32 || b == 9 || b == 13 || b == 10 || (commas && b == 44) {
+      i += 1
+    } else if b == 47 && i + 1 < s.len() && s[i + 1] == 47 {
+      for i < s.len() && s[i] != 10 {
+        i += 1
+      }
+    } else {
+      break
+    }
+  }
+  return self.base + i
+}
+
+/// The offset of the first `ch` at or after `pos`, outside comments.
+fn Printer.find_byte(self, pos: Int, ch: Int) -> Option<Int> {
+  let s = self.src
+  var i = max(pos - self.base, 0)
+  for i < s.len() {
+    if s[i] == 47 && i + 1 < s.len() && s[i + 1] == 47 {
+      for i < s.len() && s[i] != 10 {
+        i += 1
+      }
+      continue
+    }
+    if s[i] as Int == ch {
+      return Some(self.base + i)
+    }
+    i += 1
+  }
+  return None
+}
+
+/// The range `(` .. `)` of a parenthesized list opening at `lp` whose last element ends at
+/// `last_hi`.
+fn Printer.paren_range(self, lp: Int, last_hi: Option<Int>) -> (Int, Int) {
+  let after = last_hi.unwrap_or(lp + 1)
+  let rp = self.skip_trivia(after, true)
+  if self.byte(rp) == 41 {
+    return (lp, rp + 1)
+  }
+  return (lp, after)
+}
+
+/// Print a context's elements one per line at indentation `ind`, with their comments and
+/// blank lines; no newline before the first line or after the last.
+fn Printer.line_list(self, key: Key, elems: List<LineElem>, ind: Int, blanks: Blanks) -> Str {
+  var out = ""
+  var prev_end: Option<Int> = None
+  var prev_elem = -1
+  for i in 0..elems.len() {
+    let el = elems[i]
+    var between: Option<(Int, Int)> = if prev_elem >= 0 { Some((prev_elem, i)) } else { None }
+    for ci in self.slot(key, Slot.Lead(el.lo)) {
+      let c = self.comments[ci]
+      // A hoisted comment (from inside the element) stands where the element starts.
+      self.separate(&mut out, prev_end, min(c.lo, el.lo), between, blanks)
+      between = None
+      out += spaces(ind) + self.comment(ci)
+      prev_end = Some(c.hi)
+    }
+    self.separate(&mut out, prev_end, el.lo, between, blanks)
+    out += spaces(ind) + el.text
+    prev_end = Some(el.hi)
+    for ci in self.slot(key, Slot.Trail(el.lo)) {
+      out += " " + self.comment(ci)
+      prev_end = Some(self.comments[ci].hi)
+    }
+    prev_elem = i
+  }
+  for ci in self.slot(key, Slot.End) {
+    let c = self.comments[ci]
+    self.separate(&mut out, prev_end, c.lo, None, blanks)
+    out += spaces(ind) + self.comment(ci)
+    prev_end = Some(c.hi)
+  }
+  return out
+}
+
+/// The line break before a unit starting at `lo`, plus a blank line where wanted.
+/// `between` is (previous element, next element) for the first unit of an element.
+fn Printer.separate(
+  self,
+  out: &mut Str,
+  prev_end: Option<Int>,
+  lo: Int,
+  between: Option<(Int, Int)>,
+  blanks: Blanks,
+) {
+  let pe = match prev_end {
+    Some(x) => x
+    None => {
+      return
+    }
+  }
+  out += "\n"
+  let author = self.blank_between(pe, lo)
+  let blank = match blanks {
+    Keep => author
+    Never => false
+    Items(kinds) => match between {
+      Some((p, n)) => if kinds[p] >= 0 && kinds[p] == kinds[n] { author } else { true }
+      None => author
+    }
+  }
+  if blank {
+    out += "\n"
+  }
+}
+
+/// `open`, the opening comment, the elements one per line at `ind + 2`, and `close` on its
+/// own line at `ind`; just `open close` joined when there is nothing inside.
+fn Printer.wrapped(
+  self,
+  open: Str,
+  close: Str,
+  key: Key,
+  elems: List<LineElem>,
+  ind: Int,
+  blanks: Blanks,
+) -> Str {
+  var s = open
+  let opening = self.slot(key, Slot.Open)
+  for ci in opening {
+    s += " " + self.comment(ci)
+  }
+  let body = self.line_list(key, elems, ind + 2, blanks)
+  if body.is_empty() && opening.is_empty() {
+    return s + close
+  }
+  if !body.is_empty() {
+    s += "\n" + body
+  }
+  newline(&mut s, ind)
+  return s + close
+}
+
+/// A brace-delimited context: `{`, one element per line, `}`; `{}` when empty.
+fn Printer.braced(self, key: Key, elems: List<LineElem>, ind: Int) -> Str {
+  return self.wrapped("{", "}", key, elems, ind, Blanks.Keep)
+}
+
+// ---------- comments: the first pass ----------
+
+fn span_pair(s: Span) -> (Int, Int) {
+  return (s.lo, s.hi)
+}
+
+fn Printer.claim_file(&mut self) {
+  var elems: List<(Int, Int)> = []
+  for id in self.ast.top {
+    self.walk_item(id)
+    elems.push(span_pair(self.ast.items[id].span))
+  }
+  self.claim(Key.File, 0, 9223372036854775807, elems)
+}
+
+/// Assign the unclaimed comments with offsets in `lo..hi` to slots of `key`, whose elements
+/// span `elems`.
+fn Printer.claim(&mut self, key: Key, lo: Int, hi: Int, elems_in: List<(Int, Int)>) {
+  var elems = elems_in
+  elems.sort_by(fn(x, y) { x.0 < y.0 })
+  var first = true
+  var trailed = -1
+  for ci in 0..self.comments.len() {
+    let c = self.comments[ci]
+    if c.lo < lo || c.lo >= hi || self.claimed[ci] {
+      continue
+    }
+    var j = 0
+    for j < elems.len() && elems[j].0 <= c.lo {
+      j += 1
+    }
+    var slot = Slot.End
+    if j > 0 && c.lo < elems[j - 1].1 {
+      // Inside an element: hoisted to lead it.
+      slot = Slot.Lead(elems[j - 1].0)
+    } else if j > 0 && trailed != elems[j - 1].0 && self.same_line(elems[j - 1].1, c.lo) {
+      trailed = elems[j - 1].0
+      slot = Slot.Trail(elems[j - 1].0)
+    } else if j == 0 && first && c.trailing && key != Key.File {
+      slot = Slot.Open
+    } else if j < elems.len() {
+      slot = Slot.Lead(elems[j].0)
+    }
+    first = false
+    self.claimed[ci] = true
+    var at = self.slots.get((key, slot)).unwrap_or([])
+    at.push(ci)
+    self.slots.insert((key, slot), at)
+    self.has.insert(key)
+  }
+}
+
+fn Printer.walk_item(&mut self, id: Int) {
+  let it = self.ast.items[id]
+  match it.kind {
+    Fn(f) => self.walk_fn(id, f)
+    Struct(_, fields, invariants) => {
+      var elems: List<(Int, Int)> = []
+      for fd in fields {
+        match fd.refine {
+          Some(r) => self.walk_expr(r)
+          None => {}
+        }
+        elems.push(span_pair(fd.span))
+      }
+      for inv in invariants {
+        self.walk_expr(inv)
+        elems.push(span_pair(self.ast.exprs[inv].span))
+      }
+      self.claim(Key.Item(id), it.name.span.hi, it.span.hi, elems)
+    }
+    Enum(_, variants) => {
+      var elems: List<(Int, Int)> = []
+      for v in variants {
+        elems.push(span_pair(v.span))
+      }
+      self.claim(Key.Item(id), it.name.span.hi, it.span.hi, elems)
+    }
+    Interface(_, methods) => {
+      for m in methods {
+        self.walk_item(m)
+      }
+      var elems: List<(Int, Int)> = []
+      for m in methods {
+        elems.push(span_pair(self.ast.items[m].span))
+      }
+      self.claim(Key.Item(id), it.name.span.hi, it.span.hi, elems)
+    }
+    Const(_, value) => self.walk_expr(value)
+    Test(_, params, pre, body) => {
+      self.walk_params(params)
+      let lp = self.skip_trivia(it.name.span.hi, false)
+      if self.byte(lp) == 40 {
+        let last: Option<Int> = if params.is_empty() {
+          None
+        } else {
+          Some(params[params.len() - 1].span.hi)
+        }
+        let (lo, hi) = self.paren_range(lp, last)
+        var elems: List<(Int, Int)> = []
+        for p in params {
+          elems.push(span_pair(p.span))
+        }
+        self.claim(Key.Item(id), lo, hi, elems)
+      }
+      for r in pre {
+        self.walk_expr(r)
+      }
+      self.walk_expr(body)
+    }
+    _ => {}
+  }
+}
+
+fn Printer.walk_fn(&mut self, id: Int, f: FnDecl) {
+  let it = self.ast.items[id]
+  self.walk_params(f.params)
+  var elems: List<(Int, Int)> = []
+  match f.self_param {
+    Some(sp) => elems.push(span_pair(sp.span))
+    None => {}
+  }
+  for p in f.params {
+    elems.push(span_pair(p.span))
+  }
+  let lp = self.find_byte(it.name.span.hi, 40).unwrap_or(it.name.span.hi)
+  let last: Option<Int> = if elems.is_empty() { None } else { Some(elems[elems.len() - 1].1) }
+  let (lo, hi) = self.paren_range(lp, last)
+  self.claim(Key.Item(id), lo, hi, elems)
+  var clauses: List<(Int, Int)> = []
+  for e in f.pre {
+    self.walk_expr(e)
+    clauses.push(span_pair(self.ast.exprs[e].span))
+  }
+  for e in f.post {
+    self.walk_expr(e)
+    clauses.push(span_pair(self.ast.exprs[e].span))
+  }
+  if f.effect_names.is_some() {
+    clauses.push(span_pair(f.effects_span))
+  }
+  let end = match f.body {
+    Some(b) => self.ast.exprs[b].span.lo
+    None => it.span.hi
+  }
+  self.claim(Key.Clauses(id), hi, end, clauses)
+  match f.body {
+    Some(b) => self.walk_expr(b)
+    None => {}
+  }
+}
+
+fn Printer.walk_params(&mut self, ps: List<Param>) {
+  for p in ps {
+    match p.refine {
+      Some(r) => self.walk_expr(r)
+      None => {}
+    }
+  }
+}
+
+fn Printer.walk_stmt(&mut self, s: Int) {
+  match self.ast.stmts[s].kind {
+    Let(_, _, init, _) => self.walk_expr(init)
+    Assign(target, _, value) => {
+      self.walk_expr(target)
+      self.walk_expr(value)
+    }
+    Expr(e) => self.walk_expr(e)
+    Return(v) => match v {
+      Some(e) => self.walk_expr(e)
+      None => {}
+    }
+    For(head, invariants, body) => {
+      match head {
+        While(c) => self.walk_expr(c)
+        In(_, iter) => self.walk_expr(iter)
+        Forever => {}
+      }
+      for inv in invariants {
+        self.walk_expr(inv)
+      }
+      self.walk_expr(body)
+    }
+    _ => {}
+  }
+}
+
+fn Printer.expr_pairs(self, xs: List<Int>) -> List<(Int, Int)> {
+  var out: List<(Int, Int)> = []
+  for x in xs {
+    out.push(span_pair(self.ast.exprs[x].span))
+  }
+  return out
+}
+
+/// Walk an expression, iterating down left spines (binary chains, postfix chains) so long
+/// chains do not recurse deeply.
+fn Printer.walk_expr(&mut self, start: Int) {
+  var e = start
+  for {
+    let ex = self.ast.exprs[e]
+    match ex.kind {
+      Paren(x) | MutArg(x) | Try(x) | Unary(_, x) | Cast(x, _) => e = x
+      Field(base, _) | TupleField(base, _, _) | TypeArgs(base, _) => e = base
+      Index(base, index) => {
+        self.walk_expr(index)
+        e = base
+      }
+      Binary(_, lhs, rhs) => {
+        self.walk_expr(rhs)
+        e = lhs
+      }
+      Range(lo, hi) => {
+        match hi {
+          Some(h) => self.walk_expr(h)
+          None => {}
+        }
+        match lo {
+          Some(l) => e = l
+          None => {
+            return
+          }
+        }
+      }
+      Call(callee, args) => {
+        for a in args {
+          self.walk_expr(a)
+        }
+        self.claim(Key.Expr(e), self.ast.exprs[callee].span.hi, ex.span.hi, self.expr_pairs(args))
+        e = callee
+      }
+      Tuple(xs) | List(xs) => {
+        for a in xs {
+          self.walk_expr(a)
+        }
+        self.claim(Key.Expr(e), ex.span.lo, ex.span.hi, self.expr_pairs(xs))
+        return
+      }
+      If(cond, then, els) => {
+        self.walk_expr(cond)
+        self.walk_expr(then)
+        match els {
+          Some(x) => e = x
+          None => {
+            return
+          }
+        }
+      }
+      Match(scrut, arms) => {
+        self.walk_expr(scrut)
+        var elems: List<(Int, Int)> = []
+        for a in arms {
+          match a.guard {
+            Some(g) => self.walk_expr(g)
+            None => {}
+          }
+          self.walk_expr(a.body)
+          elems.push(span_pair(a.span))
+        }
+        self.claim(Key.Expr(e), self.ast.exprs[scrut].span.hi, ex.span.hi, elems)
+        return
+      }
+      Block(stmts) => {
+        var elems: List<(Int, Int)> = []
+        for s in stmts {
+          self.walk_stmt(s)
+          elems.push(span_pair(self.ast.stmts[s].span))
+        }
+        self.claim(Key.Expr(e), ex.span.lo, ex.span.hi, elems)
+        return
+      }
+      StructLit(ty, fields) => {
+        var elems: List<(Int, Int)> = []
+        for fi in fields {
+          self.walk_expr(fi.value)
+          elems.push((fi.name.span.lo, self.ast.exprs[fi.value].span.hi))
+        }
+        self.claim(Key.Expr(e), self.ast.types[ty].span.hi, ex.span.hi, elems)
+        return
+      }
+      Closure(params, _, body) => {
+        self.walk_params(params)
+        let lp = self.skip_trivia(ex.span.lo + 2, false)
+        let last: Option<Int> = if params.is_empty() {
+          None
+        } else {
+          Some(params[params.len() - 1].span.hi)
+        }
+        let (lo, hi) = self.paren_range(lp, last)
+        var elems: List<(Int, Int)> = []
+        for p in params {
+          elems.push(span_pair(p.span))
+        }
+        self.claim(Key.Expr(e), lo, hi, elems)
+        e = body
+      }
+      Quant(_, _, lo, hi, body) => {
+        self.walk_expr(lo)
+        self.walk_expr(hi)
+        e = body
+      }
+      _ => {
+        return
+      }
+    }
+  }
+}
+
+// ---------- items and the file ----------
+
+fn Printer.print_file(self) -> Str {
+  var elems: List<LineElem> = []
+  // Consecutive single-line items of one of these kinds keep the author's blank lines.
+  var kinds: List<Int> = []
+  for id in self.ast.top {
+    let it = self.ast.items[id]
+    let text = self.item(id, 0)
+    elems.push(LineElem { lo: it.span.lo, hi: it.span.hi, text: text })
+    let kind = match it.kind {
+      Import(_, _) => 1
+      Const(_, _) => 2
+      Unit => 3
+      TypeAlias(_, _) => 4
+      // Bodiless function declarations (std intrinsics).
+      Fn(f) => if f.body.is_none() { 5 } else { -1 }
+      _ => -1
+    }
+    kinds.push(if text.contains("\n") { -1 } else { kind })
+  }
+  return self.line_list(Key.File, elems, 0, Blanks.Items(kinds))
+}
+
+/// An item whose first line starts at column `ind`.
+fn Printer.item(self, id: Int, ind: Int) -> Str {
+  let it = self.ast.items[id]
+  var s = if it.is_pub { "pub " } else { "" }
+  match it.kind {
+    Import(path, _) => {
+      s += "import "
+      push_str_lit(&mut s, path)
+    }
+    Fn(f) => {
+      return self.fn_item(id, f, ind, it.is_pub)
+    }
+    Struct(generics, fields, invariants) => {
+      s += "struct " + it.name.text
+      self.generics_into(generics, &mut s)
+      s += " "
+      var elems: List<LineElem> = []
+      for fd in fields {
+        elems.push(
+          LineElem { lo: fd.span.lo, hi: fd.span.hi, text: self.field_decl(fd, ind + 2, ind + 2) },
+        )
+      }
+      for inv in invariants {
+        let sp = self.ast.exprs[inv].span
+        elems.push(
+          LineElem {
+            lo: sp.lo
+            hi: sp.hi
+            text: "invariant " + self.render(inv, ind + 2, ind + 12, 0)
+          },
+        )
+      }
+      s += self.braced(Key.Item(id), elems, ind)
+    }
+    Enum(generics, variants) => {
+      s += "enum " + it.name.text
+      self.generics_into(generics, &mut s)
+      s += " "
+      var elems: List<LineElem> = []
+      for v in variants {
+        elems.push(LineElem { lo: v.span.lo, hi: v.span.hi, text: self.variant(v, ind + 2) })
+      }
+      s += self.braced(Key.Item(id), elems, ind)
+    }
+    Interface(generics, methods) => {
+      s += "interface " + it.name.text
+      self.generics_into(generics, &mut s)
+      s += " "
+      var elems: List<LineElem> = []
+      for m in methods {
+        let mi = self.ast.items[m]
+        match mi.kind {
+          Fn(f) => elems.push(
+            LineElem { lo: mi.span.lo, hi: mi.span.hi, text: self.fn_item(m, f, ind + 2, false) },
+          )
+          _ => {}
+        }
+      }
+      s += self.braced(Key.Item(id), elems, ind)
+    }
+    TypeAlias(generics, ty) => {
+      s += "type " + it.name.text
+      self.generics_into(generics, &mut s)
+      s += " = "
+      self.ty_into(ty, &mut s)
+    }
+    Const(ty, value) => {
+      s += "const " + it.name.text + ": "
+      self.ty_into(ty, &mut s)
+      s += " = "
+      let c = ind + width(s)
+      s += self.render(value, ind, c, 0)
+    }
+    Unit => s += "unit " + it.name.text
+    Test(label, params, pre, body) => {
+      s += "test "
+      push_str_lit(&mut s, label)
+      let key = Key.Item(id)
+      if !params.is_empty() || self.has(key) {
+        var elems: List<Elem> = []
+        for p in params {
+          elems.push(Elem.Param(p))
+        }
+        let c = ind + width(s)
+        let t = if pre.is_empty() { 2 } else { 0 }
+        s += self.delimited("(", ")", key, elems, ind, c, t, false)
+      }
+      return self.with_clause(s, ind, "requires", pre, body, ind)
+    }
+  }
+  return s
+}
+
+/// `[pub ]name: T[ where pred]`, starting at column `col` of a line indented `ind`.
+fn Printer.field_decl(self, fd: FieldDecl, ind: Int, col: Int) -> Str {
+  var s = if fd.is_pub { "pub " } else { "" }
+  s += fd.name.text + ": "
+  self.ty_into(fd.ty, &mut s)
+  match fd.refine {
+    Some(r) => {
+      s += " where "
+      let c = col + width(s)
+      s += self.render(r, ind, c, 0)
+    }
+    None => {}
+  }
+  return s
+}
+
+/// `Name`, `Name()` or `Name(r: Float, Int)`; positional fields print as bare types.
+fn Printer.variant(self, v: VariantDecl, ind: Int) -> Str {
+  var s = v.name.text
+  if v.has_parens {
+    s += "("
+    for i in 0..v.fields.len() {
+      let fd = v.fields[i]
+      if i > 0 {
+        s += ", "
+      }
+      // The parser names positional fields `_0`, `_1`, ... with the type's span.
+      if fd.name.span == fd.span && fd.name.text.starts_with("_") {
+        self.ty_into(fd.ty, &mut s)
+      } else {
+        let c = ind + width(s)
+        s += self.field_decl(fd, ind, c)
+      }
+    }
+    s += ")"
+  }
+  return s
+}
+
+fn Printer.effects_text(self, es: List<Name>) -> Str {
+  var o = ""
+  self.effects_into(es, &mut o)
+  return o
+}
+
+fn Printer.fn_elems(self, f: FnDecl) -> List<Elem> {
+  var elems: List<Elem> = []
+  match f.self_param {
+    Some(sp) => elems.push(Elem.SelfParam(sp))
+    None => {}
+  }
+  for p in f.params {
+    elems.push(Elem.Param(p))
+  }
+  return elems
+}
+
+/// `[step "..."\n][pub ]fn [Recv.]name<G>(params) -> Ret`, its clauses one per line, and its
+/// body.
+fn Printer.fn_item(self, id: Int, f: FnDecl, ind: Int, is_pub: Bool) -> Str {
+  let name = self.ast.items[id].name
+  var s = ""
+  match f.step_attr {
+    Some(st) => {
+      s += "step "
+      push_str_lit(&mut s, st.pattern)
+      newline(&mut s, ind)
+    }
+    None => {}
+  }
+  let line = s.len()
+  if is_pub {
+    s += "pub "
+  }
+  s += "fn "
+  match f.recv {
+    Some(r) => {
+      s += r.ty.text
+      self.generics_into(r.generics, &mut s)
+      s += "."
+    }
+    None => {}
+  }
+  s += name.text
+  self.generics_into(f.generics, &mut s)
+  let ret = match f.ret {
+    Some(t) => " -> " + self.ty(t)
+    None => ""
+  }
+  let has_body = f.body.is_some()
+  // A lone `effects` clause stays on the signature line when it fits:
+  // `fn main() effects {io} {`.
+  if f.pre.is_empty() && f.post.is_empty() && !self.has(Key.Clauses(id)) {
+    match f.effect_names {
+      Some(es) => {
+        let eff = " " + self.effects_text(es)
+        var one = s
+        let tail = width(ret) + width(eff) + if has_body { 2 } else { 0 }
+        let col = ind + width(s[line..s.len()])
+        one += self.delimited("(", ")", Key.Item(id), self.fn_elems(f), ind, col, tail, false)
+        // As the bootstrap compiler measures it: the last line of the whole signature, step
+        // line included, from column `ind`.
+        let sig = one[line..one.len()]
+        if !sig.contains("\n") &&
+          ind + width(last_line(one)) + width(ret) + width(eff) + 2 <= WIDTH {
+          one += ret + eff
+          match f.body {
+            Some(b) => one += " " + self.block(b, ind)
+            None => {}
+          }
+          return one
+        }
+      }
+      None => {}
+    }
+  }
+  let has_clauses = !f.pre.is_empty() ||
+    !f.post.is_empty() ||
+    f.effect_names.is_some() ||
+    self.has(Key.Clauses(id))
+  let tail = width(ret) + if has_body && !has_clauses { 2 } else { 0 }
+  let col = ind + width(s[line..s.len()])
+  s += self.delimited("(", ")", Key.Item(id), self.fn_elems(f), ind, col, tail, false)
+  s += ret
+  if has_clauses {
+    s += self.clauses(id, f, ind)
+    match f.body {
+      Some(b) => {
+        newline(&mut s, ind)
+        s += self.block(b, ind)
+      }
+      None => {}
+    }
+  } else {
+    match f.body {
+      Some(b) => s += " " + self.block(b, ind)
+      None => {}
+    }
+  }
+  return s
+}
+
+/// The clause lines after a signature: `requires`, `ensures`, `effects`, each on its own line
+/// at `ind + 2`. Conditions of one clause share a line when it fits; each gets its own line
+/// otherwise, and whenever the clauses hold comments.
+fn Printer.clauses(self, id: Int, f: FnDecl, ind: Int) -> Str {
+  let key = Key.Clauses(id)
+  let ci = ind + 2
+  let groups = [("requires", f.pre), ("ensures", f.post)]
+  var s = ""
+  if self.has(key) {
+    for c in self.slot(key, Slot.Open) {
+      s += " " + self.comment(c)
+    }
+    var lines: List<LineElem> = []
+    for (kw, conds) in groups {
+      for e in conds {
+        let sp = self.ast.exprs[e].span
+        lines.push(
+          LineElem {
+            lo: sp.lo
+            hi: sp.hi
+            text: kw + " " + self.render(e, ci, ci + kw.len() + 1, 0)
+          },
+        )
+      }
+    }
+    match f.effect_names {
+      Some(es) => lines.push(
+        LineElem { lo: f.effects_span.lo, hi: f.effects_span.hi, text: self.effects_text(es) },
+      )
+      None => {}
+    }
+    let body = self.line_list(key, lines, ci, Blanks.Never)
+    if !body.is_empty() {
+      s += "\n" + body
+    }
+    return s
+  }
+  for (kw, conds) in groups {
+    if conds.is_empty() {
+      continue
+    }
+    match self.flat_joined(conds) {
+      Some(j) => if ci + kw.len() + 1 + width(j) <= WIDTH {
+        newline(&mut s, ci)
+        s += kw + " " + j
+        continue
+      }
+      None => {}
+    }
+    for e in conds {
+      newline(&mut s, ci)
+      s += kw + " " + self.render(e, ci, ci + kw.len() + 1, 0)
+    }
+  }
+  match f.effect_names {
+    Some(es) => {
+      newline(&mut s, ci)
+      s += self.effects_text(es)
+    }
+    None => {}
+  }
+  return s
+}

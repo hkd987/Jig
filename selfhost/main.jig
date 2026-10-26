@@ -9,7 +9,8 @@ import "syntax"
 // `jig debug ast FILE`, `jig debug check DIR` and `jig debug c DIR` (STD is the standard
 // library's directory, `compiler/std`; `c` prints the C program a release build compiles).
 // `jigc cc DIR STD` prints that program with the runtime inlined: one C file that a C
-// compiler alone builds, which is how `bootstrap/jigc.c` is made.
+// compiler alone builds, which is how `bootstrap/jigc.c` is made. `jigc fmt FILE` prints
+// the file as `jig fmt` writes it.
 
 fn main() effects {io, fs, env} {
   let args = os.args()
@@ -33,8 +34,22 @@ fn main() effects {io, fs, env} {
     }
     return
   }
+  if args.len() == 3 && args[1] == "fmt" {
+    let formatted = match fs.read(args[2]) {
+      Ok(src) => syntax.format_source(src)
+      Err(e) => Err(e)
+    }
+    match formatted {
+      Ok(text) => io.print(text)
+      Err(e) => {
+        io.eprintln("error: " + e)
+        os.exit(1)
+      }
+    }
+    return
+  }
   if args.len() < 3 || (args[1] != "tokens" && args[1] != "ast") {
-    io.eprintln("usage: jigc tokens|ast FILE, jigc check|c|cc DIR STD")
+    io.eprintln("usage: jigc tokens|ast|fmt FILE, jigc check|c|cc DIR STD")
     os.exit(2)
   }
   match fs.read(args[2]) {
