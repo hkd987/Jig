@@ -27,7 +27,7 @@ jobs:
       - name: Rust formatting
         run: cargo fmt --check
       - name: Jig formatting
-        run: ./target/debug/jig fmt --check compiler/std compiler/tests/run compiler/tests/fixtures compiler/tests/prove examples
+        run: ./target/debug/jig fmt --check compiler/std compiler/tests/run compiler/tests/fixtures compiler/tests/prove compiler/tests/props examples
       - name: Check examples
         run: |
           for d in examples/*/; do

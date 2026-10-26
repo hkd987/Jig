@@ -13,7 +13,7 @@ impl Rng {
     pub fn new(seed: u64) -> Rng {
         Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1)
     }
-    pub fn next(&mut self) -> u64 {
+    pub fn next_u64(&mut self) -> u64 {
         let mut x = self.0;
         x ^= x >> 12;
         x ^= x << 25;
@@ -25,7 +25,7 @@ impl Rng {
         if n == 0 {
             0
         } else {
-            self.next() % n
+            self.next_u64() % n
         }
     }
     fn chance(&mut self, one_in: u64) -> bool {
