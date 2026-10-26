@@ -257,6 +257,42 @@ fn bad_frame_generic() -> Int {
   return p.b
 }
 
+// Types that hold lists of themselves: their list elements are opaque to the prover, but
+// lengths and the fields of the outer value are not.
+struct Tree {
+  label: Int
+  kids: List<Tree>
+}
+
+enum Node {
+  Leaf(v: Int)
+  Branch(kids: List<Node>)
+}
+
+fn ok_tree(t: Tree) -> Int
+  requires t.kids.len() > 0
+  ensures result >= 1
+{
+  let k = t.kids[0]
+  return k.kids.len() + 1
+}
+
+fn ok_trees() -> Int {
+  let t = Tree { label: 1, kids: [Tree { label: 2, kids: [] }] }
+  assert(t.kids.len() == 1)
+  assert(t.label == 1)
+  return ok_tree(t)
+}
+
+fn ok_node(n: Node) -> Int
+  ensures result >= 0
+{
+  return match n {
+    Leaf(_) => 1
+    Branch(ks) => ks.len()
+  }
+}
+
 fn main() effects {io} {
   var s = Span { lo: 1, hi: 2 }
   bad_span(&mut s)
@@ -280,7 +316,9 @@ fn main() effects {io} {
     ok_frame() +
     bad_frame_field() +
     bad_frame_list() +
-    bad_frame_generic()
+    bad_frame_generic() +
+    ok_trees() +
+    ok_node(Node.Branch([Node.Leaf(1)]))
   io.println((total + more + rest).str() + ok_break([1]).str() + ok_short_circuit([1], 0).str())
   io.println(Shape.Square(2).str())
 }

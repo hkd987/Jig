@@ -373,6 +373,10 @@ pub struct Gen<'a> {
     /// Inside a quantifier body evaluated for its value: no definitions or obligations.
     inline: u32,
     rec_fields: FxHashMap<(String, u32, u32), Sv>,
+    /// The types `fresh_at` is building values of, outermost first.
+    expanding: Vec<AdtId>,
+    /// Memo for `holds_itself`.
+    holds_itself: FxHashMap<Ty, bool>,
     prelude: Option<PkgId>,
     /// The return type of the function being verified (for `?`).
     cur_ret: Option<Ty>,
@@ -406,6 +410,8 @@ impl<'a> Gen<'a> {
             loops: Vec::new(),
             inline: 0,
             rec_fields: FxHashMap::default(),
+            expanding: Vec::new(),
+            holds_itself: FxHashMap::default(),
             prelude,
             cur_ret: None,
             depth: 0,
@@ -619,44 +625,107 @@ impl<'a> Gen<'a> {
             ),
             TyKind::Adt(a, _) => {
                 let ad = &self.defs.adts[a];
-                if ad.recursive {
+                // Recursive enums, and types that hold themselves in a list, stay opaque.
+                if ad.recursive || self.expanding.contains(&a) {
                     return Sv::Leaf(self.leaf(Base::Opaque(t), depth, hint));
                 }
-                if ad.is_enum() {
-                    let n = ad.variants().len() as u32;
-                    let vts = self.variant_tys(t);
-                    let tag = self.leaf(Base::Tag(n), depth, &format!("{hint}_tag"));
-                    let vars = vts
-                        .into_iter()
-                        .enumerate()
-                        .map(|(vi, fs)| {
-                            fs.into_iter()
-                                .enumerate()
-                                .map(|(i, f)| self.fresh_at(f, &format!("{hint}_{vi}_{i}"), depth))
-                                .collect()
-                        })
-                        .collect();
-                    Sv::Enum { adt: a, tag, vars }
-                } else {
-                    let names: Vec<String> = ad.fields().iter().map(|f| f.name.to_string()).collect();
-                    let fts = self.field_tys(t);
-                    Sv::Struct(
-                        a,
-                        fts.into_iter()
-                            .zip(names)
-                            .map(|(f, n)| self.fresh_at(f, &format!("{hint}_{n}"), depth))
-                            .collect(),
-                    )
-                }
+                self.expanding.push(a);
+                let v = self.fresh_adt(t, a, hint, depth);
+                self.expanding.pop();
+                v
             }
             TyKind::List(e) => {
                 let len = self.leaf(Base::Int(IntTy::I64), depth, &format!("{hint}_len"));
-                let elems = self.fresh_at(e, &format!("{hint}_e"), depth + 1);
+                let elems = self.fresh_elems(e, &format!("{hint}_e"), depth + 1);
                 Sv::List { len, elems: Box::new(elems) }
             }
             TyKind::Map(..) | TyKind::Set(_) | TyKind::Fn(..) | TyKind::Param(..) => {
                 Sv::Leaf(self.leaf(Base::Opaque(t), depth, hint))
             }
+        }
+    }
+
+    /// The elements of a list of `e`, lifted `depth` times. They are opaque when `e` holds a
+    /// list of itself, so that every list of `e` has the same shape however it was made.
+    fn fresh_elems(&mut self, e: Ty, hint: &str, depth: u8) -> Sv {
+        if self.holds_itself(e) {
+            return Sv::Leaf(self.leaf(Base::Opaque(e), depth, hint));
+        }
+        self.fresh_at(e, hint, depth)
+    }
+
+    /// Whether values of a struct or enum type can contain values of the same type (through
+    /// lists: a directly recursive enum is `recursive`, and opaque everywhere).
+    fn holds_itself(&mut self, t: Ty) -> bool {
+        let TyKind::Adt(a, _) = self.kind(t) else { return false };
+        if self.defs.adts[a].recursive {
+            return false;
+        }
+        if let Some(&b) = self.holds_itself.get(&t) {
+            return b;
+        }
+        let mut seen: FxHashSet<Ty> = FxHashSet::default();
+        let mut work = vec![t];
+        let mut found = false;
+        while let Some(x) = work.pop() {
+            // Polymorphic recursion makes ever larger types: past a bound, assume the worst.
+            if seen.len() > 256 {
+                found = true;
+                break;
+            }
+            let parts = match self.kind(x) {
+                TyKind::Tuple(ts) => ts.to_vec(),
+                TyKind::List(e) => vec![e],
+                TyKind::Adt(b, _) if !self.defs.adts[b].recursive => {
+                    if self.defs.adts[b].is_enum() {
+                        self.variant_tys(x).concat()
+                    } else {
+                        self.field_tys(x)
+                    }
+                }
+                _ => vec![],
+            };
+            for p in parts {
+                if matches!(self.tys.kind(p), TyKind::Adt(b, _) if *b == a) {
+                    found = true;
+                }
+                if seen.insert(p) {
+                    work.push(p);
+                }
+            }
+            if found {
+                break;
+            }
+        }
+        self.holds_itself.insert(t, found);
+        found
+    }
+
+    /// A fresh value of a struct or enum type (`fresh_at`).
+    fn fresh_adt(&mut self, t: Ty, a: AdtId, hint: &str, depth: u8) -> Sv {
+        let ad = &self.defs.adts[a];
+        if ad.is_enum() {
+            let n = ad.variants().len() as u32;
+            let vts = self.variant_tys(t);
+            let tag = self.leaf(Base::Tag(n), depth, &format!("{hint}_tag"));
+            let vars = vts
+                .into_iter()
+                .enumerate()
+                .map(|(vi, fs)| {
+                    fs.into_iter()
+                        .enumerate()
+                        .map(|(i, f)| self.fresh_at(f, &format!("{hint}_{vi}_{i}"), depth))
+                        .collect()
+                })
+                .collect();
+            Sv::Enum { adt: a, tag, vars }
+        } else {
+            let names: Vec<String> = ad.fields().iter().map(|f| f.name.to_string()).collect();
+            let fts = self.field_tys(t);
+            Sv::Struct(
+                a,
+                fts.into_iter().zip(names).map(|(f, n)| self.fresh_at(f, &format!("{hint}_{n}"), depth)).collect(),
+            )
         }
     }
 
@@ -697,11 +766,21 @@ impl<'a> Gen<'a> {
     }
 
     fn store(&mut self, arr: &Sv, i: &str, val: &Sv) -> Option<Sv> {
-        let stored = arr.zip_leaves(val, &mut |a, b| Leaf {
+        let mut f = |a: &Leaf, b: &Leaf| Leaf {
             t: format!("(store {} {i} {})", a.t, b.t),
             base: a.base.clone(),
             depth: a.depth,
-        })?;
+        };
+        let stored = match arr.zip_leaves(val, &mut f) {
+            Some(v) => v,
+            None => {
+                // A value the elements cannot represent (one holding a list of its own type,
+                // stored into opaque elements): store an unknown element, keeping the rest.
+                let shape = Self::select_raw(arr, i);
+                let unknown = shape.map_leaves(&mut |l| self.leaf(l.base.clone(), l.depth, "elem"));
+                arr.zip_leaves(&unknown, &mut f)?
+            }
+        };
         Some(self.name_leaves(&stored))
     }
 
@@ -1574,7 +1653,7 @@ impl<'a> Gen<'a> {
         if !whole {
             // Only list elements change: keep the length.
             if let (Sv::List { len, .. }, TyKind::List(e)) = (v, self.kind(t)) {
-                let elems = self.fresh_at(e, "elems", len.depth + 1);
+                let elems = self.fresh_elems(e, "elems", len.depth + 1);
                 return Sv::List { len: len.clone(), elems: Box::new(elems) };
             }
         }
@@ -1890,7 +1969,7 @@ impl<'a> Gen<'a> {
                     vals.push(self.expr(fr, st, *x)?);
                 }
                 let elem = self.elem_ty(t);
-                let mut elems = self.fresh_at(elem, "lit", 1);
+                let mut elems = self.fresh_elems(elem, "lit", 1);
                 for (i, v) in vals.iter().enumerate() {
                     match self.store(&elems, &i.to_string(), v) {
                         Some(e) => elems = e,
@@ -3086,7 +3165,7 @@ impl<'a> Gen<'a> {
             }
             ListNew => {
                 let elem = self.elem_ty(t);
-                let elems = self.fresh_at(elem, "e", 1);
+                let elems = self.fresh_elems(elem, "e", 1);
                 Some(Sv::List {
                     len: Leaf { t: "0".into(), base: Base::Int(IntTy::I64), depth: 0 },
                     elems: Box::new(elems),
