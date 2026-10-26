@@ -13,8 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust
-        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt && rustup default stable
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: Install the pinned Z3 solver
         run: pip install --user z3-solver==5.3.2.0 && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -44,7 +44,7 @@ jobs:
           fetch-depth: 0
       - name: Install Rust and Valgrind
         run: |
-          rustup toolchain install stable --profile minimal && rustup default stable
+          rustup show active-toolchain || rustup toolchain install
           sudo apt-get update -qq && sudo apt-get install -y -qq valgrind
       - uses: Swatinem/rust-cache@v2
       - name: Pick the baseline
