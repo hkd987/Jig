@@ -1,0 +1,84 @@
+import "std/io"
+
+// Copies that alias what they were copied from (no count of their own) while nothing can
+// change it, and that keep their own count when something might. Native runs are checked
+// for use-after-free under Valgrind.
+
+enum Shape {
+  Dot
+  Poly(points: List<Int>, name: Str)
+}
+
+struct Doc {
+  shapes: List<Shape>
+  log: List<Str>
+}
+
+/// The scrutinee aliases the list element; the binding is read before anything writes.
+fn Doc.describe(self, i: Int) -> Str {
+  return match self.shapes[i] {
+    Dot => "dot"
+    Poly(ps, name) => name + ":" + ps.len().str()
+  }
+}
+
+/// The element is replaced while its parts are still in use: the bindings need their own
+/// counts.
+fn Doc.replace_and_report(&mut self, i: Int) -> Str {
+  return match self.shapes[i] {
+    Dot => "dot"
+    Poly(ps, name) => {
+      self.shapes[i] = Shape.Dot
+      self.log.push(name)
+      name + " had " + ps.len().str() + " points"
+    }
+  }
+}
+
+/// The list is cleared between the copy and its use.
+fn Doc.first_then_clear(&mut self) -> Str {
+  let first = self.shapes[0]
+  self.shapes = []
+  return match first {
+    Dot => "dot"
+    Poly(_, name) => name
+  }
+}
+
+/// A local is reassigned while a copy of its element is live, inside a loop.
+fn rotate(words: List<Str>) -> Str {
+  var cur = words
+  var out = ""
+  for _ in 0..3 {
+    let head = cur[0]
+    var next: List<Str> = []
+    for k in 1..cur.len() {
+      next.push(cur[k])
+    }
+    next.push(head)
+    cur = next
+    out = out + head + " "
+  }
+  return out
+}
+
+/// A copy of an element passed along with `&mut` to its owner.
+fn bump(xs: &mut List<List<Int>>, row: List<Int>) -> Int {
+  xs[0] = [99]
+  return row.len()
+}
+
+fn main() effects {io} {
+  var d = Doc {
+    shapes: [Shape.Poly([1, 2, 3], "tri"), Shape.Dot, Shape.Poly([1, 2, 3, 4], "quad")]
+    log: []
+  }
+  io.println(d.describe(0) + " " + d.describe(1) + " " + d.describe(2))
+  io.println(d.replace_and_report(2))
+  io.println(d.describe(2) + " " + d.log.len().str())
+  io.println(d.first_then_clear() + " " + d.shapes.len().str())
+  io.println(rotate(["a", "b", "c"]))
+  var grid = [[1, 2], [3]]
+  let row = grid[0]
+  io.println(bump(&mut grid, row).str() + " " + grid[0][0].str() + " " + row[1].str())
+}

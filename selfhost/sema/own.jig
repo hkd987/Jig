@@ -1,7 +1,8 @@
 // Ownership analyses over MIR that let code generation skip reference-count traffic, ported
-// from the bootstrap compiler's `codegen/own.rs`: borrowed locals (parts of by-value
-// parameters, which need no count of their own), last uses (which may move a value out
-// instead of retaining it) and unique lists (whose element writes need no copy check).
+// from the bootstrap compiler's `codegen/own.rs`: borrowed locals (parts of values that stay
+// alive and unchanged while they are used, which need no count of their own), last uses
+// (which may move a value out instead of retaining it) and unique lists (whose element
+// writes need no copy check).
 
 fn place_uses(p: Place, out: &mut List<Int>) {
   out.push(p.local)
@@ -102,9 +103,18 @@ fn by_value_params(mf: MFn) -> Set<Int> {
   return out
 }
 
-/// Locals that only ever hold a part of a by-value parameter (or of another such local):
-/// match scrutinees and pattern bindings, typically.
-fn borrowed_locals(mf: MFn) -> Set<Int> {
+/// Locals that alias what they were copied from instead of counting their own reference:
+/// match scrutinees and pattern bindings, typically. Each is only ever assigned whole, from a
+/// place (never written in part or passed `&mut`). It is borrowed when what it was copied
+/// from (its root, through other borrowed locals) stays alive and unchanged while it is used:
+/// always for a by-value parameter, which the caller keeps alive and nobody changes; for any
+/// other root (`rc` locals only), when no path from a copy to a use of the local writes,
+/// drops or may move the root.
+fn borrowed_locals(mf: MFn, rc: Set<Int>) -> Set<Int> {
+  var params: Set<Int> = Set.new()
+  for (l, _) in mf.params {
+    params.insert(l)
+  }
   let by_value = by_value_params(mf)
   // For each local assigned whole: the local each assignment copies from (-1: something else).
   var sources: Map<Int, List<Int>> = Map.new()
@@ -117,7 +127,7 @@ fn borrowed_locals(mf: MFn) -> Set<Int> {
             bad.insert(p.local)
           } else {
             let src = match rv {
-              Use(Copy(q)) => q.local
+              Use(Copy(q)) => if q.local != p.local { q.local } else { -1 }
               _ => -1
             }
             var srcs = sources.get(p.local).unwrap_or([])
@@ -140,37 +150,233 @@ fn borrowed_locals(mf: MFn) -> Set<Int> {
       }
     }
   }
-  var ok: Set<Int> = Set.new()
-  for l in by_value.items() {
-    if !sources.contains(l) && !bad.contains(l) {
-      ok.insert(l)
+  // Candidates: not the return slot or a parameter, never written in part, every assignment
+  // a copy of a place.
+  var cands: List<(Int, List<Int>)> = []
+  var is_cand: Set<Int> = Set.new()
+  for (l, srcs) in sources {
+    if l != 0 && !params.contains(l) && !bad.contains(l) && !srcs.contains(-1) {
+      cands.push((l, srcs))
+      is_cand.insert(l)
     }
   }
-  var borrowed: Set<Int> = Set.new()
+  var wcx: Option<WindowCx> = None
+  // Each candidate's roots once decided (borrowed ones only); a candidate is decided once its
+  // sources are.
+  var decided: Set<Int> = Set.new()
+  var roots: Map<Int, List<Int>> = Map.new()
   for {
-    var more: List<Int> = []
-    for (l, srcs) in sources {
-      if l == 0 || bad.contains(l) || ok.contains(l) {
+    var progress = false
+    for (l, srcs) in cands {
+      if decided.contains(l) {
         continue
       }
-      var all = true
+      var ready = true
       for s in srcs {
-        if s < 0 || !ok.contains(s) || s == l {
-          all = false
+        if is_cand.contains(s) && !decided.contains(s) {
+          ready = false
         }
       }
-      if all {
-        more.push(l)
+      if !ready {
+        continue
       }
+      var rs: List<Int> = []
+      for s in srcs {
+        match roots.get(s) {
+          Some(sr) => rs.extend(sr)
+          None => rs.push(s)
+        }
+      }
+      var stable: List<Int> = []
+      for r in rs {
+        if !by_value.contains(r) && !stable.contains(r) {
+          stable.push(r)
+        }
+      }
+      var ok = stable.is_empty()
+      if !ok && rc.contains(l) {
+        if wcx.is_none() {
+          wcx = Some(window_cx(mf, is_cand, rc))
+        }
+        match wcx {
+          Some(cx) => ok = window_clean(mf, cx, params, l, stable)
+          None => {}
+        }
+      }
+      if ok {
+        roots.insert(l, rs)
+      }
+      decided.insert(l)
+      progress = true
     }
-    if more.is_empty() {
-      return borrowed
-    }
-    for l in more {
-      ok.insert(l)
-      borrowed.insert(l)
+    if !progress {
+      break
     }
   }
+  var out: Set<Int> = Set.new()
+  for (l, _) in roots {
+    out.insert(l)
+  }
+  return out
+}
+
+fn whole_read(op: Operand, roots: List<Int>, params: Set<Int>) -> Bool {
+  return match op {
+    Copy(q) => q.proj.is_empty() && !params.contains(q.local) && roots.contains(q.local)
+    _ => false
+  }
+}
+
+/// Whether a statement may write, drop or move one of `roots`: assign it (in whole or part),
+/// pass it `&mut`, drop it, or read it whole (a last use moves the value out; a parameter is
+/// never moved).
+fn writes_any(stmt: Stmt, roots: List<Int>, params: Set<Int>) -> Bool {
+  match stmt {
+    Assign(p, rv) => {
+      if roots.contains(p.local) {
+        return true
+      }
+      match rv {
+        Use(a) | Unary(_, a, _) | Cast(a, _, _) | Inc(a, _) => {
+          return whole_read(a, roots, params)
+        }
+        Binary(_, a, b, _) => {
+          return whole_read(a, roots, params) || whole_read(b, roots, params)
+        }
+        Aggregate(_, _, ops) | Closure(_, ops) => {
+          for o in ops {
+            if whole_read(o, roots, params) {
+              return true
+            }
+          }
+          return false
+        }
+        Discriminant(_) => {
+          return false
+        }
+        Call(callee, args, _) => {
+          match callee {
+            Value(f) => if whole_read(f, roots, params) {
+              return true
+            }
+            _ => {}
+          }
+          for a in args {
+            let w = match a {
+              Value(o) => whole_read(o, roots, params)
+              MutRef(q) => roots.contains(q.local)
+            }
+            if w {
+              return true
+            }
+          }
+          return false
+        }
+      }
+    }
+    Check(_, _, _, _, _) => {
+      return false
+    }
+    Drop(l) => {
+      return roots.contains(l)
+    }
+  }
+}
+
+/// What `window_clean` needs, built once per function when a candidate first needs it: where
+/// each `rc` candidate is read (statement index, or the block's length for its terminator),
+/// and each block's predecessors.
+struct WindowCx {
+  uses_at: Map<Int, List<(Int, Int)>>
+  preds: List<List<Int>>
+}
+
+fn note_uses(
+  us: List<Int>,
+  b: Int,
+  k: Int,
+  cands: Set<Int>,
+  rc: Set<Int>,
+  uses_at: &mut Map<Int, List<(Int, Int)>>,
+) {
+  for l in us {
+    if cands.contains(l) && rc.contains(l) {
+      var at = uses_at.get(l).unwrap_or([])
+      at.push((b, k))
+      uses_at.insert(l, at)
+    }
+  }
+}
+
+fn window_cx(mf: MFn, cands: Set<Int>, rc: Set<Int>) -> WindowCx {
+  var uses_at: Map<Int, List<(Int, Int)>> = Map.new()
+  var preds: List<List<Int>> = []
+  for _ in mf.blocks {
+    preds.push([])
+  }
+  for b in 0..mf.blocks.len() {
+    let block = mf.blocks[b]
+    for k in 0..block.stmts.len() {
+      var us: List<Int> = []
+      let _ = stmt_uses(block.stmts[k].stmt, &mut us)
+      note_uses(us, b, k, cands, rc, &mut uses_at)
+    }
+    var t: List<Int> = []
+    term_uses(block.term, &mut t)
+    note_uses(t, b, block.stmts.len(), cands, rc, &mut uses_at)
+    for s in successors(block.term) {
+      preds[s].push(b)
+    }
+  }
+  return WindowCx { uses_at: uses_at, preds: preds }
+}
+
+/// Whether no path from an assignment of `l` to a use of it passes a statement that writes
+/// one of `roots` (a statement that both uses `l` and writes a root counts too). Searches
+/// backwards from each use until the assignments.
+fn window_clean(mf: MFn, cx: WindowCx, params: Set<Int>, l: Int, roots: List<Int>) -> Bool {
+  var visited: List<Bool> = []
+  for _ in 0..mf.blocks.len() {
+    visited.push(false)
+  }
+  // (block, k): look at the statements before the k-th.
+  var work: List<(Int, Int)> = []
+  for (b, k) in cx.uses_at.get(l).unwrap_or([]) {
+    let stmts = mf.blocks[b].stmts
+    if k < stmts.len() && writes_any(stmts[k].stmt, roots, params) {
+      return false
+    }
+    work.push((b, k))
+  }
+  for !work.is_empty() {
+    let (b, k) = work.pop().unwrap_or((0, 0))
+    let stmts = mf.blocks[b].stmts
+    var i = k
+    var defined = false
+    for i > 0 {
+      i -= 1
+      let defines = match stmts[i].stmt {
+        Assign(p, _) => p.local == l
+        _ => false
+      }
+      if defines {
+        defined = true
+        break
+      }
+      if writes_any(stmts[i].stmt, roots, params) {
+        return false
+      }
+    }
+    if !defined {
+      for p in cx.preds[b] {
+        if !visited[p] {
+          visited[p] = true
+          work.push((p, mf.blocks[p].stmts.len()))
+        }
+      }
+    }
+  }
+  return true
 }
 
 /// For each statement, the locals whose value it may move out: read exactly once there and

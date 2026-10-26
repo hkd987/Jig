@@ -2,8 +2,9 @@
 //!
 //! Values are reference counted and copied on write, so every copy of a local is a retain
 //! and every dead local a release. Three facts remove most of that work:
-//! - a *borrowed* local only ever holds a part of a by-value parameter, which the caller
-//!   keeps alive and nobody changes for the whole call, so it needs no count of its own;
+//! - a *borrowed* local aliases part of a value that stays alive and unchanged while the
+//!   local is used (a by-value parameter, or a place nothing writes meanwhile), so it needs
+//!   no count of its own;
 //! - the *last use* of an owned local can move the value out instead of retaining it (the
 //!   local is cleared, so its later release does nothing);
 //! - a *unique* list, made unique where it is defined, stays unique (see [`unique_lists`]).
@@ -87,10 +88,15 @@ fn successors(t: &Terminator) -> Vec<BlockId> {
     }
 }
 
-/// Locals that only ever hold a part of a by-value parameter (or of another such local):
-/// match scrutinees and pattern bindings, typically. They are never written in part or
-/// passed `&mut`, so they can alias what they were copied from without a count.
-pub fn borrowed_locals(mf: &MFn) -> FxHashSet<Local> {
+/// Locals that alias what they were copied from instead of counting their own reference:
+/// match scrutinees and pattern bindings, typically. Each is only ever assigned whole, from
+/// a place (never written in part or passed `&mut`). It is borrowed when what it was copied
+/// from (its *root*, through other borrowed locals) stays alive and unchanged while it is
+/// used: always for a by-value parameter, which the caller keeps alive and nobody changes;
+/// for any other root (`rc` locals only), when no path from a copy to a use of the local
+/// writes, drops or may move the root.
+pub fn borrowed_locals(mf: &MFn, rc: &FxHashSet<Local>) -> FxHashSet<Local> {
+    let params: FxHashSet<Local> = mf.params.iter().map(|(l, _)| *l).collect();
     let by_value: FxHashSet<Local> = mf.params.iter().filter(|(_, m)| *m != Mode::MutRef).map(|(l, _)| *l).collect();
     let mut sources: FxHashMap<Local, Vec<Option<Local>>> = FxHashMap::default();
     let mut bad: FxHashSet<Local> = FxHashSet::default();
@@ -101,7 +107,7 @@ pub fn borrowed_locals(mf: &MFn) -> FxHashSet<Local> {
                 bad.insert(p.local);
             } else {
                 let src = match rv {
-                    Rvalue::Use(Operand::Copy(q)) => Some(q.local),
+                    Rvalue::Use(Operand::Copy(q)) if q.local != p.local => Some(q.local),
                     _ => None,
                 };
                 sources.entry(p.local).or_default().push(src);
@@ -115,28 +121,152 @@ pub fn borrowed_locals(mf: &MFn) -> FxHashSet<Local> {
             }
         }
     }
-    let mut ok: FxHashSet<Local> =
-        by_value.iter().copied().filter(|l| !sources.contains_key(l) && !bad.contains(l)).collect();
-    let mut borrowed: FxHashSet<Local> = FxHashSet::default();
+    // Candidates: not the return slot or a parameter, never written in part, every
+    // assignment a copy of a place.
+    let mut cands: Vec<(Local, Vec<Local>)> = sources
+        .iter()
+        .filter(|(l, srcs)| l.0 != 0 && !params.contains(l) && !bad.contains(l) && srcs.iter().all(|s| s.is_some()))
+        .map(|(l, srcs)| (*l, srcs.iter().map(|s| s.unwrap()).collect()))
+        .collect();
+    cands.sort_by_key(|(l, _)| *l);
+    let is_cand: FxHashSet<Local> = cands.iter().map(|(l, _)| *l).collect();
+    let mut wcx: Option<WindowCx> = None;
+    // Each local's roots once decided (`None`: not borrowed); a candidate is decided once
+    // its sources are.
+    let mut roots: FxHashMap<Local, Option<Vec<Local>>> = FxHashMap::default();
     loop {
-        let more: Vec<Local> = sources
-            .iter()
-            .filter(|(l, srcs)| {
-                l.0 != 0
-                    && !bad.contains(l)
-                    && !ok.contains(l)
-                    && srcs.iter().all(|s| s.is_some_and(|r| ok.contains(&r) && r != **l))
-            })
-            .map(|(l, _)| *l)
-            .collect();
-        if more.is_empty() {
-            return borrowed;
+        let mut progress = false;
+        for (l, srcs) in &cands {
+            if roots.contains_key(l) || srcs.iter().any(|s| is_cand.contains(s) && !roots.contains_key(s)) {
+                continue;
+            }
+            let mut rs: Vec<Local> = Vec::new();
+            for s in srcs {
+                match roots.get(s) {
+                    Some(Some(sr)) => rs.extend(sr.iter().copied()),
+                    _ => rs.push(*s),
+                }
+            }
+            rs.sort();
+            rs.dedup();
+            let stable: Vec<Local> = rs.iter().copied().filter(|r| !by_value.contains(r)).collect();
+            let ok = stable.is_empty()
+                || (rc.contains(l) && {
+                    let cx = wcx.get_or_insert_with(|| WindowCx::new(mf, &is_cand, rc));
+                    window_clean(mf, cx, &params, *l, &stable)
+                });
+            roots.insert(*l, ok.then_some(rs));
+            progress = true;
         }
-        for l in more {
-            ok.insert(l);
-            borrowed.insert(l);
+        if !progress {
+            break;
         }
     }
+    roots.into_iter().filter(|(_, r)| r.is_some()).map(|(l, _)| l).collect()
+}
+
+/// Whether a statement may write, drop or move one of `roots`: assign it (in whole or part),
+/// pass it `&mut`, drop it, or read it whole (a last use moves the value out; a parameter is
+/// never moved).
+fn writes_any(stmt: &Stmt, roots: &[Local], params: &FxHashSet<Local>) -> bool {
+    let whole = |op: &Operand| matches!(op, Operand::Copy(q) if q.proj.is_empty() && !params.contains(&q.local) && roots.contains(&q.local));
+    match stmt {
+        Stmt::Assign(p, rv) => {
+            roots.contains(&p.local)
+                || match rv {
+                    Rvalue::Use(a) | Rvalue::Unary(_, a, _) | Rvalue::Cast(a, _, _) | Rvalue::Inc(a, _) => whole(a),
+                    Rvalue::Binary(_, a, b, _) => whole(a) || whole(b),
+                    Rvalue::Aggregate(_, _, ops) | Rvalue::Closure(_, ops) => ops.iter().any(whole),
+                    Rvalue::Discriminant(_) => false,
+                    Rvalue::Call(callee, args, _) => {
+                        matches!(callee, Callee::Value(f) if whole(f))
+                            || args.iter().any(|a| match a {
+                                Arg::Value(o) => whole(o),
+                                Arg::MutRef(q) => roots.contains(&q.local),
+                            })
+                    }
+                }
+        }
+        Stmt::Check { .. } => false,
+        Stmt::Drop(l) => roots.contains(l),
+    }
+}
+
+/// What `window_clean` needs, built once per function when a candidate first needs it: where
+/// each `rc` candidate is read (statement index, or the block's length for its terminator),
+/// and each block's predecessors.
+struct WindowCx {
+    uses_at: FxHashMap<Local, Vec<(usize, usize)>>,
+    preds: Vec<Vec<usize>>,
+}
+
+impl WindowCx {
+    fn new(mf: &MFn, cands: &FxHashSet<Local>, rc: &FxHashSet<Local>) -> WindowCx {
+        let mut uses_at: FxHashMap<Local, Vec<(usize, usize)>> = FxHashMap::default();
+        let mut preds: Vec<Vec<usize>> = vec![Vec::new(); mf.blocks.len()];
+        let mut us = Vec::new();
+        for (b, block) in mf.blocks.iter().enumerate() {
+            for (k, (stmt, _)) in block.stmts.iter().enumerate() {
+                us.clear();
+                stmt_uses(stmt, &mut us);
+                for &l in &us {
+                    if cands.contains(&l) && rc.contains(&l) {
+                        uses_at.entry(l).or_default().push((b, k));
+                    }
+                }
+            }
+            us.clear();
+            term_uses(&block.term, &mut us);
+            for &l in &us {
+                if cands.contains(&l) && rc.contains(&l) {
+                    uses_at.entry(l).or_default().push((b, block.stmts.len()));
+                }
+            }
+            for s in successors(&block.term) {
+                preds[s.0 as usize].push(b);
+            }
+        }
+        WindowCx { uses_at, preds }
+    }
+}
+
+/// Whether no path from an assignment of `l` to a use of it passes a statement that writes
+/// one of `roots` (a statement that both uses `l` and writes a root counts too). Searches
+/// backwards from each use until the assignments.
+fn window_clean(mf: &MFn, cx: &WindowCx, params: &FxHashSet<Local>, l: Local, roots: &[Local]) -> bool {
+    let stmt = |b: usize, k: usize| &mf.blocks[BlockId(b as u32)].stmts[k].0;
+    let mut visited = vec![false; mf.blocks.len()];
+    // (block, k): look at the statements before the k-th.
+    let mut work: Vec<(usize, usize)> = Vec::new();
+    for &(b, k) in cx.uses_at.get(&l).map(|v| v.as_slice()).unwrap_or(&[]) {
+        if k < mf.blocks[BlockId(b as u32)].stmts.len() && writes_any(stmt(b, k), roots, params) {
+            return false;
+        }
+        work.push((b, k));
+    }
+    while let Some((b, k)) = work.pop() {
+        let mut i = k;
+        let mut defined = false;
+        while i > 0 {
+            i -= 1;
+            if matches!(stmt(b, i), Stmt::Assign(p, _) if p.local == l) {
+                defined = true;
+                break;
+            }
+            if writes_any(stmt(b, i), roots, params) {
+                return false;
+            }
+        }
+        if !defined {
+            for &p in &cx.preds[b] {
+                if !visited[p] {
+                    visited[p] = true;
+                    work.push((p, mf.blocks[BlockId(p as u32)].stmts.len()));
+                }
+            }
+        }
+    }
+    true
 }
 
 /// For each statement, the locals whose value it may move out: read exactly once there and

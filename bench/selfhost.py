@@ -75,7 +75,7 @@ def main():
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--instructions", action="store_true")
     ap.add_argument("--gate", action="store_true")
-    ap.add_argument("--limit", type=float, default=1.10)
+    ap.add_argument("--limit", type=float, default=1.05)
     ap.add_argument("--out")
     a = ap.parse_args()
     jig = os.path.abspath(a.jig)

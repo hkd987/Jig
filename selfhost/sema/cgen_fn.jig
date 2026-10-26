@@ -32,12 +32,18 @@ fn Cg.declare_fn(&mut self, f: Int) {
 fn Cg.emit_fn(&mut self, f: Int) {
   let mf = self.lw.mir.fns[f]
   let sig = self.fn_sig(f)
+  var rc: Set<Int> = Set.new()
+  for l in 0..mf.locals.len() {
+    if self.needs_rc(mf.locals[l]) {
+      rc.insert(l)
+    }
+  }
   var cx = FnCx {
     out: ""
     mutref: Set.new()
     params: Set.new()
     unique: unique_lists(mf, self.lw.s.tys)
-    borrowed: borrowed_locals(mf)
+    borrowed: borrowed_locals(mf, rc)
     movable: Set.new()
   }
   for (l, m) in mf.params {

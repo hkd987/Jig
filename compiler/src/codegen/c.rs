@@ -934,7 +934,9 @@ impl<'l, 'a> CGen<'l, 'a> {
         let mf = self.lw.mir.fns[f].clone();
         let sig = self.fn_sig(f);
         let unique = super::own::unique_lists(&mf, self.lw.tys);
-        let borrowed = super::own::borrowed_locals(&mf);
+        let rc: FxHashSet<Local> =
+            mf.locals.iter_enumerated().filter(|(_, d)| self.needs_rc(d.ty)).map(|(l, _)| l).collect();
+        let borrowed = super::own::borrowed_locals(&mf, &rc);
         let mut cx = FnCx {
             out: String::new(),
             mutref: FxHashSet::default(),

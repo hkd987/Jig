@@ -48,19 +48,21 @@ The PRD's proposed targets, measured on `main` (4-core Xeon, clang 18):
 | Bootstrap compiler regression per change | under 2% or sign-off | gated in CI (`bench/compare.py`) | met |
 | Runtime vs Rust, shared suite | within 10% | 0.89 by instructions, 0.97 wall clock ([phase 3](phase3.md)) | met |
 | Hello-world release binary | under 100 KB | 84 KB (72 KB stripped) | met |
-| Self-hosted vs bootstrap compiler, same corpus | equal or faster | 1.07 by instructions (CI gate 1.10) | not yet |
+| Self-hosted vs bootstrap compiler, same corpus | equal or faster | 1.00 by instructions (CI gate 1.05); 1.5 by wall time | instructions only |
 | Agent tasks reaching a verified build, vs Rust | equal or better | harness and tasks ready (`bench/agents`); no agent runs yet | not measured |
 | Agent iterations per task, vs Rust and TypeScript | equal or fewer | as above | not measured |
 | Std and compiler functions with proven contracts | over 80% | std 91%; jigc 1% (8 of 605 functions state contracts, and all 136 of their obligations prove) | std only |
 | Language reference size | fits in 10k tokens | about 6,000 | met |
 
 **Self-hosted speed.** By pass (`bench/selfhost.py --instructions`): lexer 0.97, parser
-0.74, checker 1.56, checker through C 1.19. Lowering and C generation alone are at parity.
-The checker's gap is structural: jigc slices every identifier into a new string and reads
-types and expressions out of lists by value, retaining their payloads, where the bootstrap
-compiler compares interned symbols and borrows. Closing it means borrowing match
-scrutinees and string slices in the language's implementation, which every Jig program
-would gain from.
+0.71, checker 1.36, checker through C 1.07; geometric mean 1.00. Most of the closing came
+from the language's implementation: a copy of a place now aliases it, with no reference
+count, while nothing can write, drop or move the place's root, so reading a type's or
+expression's kind out of a list no longer retains and releases its payload. The checker's
+remaining gap is jigc's own: it slices every identifier into a new string and hashes
+strings where the bootstrap compiler compares interned symbols. Wall time is further
+behind (1.5), because jigc's nodes use 64-bit fields and the bootstrap compiler parses on
+a second thread.
 
 **Agent measures.** `bench/agents/run.py --agent CMD` runs an agent per task and language
 and reports tasks solved and turns. Its six tasks have reference solutions in all three
@@ -90,6 +92,6 @@ Release notes are in [`CHANGELOG.md`](../../CHANGELOG.md).
 - `jigc`: `.feature` files, modules from `jig.mod`, the formatter, the prover (Z3 through
   the `ffi` effect), the test runner and the interpreter. Until `jigc` passes every test
   suite the Rust compiler stays the `jig` command (D6).
-- Self-hosted speed: borrowing in place of copies for match scrutinees and string slices.
+- Self-hosted speed: identifiers interned instead of sliced, and wall time (memory).
 - Contracts on the compiler's passes.
 - Agent benchmark runs.

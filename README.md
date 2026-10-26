@@ -77,7 +77,7 @@ Measured in CI on every push (see `bench/` and `docs/gates/`):
 | Re-proof after changing one function | under 1 s | 0.2 s |
 | Runtime vs Rust, 8 benchmarks (instructions) | within 10% | 0.89 |
 | Hello-world release binary | under 100 KB | 84 KB |
-| Self-hosted compiler vs bootstrap (instructions) | equal or faster | 1.07 |
+| Self-hosted compiler vs bootstrap (instructions) | equal or faster | 1.00 |
 | Standard library functions with proven contracts | over 80% | 91% |
 
 ## Building without Rust
