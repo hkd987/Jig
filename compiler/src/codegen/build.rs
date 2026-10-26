@@ -94,7 +94,8 @@ fn unit_count(prog: &CProgram) -> usize {
 }
 
 /// Compile units concurrently, at most `jobs` at a time. Each object is cached by the hash of
-/// its compiler, flags, header and source, so an unchanged unit is never recompiled.
+/// its compiler, flags, headers (the runtime's included: its inline functions are compiled
+/// into every unit) and source, so an unchanged unit is never recompiled.
 fn compile_units(
     cc: &str,
     opts: &BuildOpts,
@@ -109,7 +110,7 @@ fn compile_units(
     let mut todo = Vec::new();
     for (i, u) in units.iter().enumerate() {
         let mut h = StableHasher::new();
-        h.str(cc).str(header).str(u);
+        h.str(cc).str(RUNTIME_H).str(header).str(u);
         for f in fl {
             h.str(f);
         }

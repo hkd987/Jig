@@ -6,3 +6,10 @@ khoor, zruog / hello, world
 98 el xxx pad|
 84
 true
+1 ["<>"]
+2 ["<>", "<>"]
+1 ["<a>"]
+3 ["<>", "<a>", "<>"]
+3 ["<a>", "<>", "<b>"]
+3 x--y--z--w--w--w
+[héllo w][rld]

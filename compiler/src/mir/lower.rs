@@ -787,6 +787,44 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                 self.cur = latch_bb;
                 self.goto(head_bb);
             }
+            ForHead::In { pat, iter } if self.lazy_split(iter).is_some() => {
+                // `for w in s.split("sep")`: one piece per iteration, no list.
+                let (base, sep) = self.lazy_split(iter).unwrap();
+                let str_t = self.lw.tys.str;
+                let s = self.temp(str_t);
+                self.expr_into(base, Place::local(s));
+                let pos = self.temp(int);
+                self.assign(Place::local(pos), Rvalue::Use(Operand::int(0)));
+                self.goto(head_bb);
+                self.cur = head_bb;
+                let c = self.temp(self.lw.tys.bool);
+                self.assign(Place::local(c), Rvalue::Binary(ast::BinOp::Ge, Operand::local(pos), Operand::int(0), int));
+                self.terminate(Terminator::If(Operand::local(c), body_bb, exit_bb));
+                self.cur = body_bb;
+                let piece = self.temp(str_t);
+                self.assign(
+                    Place::local(piece),
+                    Rvalue::Call(
+                        Callee::Intrinsic(Intrinsic::new(Op::SplitNext, vec![])),
+                        vec![
+                            Arg::Value(Operand::local(s)),
+                            Arg::Value(Operand::Const(Const::Str(sep))),
+                            Arg::MutRef(Place::local(pos)),
+                        ],
+                        str_t,
+                    ),
+                );
+                self.bind_irrefutable(pat, Place::local(piece));
+                let body_start = self.new_block();
+                self.goto(body_start);
+                self.cur = latch_bb;
+                self.goto(head_bb);
+                self.cur = body_start;
+                self.lower_loop_body(&invs, check, body, latch_bb, exit_bb);
+                self.cur = exit_bb;
+                self.pop_scope();
+                return;
+            }
             ForHead::In { pat, iter } => {
                 // Ranges iterate an integer; collections iterate a snapshot by index.
                 let (elem_kind, idx, limit, coll) = if let ExprKind::Range { lo: Some(lo), hi: Some(hi) } =
@@ -883,6 +921,26 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
         self.lower_loop_body(&invs, check, body, latch_bb, exit_bb);
         self.cur = exit_bb;
         self.pop_scope();
+    }
+
+    /// `base.split("sep")` with a non-empty literal separator, from the prelude: a loop over it
+    /// can take the pieces one at a time.
+    fn lazy_split(&self, iter: ExprId) -> Option<(ExprId, Symbol)> {
+        let ExprKind::Call { callee, args } = self.ast.exprs[iter].kind else { return None };
+        let ExprKind::Field { base, .. } = self.ast.exprs[callee].kind else { return None };
+        let Res::Method(f) = self.tables.expr_res[callee.0 as usize] else { return None };
+        let fd = &self.lw.defs.fns[f];
+        let path = self.lw.pkgs[fd.pkg].path.as_str();
+        if fd.has_body || !matches!(intrinsics::lookup(path, fd.recv, fd.name.as_str()), Some((Op::Split, _))) {
+            return None;
+        }
+        match self.ast.expr_lists.get(args) {
+            [a] => match self.ast.exprs[*a].kind {
+                ExprKind::Str(sep) if !sep.as_str().is_empty() => Some((base, sep)),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     fn lower_loop_body(&mut self, invs: &[ExprId], check: bool, body: ExprId, latch: BlockId, exit: BlockId) {

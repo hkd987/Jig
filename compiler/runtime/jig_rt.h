@@ -114,7 +114,43 @@ static inline void jig_str_release(jig_str *s) {
 jig_str *jig_str_new(const char *data, int64_t len);
 jig_str *jig_str_concat(const jig_str *a, const jig_str *b);
 /* `*s = *s + t`, growing `*s` in place when it is not shared. */
-void jig_str_append(jig_str **s, const jig_str *t);
+void jig_str_append_slow(jig_str **s, const jig_str *t);
+/* Copy n bytes with a few fixed-size moves instead of a memcpy call (short strings). */
+static inline void jig_copy_small(char *d, const char *s, size_t n) {
+    if (n >= 8) {
+        if (n > 16) {
+            memcpy(d, s, n);
+            return;
+        }
+        uint64_t a, b;
+        memcpy(&a, s, 8);
+        memcpy(&b, s + n - 8, 8);
+        memcpy(d, &a, 8);
+        memcpy(d + n - 8, &b, 8);
+    } else if (n >= 4) {
+        uint32_t a, b;
+        memcpy(&a, s, 4);
+        memcpy(&b, s + n - 4, 4);
+        memcpy(d, &a, 4);
+        memcpy(d + n - 4, &b, 4);
+    } else if (n) {
+        d[0] = s[0];
+        d[n / 2] = s[n / 2];
+        d[n - 1] = s[n - 1];
+    }
+}
+/* s = s + t: in place when s is unshared and has room. */
+static inline void jig_str_append(jig_str **sp, const jig_str *t) {
+    jig_str *s = *sp;
+    if (__builtin_expect(t && s && s->rc == 1 && s != t && s->len + t->len <= s->cap, 1)) {
+        jig_copy_small(s->data + s->len, t->data, (size_t)t->len);
+        s->len += t->len;
+        s->data[s->len] = 0;
+        return;
+    }
+    jig_str_append_slow(sp, t);
+}
+jig_str *jig_str_split_next(const jig_str *s, const jig_str *sep, int64_t *pos);
 bool jig_str_eq(const jig_str *a, const jig_str *b);
 int jig_str_cmp(const jig_str *a, const jig_str *b);
 uint64_t jig_str_hash(const jig_str *s);

@@ -243,7 +243,7 @@ jig_str *jig_str_concat(const jig_str *a, const jig_str *b) {
     return s;
 }
 
-void jig_str_append(jig_str **sp, const jig_str *t) {
+void jig_str_append_slow(jig_str **sp, const jig_str *t) {
     int64_t lt = jig_str_len(t);
     if (lt == 0) return;
     jig_str *s = *sp;
@@ -296,11 +296,29 @@ uint64_t jig_hash_u64(uint64_t x) {
 
 uint64_t jig_hash_combine(uint64_t h, uint64_t x) { return jig_hash_u64(h ^ (x + 0x9e3779b97f4a7c15ull + (h << 6))); }
 
+/* Eight bytes at a time; the tail is read with overlapping loads inside the string. */
 uint64_t jig_str_hash(const jig_str *s) {
-    uint64_t h = 0xcbf29ce484222325ull;
     const unsigned char *p = (const unsigned char *)jig_str_data(s);
-    for (int64_t i = 0; i < jig_str_len(s); i++) h = (h ^ p[i]) * 0x100000001b3ull;
-    return jig_hash_u64(h);
+    int64_t n = jig_str_len(s);
+    uint64_t h = 0x9e3779b97f4a7c15ull ^ (uint64_t)n;
+    for (; n > 8; p += 8, n -= 8) {
+        uint64_t w;
+        memcpy(&w, p, 8);
+        h = (h ^ w) * 0xbf58476d1ce4e5b9ull;
+        h ^= h >> 29;
+    }
+    uint64_t w = 0;
+    if (n == 8) {
+        memcpy(&w, p, 8);
+    } else if (n >= 4) {
+        uint32_t a, b;
+        memcpy(&a, p, 4);
+        memcpy(&b, p + n - 4, 4);
+        w = ((uint64_t)a << 32) | b;
+    } else if (n) {
+        w = (uint64_t)p[0] | (uint64_t)p[n / 2] << 8 | (uint64_t)p[n - 1] << 16;
+    }
+    return jig_hash_u64(h ^ w);
 }
 
 uint8_t jig_str_byte(const jig_str *s, int64_t i, const char *loc) {
@@ -381,6 +399,18 @@ jig_list *jig_str_split(const jig_str *s, const jig_str *sep) {
     }
     push_str_elem(&out, d + start, n - start);
     return out;
+}
+
+jig_str *jig_str_split_next(const jig_str *s, const jig_str *sep, int64_t *pos) {
+    const char *d = jig_str_data(s), *sd = jig_str_data(sep);
+    int64_t n = jig_str_len(s), m = jig_str_len(sep), i = *pos;
+    const char *p = i + m <= n ? memmem(d + i, (size_t)(n - i), sd, (size_t)m) : NULL;
+    if (!p) {
+        *pos = -1;
+        return jig_str_new(d + i, n - i);
+    }
+    *pos = (p - d) + m;
+    return jig_str_new(d + i, (p - d) - i);
 }
 
 jig_list *jig_str_lines(const jig_str *s) {

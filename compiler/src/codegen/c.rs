@@ -1792,6 +1792,7 @@ impl<'l, 'a> CGen<'l, 'a> {
                 format!("(fi{n} >= 0 ? {some} : {none})")
             }
             Split => format!("jig_str_split({}, {})", a[0], a[1]),
+            SplitNext => format!("jig_str_split_next({}, {}, {})", a[0], a[1], a[2]),
             Lines => format!("jig_str_lines({})", a[0]),
             Trim => format!("jig_str_trim({})", a[0]),
             Replace => format!("jig_str_replace({}, {}, {})", a[0], a[1], a[2]),

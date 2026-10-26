@@ -119,6 +119,9 @@ pub enum Op {
     StrSlice,
     /// `xs[a..b]`
     ListSlice,
+    /// `for w in s.split("sep")` without building the list: the piece of `s` starting at
+    /// `pos` (a `&mut Int`), which moves past the next separator, or to -1 after the last.
+    SplitNext,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

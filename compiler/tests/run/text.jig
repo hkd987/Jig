@@ -52,4 +52,27 @@ fn main() effects {io} {
     None => io.println("nan")
   }
   io.println("forty".to_int().is_none().str())
+  // Loops over split pieces, taken one at a time.
+  for src in ["", ",", "a", ",a,", "a,,b"] {
+    var seen: List<Str> = []
+    for p in src.split(",") {
+      seen.push("<" + p + ">")
+    }
+    io.println(seen.len().str() + " " + seen.str())
+  }
+  var s = "x--y--z"
+  var n = 0
+  for p in s.split("--") {
+    s = s + "--w"
+    n += 1
+    if p == "z" {
+      break
+    }
+  }
+  io.println(n.str() + " " + s)
+  var multi = ""
+  for p in "héllo wörld".split("ö") {
+    multi = multi + "[" + p + "]"
+  }
+  io.println(multi)
 }

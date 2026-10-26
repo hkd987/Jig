@@ -966,6 +966,16 @@ impl<'l, 'a> Interp<'l, 'a> {
                 };
                 ret(Value::List(Rc::new(parts)))
             }
+            SplitNext => {
+                let s = self.str_arg(&a[0], span)?;
+                let t = self.str_arg(&a[1], span)?;
+                let pos = int(&a[2]) as usize;
+                let (piece, next) = match s[pos..].find(&*t) {
+                    Some(k) => (&s[pos..pos + k], (pos + k + t.len()) as i64),
+                    None => (&s[pos..], -1),
+                };
+                Ok((Value::Str(Rc::from(piece)), vec![Value::Int(next)]))
+            }
             Lines => {
                 let s = self.str_arg(&a[0], span)?;
                 ret(Value::List(Rc::new(s.lines().map(|p| Value::Str(Rc::from(p))).collect())))
