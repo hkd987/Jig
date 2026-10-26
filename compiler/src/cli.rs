@@ -72,11 +72,84 @@ fn cmd_check(args: &[String]) -> i32 {
     if errors == 0 { 0 } else { 1 }
 }
 
+fn split_dashdash(args: &[String]) -> (Vec<String>, Vec<String>) {
+    match args.iter().position(|a| a == "--") {
+        Some(i) => (args[..i].to_vec(), args[i + 1..].to_vec()),
+        None => (args.to_vec(), Vec::new()),
+    }
+}
+
+fn analyze_or_report(o: &Opts) -> Option<crate::sema::defs::Program> {
+    let prog = crate::sema::analyze(&Sources::Disk, &o.path);
+    if prog.diags.has_errors() {
+        print_diags(&prog, &prog.diags.list, o.json);
+        let n = prog.diags.error_count();
+        if !o.json {
+            eprintln!("{n} error{}", if n == 1 { "" } else { "s" });
+        }
+        return None;
+    }
+    Some(prog)
+}
+
+fn cmd_run(args: &[String]) -> i32 {
+    let (ours, prog_args) = split_dashdash(args);
+    let o = parse_opts(&ours);
+    let Some(mut prog) = analyze_or_report(&o) else { return 1 };
+    let mut argv = vec![o.path.display().to_string()];
+    argv.extend(prog_args);
+    crate::runner::with_big_stack(move || match crate::runner::run_main(&mut prog, argv) {
+        Ok(code) => code,
+        Err(d) => {
+            eprintln!("error: {}", d.message);
+            1
+        }
+    })
+}
+
+fn cmd_test(args: &[String]) -> i32 {
+    let o = parse_opts(args);
+    let filter = o.rest.iter().find(|a| !a.starts_with("--")).cloned();
+    let Some(mut prog) = analyze_or_report(&o) else { return 1 };
+    let json = o.json;
+    let start = std::time::Instant::now();
+    let results = crate::runner::with_big_stack(move || crate::runner::run_tests(&mut prog, filter.as_deref()));
+    let failed = results.iter().filter(|r| !r.passed).count();
+    for r in &results {
+        if json {
+            println!("{}", crate::runner::test_result_json(r).to_string_compact());
+        } else if r.passed {
+            println!("ok      {} ({})", r.name, r.pkg);
+        } else {
+            println!("FAILED  {} ({})", r.name, r.pkg);
+            println!("        {}", r.message.replace('\n', "\n        "));
+            if !r.location.is_empty() {
+                println!("        at {}", r.location);
+            }
+            if !r.stdout.is_empty() {
+                println!("        stdout: {:?}", r.stdout);
+            }
+        }
+    }
+    if !json {
+        eprintln!(
+            "{} passed, {failed} failed ({} ms)",
+            results.len() - failed,
+            start.elapsed().as_millis()
+        );
+    } else {
+        println!("{}", crate::util::json::Json::obj().with("kind", "summary").with("passed", results.len() - failed).with("failed", failed).to_string_compact());
+    }
+    if failed == 0 { 0 } else { 1 }
+}
+
 pub fn main() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let rest = if args.len() > 1 { &args[1..] } else { &[][..] };
     match args.first().map(|s| s.as_str()) {
         Some("check") => cmd_check(rest),
+        Some("run") => cmd_run(rest),
+        Some("test") => cmd_test(rest),
         Some("explain") => {
             let Some(code) = args.get(1).and_then(|c| crate::diag::Code::parse(c)) else {
                 eprintln!("usage: jig explain <code>");
@@ -87,7 +160,7 @@ pub fn main() -> i32 {
             0
         }
         _ => {
-            eprintln!("usage: jig <check|explain> [path] [--json]");
+            eprintln!("usage: jig <check|test|run|explain> [path] [--json]");
             2
         }
     }
