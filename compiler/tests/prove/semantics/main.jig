@@ -1,0 +1,217 @@
+import "std/io"
+
+// Each `check_*` function has one assertion the prover must prove (ok_*) or refute (bad_*).
+
+struct Span {
+  lo: Int
+  hi: Int
+  invariant lo <= hi
+}
+
+enum Shape {
+  Circle(r: Int)
+  Square(side: Int)
+  Empty
+}
+
+enum Expr {
+  Num(v: Int)
+  Neg(e: Expr)
+}
+
+fn ok_loop_exit(n: Int) -> Int
+  requires n >= 0
+{
+  var x = 0
+  for i in 0..n invariant x >= 0, x <= i {
+    x += 1
+  }
+  assert(x >= 0)
+  return x
+}
+
+fn bad_loop_havoc(n: Int) -> Int {
+  var x = 0
+  for _i in 0..n {
+    x = 5
+  }
+  assert(x == 0)
+  return x
+}
+
+fn ok_countdown(start: Int) -> Int
+  requires start >= 0
+{
+  var x = start
+  for x > 0 invariant x >= 0 {
+    x -= 1
+  }
+  assert(x == 0)
+  return x
+}
+
+fn ok_break(xs: List<Int>) -> Bool {
+  var found = false
+  for i in 0..xs.len() {
+    if xs[i] == 3 {
+      found = true
+      break
+    }
+  }
+  assert(found || !found)
+  return found
+}
+
+fn area(s: Shape) -> Int
+  requires match s {
+    Circle(r) => r >= 0 && r < 1000
+    Square(x) => x >= 0 && x < 1000
+    Empty => true
+  }
+  ensures result >= 0
+{
+  return match s {
+    Circle(r) => 3 * r * r
+    Square(x) => x * x
+    Empty => 0
+  }
+}
+
+fn bad_area(s: Shape) -> Int
+  ensures result > 0
+{
+  return match s {
+    Circle(_) => 1
+    Square(_) => 2
+    Empty => 0
+  }
+}
+
+fn ok_option(xs: List<Int>) -> Int {
+  let v = xs.get(0)
+  return match v {
+    Some(x) => {
+      assert(xs.len() > 0)
+      x
+    }
+    None => 0
+  }
+}
+
+fn bump(c: &mut Int)
+  requires c < 100
+  ensures c == old(c) + 1
+{
+  c += 1
+}
+
+fn ok_mut() -> Int {
+  var c = 1
+  bump(&mut c)
+  assert(c == 2)
+  return c
+}
+
+fn opaque(c: &mut Int) {
+  c += 0
+}
+
+fn bad_mut() -> Int {
+  var c = 1
+  opaque(&mut c)
+  assert(c == 1)
+  return c
+}
+
+fn bad_span(s: &mut Span) {
+  s.lo = s.hi + 1
+}
+
+fn bad_list_span(xs: &mut List<Span>)
+  requires xs.len() > 0, xs[0].hi < 1000
+{
+  xs[0].lo = xs[0].hi + 1
+}
+
+fn ok_list_span(xs: &mut List<Span>)
+  requires xs.len() > 0, xs[0].lo > -1000
+{
+  xs[0].lo = xs[0].lo - 1
+}
+
+fn ok_span(s: Span) -> Int {
+  assert(s.lo <= s.hi)
+  return s.hi - s.lo
+}
+
+fn ok_recursive() -> Int {
+  let e = Expr.Neg(Expr.Num(3))
+  return match e {
+    Num(v) => v
+    Neg(inner) => match inner {
+      Num(v) => {
+        assert(v == 3)
+        -v
+      }
+      Neg(_) => 0
+    }
+  }
+}
+
+fn positives(n: Int) -> List<Int>
+  requires n >= 0, n < 1000
+  ensures result.len() == n, forall i in 0..result.len(): result[i] > 0
+{
+  var out: List<Int> = []
+  for i in 0..n invariant out.len() == i, forall k in 0..out.len(): out[k] > 0 {
+    out.push(i + 1)
+  }
+  return out
+}
+
+fn ok_division() -> Int {
+  assert(-7 / 2 == -3)
+  assert(-7 % 2 == -1)
+  assert(7 / -2 == -3)
+  return 0
+}
+
+fn ok_strings(s: Str) -> Int {
+  assert(("ab" + "c").len() == 3)
+  assert("a" != "b")
+  let t = s
+  assert(s == t)
+  assert((s + "x").len() == s.len() + 1)
+  return 0
+}
+
+fn bad_strings(s: Str, t: Str) -> Int {
+  assert(s == t)
+  return 0
+}
+
+fn ok_short_circuit(xs: List<Int>, i: Int) -> Bool {
+  return i >= 0 && i < xs.len() && xs[i] > 0
+}
+
+fn main() effects {io} {
+  var s = Span { lo: 1, hi: 2 }
+  bad_span(&mut s)
+  var spans = [s]
+  bad_list_span(&mut spans)
+  ok_list_span(&mut spans)
+  let total = ok_loop_exit(3) +
+    bad_loop_havoc(2) +
+    ok_countdown(4) +
+    area(Shape.Empty) +
+    bad_area(Shape.Circle(1))
+  let more = ok_option([1]) +
+    ok_mut() +
+    bad_mut() +
+    ok_span(s) +
+    ok_recursive() +
+    positives(3).len()
+  let rest = ok_division() + ok_strings("q") + bad_strings("a", "b")
+  io.println((total + more + rest).str() + ok_break([1]).str() + ok_short_circuit([1], 0).str())
+  io.println(Shape.Square(2).str())
+}

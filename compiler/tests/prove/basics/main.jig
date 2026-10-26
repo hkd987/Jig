@@ -1,0 +1,82 @@
+import "std/io"
+
+// Contracts the prover must prove, and ones it must refute with a counterexample.
+
+type Cents = Int where self >= 0
+
+struct Acct {
+  name: Str
+  bal: Cents
+}
+
+fn transfer(from: &mut Acct, to: &mut Acct, amt: Cents)
+  requires amt > 0, from.bal >= amt, to.bal <= 1000000
+  ensures from.bal + to.bal == old(from.bal + to.bal)
+{
+  from.bal -= amt
+  to.bal += amt
+}
+
+fn clamp(x: Int, lo: Int, hi: Int) -> Int
+  requires lo <= hi
+  ensures lo <= result, result <= hi
+{
+  if x < lo {
+    return lo
+  }
+  if x > hi {
+    return hi
+  }
+  return x
+}
+
+fn wrong_max(a: Int, b: Int) -> Int
+  ensures result >= a, result >= b
+{
+  if a > b {
+    return b
+  }
+  return a
+}
+
+fn sum_to(n: Int) -> Int
+  requires n >= 0, n <= 1000
+  ensures result >= 0
+{
+  var total = 0
+  for i in 0..n invariant total >= 0, i <= 1000 {
+    total += i
+  }
+  return total
+}
+
+fn first_or_zero(xs: List<Int>) -> Int {
+  if xs.len() > 0 {
+    return xs[0]
+  }
+  return 0
+}
+
+fn last(xs: List<Int>) -> Int {
+  return xs[xs.len() - 1]
+}
+
+fn halve(x: Int) -> Int
+  requires x != 0
+{
+  return 100 / x
+}
+
+fn caller() -> Int {
+  let c = clamp(5, 0, 10)
+  assert(c >= 0 && c <= 10)
+  return halve(c + 1) + halve(0)
+}
+
+fn main() effects {io} {
+  var a = Acct { name: "a", bal: 10 }
+  var b = Acct { name: "b", bal: 0 }
+  transfer(&mut a, &mut b, 5)
+  io.println(a.name + b.name + wrong_max(1, 2).str() + sum_to(3).str())
+  io.println((first_or_zero([1]) + last([2]) + caller()).str())
+}

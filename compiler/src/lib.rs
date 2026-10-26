@@ -10,3 +10,4 @@ pub mod sema;
 pub mod syntax;
 pub mod tools;
 pub mod util;
+pub mod verify;

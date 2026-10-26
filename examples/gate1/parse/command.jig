@@ -1,0 +1,322 @@
+// The line-based command language.
+//
+//   add-item <sku> <price> <stock> [weight]   price: 250 (cents) or 2.50 or $2.50
+//   price <sku> <price>                       weight: 120, 120g or 1.5kg
+//   restock <sku> <qty>
+//   order <customer> <sku> <qty> [<sku> <qty>...] [with <COUPON>]
+//   cancel <id> [reason...]
+//   ship <id>
+//   coupon <CODE> <percent>
+//   limit <customer> <amount>
+//   stock [sku] | customer <name> | orders [customer] | history [n] | report | help
+
+import "model"
+import "text"
+
+pub enum Command {
+  AddItem(sku: Str, price: Int, stock: Int, weight: Float<g>)
+  SetPrice(sku: Str, price: Int)
+  Restock(sku: Str, qty: Int)
+  PlaceOrder(customer: Str, lines: List<(Str, Int)>, coupon: Option<Str>)
+  Cancel(id: Int, reason: Str)
+  Ship(id: Int)
+  AddCoupon(code: Str, percent: Int)
+  SetLimit(customer: Str, amount: Int)
+  ShowStock(sku: Option<Str>)
+  ShowCustomer(name: Str)
+  ListOrders(customer: Option<Str>)
+  History(count: Int)
+  Report
+  Help
+  Blank
+}
+
+pub enum ParseError {
+  UnknownCommand(word: Str)
+  Missing(command: Str, what: Str)
+  Extra(command: Str, token: Str)
+  BadNumber(what: Str, token: Str)
+  BadName(what: Str, token: Str)
+  BadMoney(token: Str)
+  BadWeight(token: Str)
+  OutOfRange(what: Str, value: Int, lo: Int, hi: Int)
+}
+
+pub fn ParseError.str(self) -> Str {
+  return match self {
+    UnknownCommand(word) => "unknown command '" + word + "' (try 'help')"
+    Missing(command, what) => command + ": missing " + what
+    Extra(command, token) => command + ": unexpected '" + token + "'"
+    BadNumber(what, token) => "bad " + what + " '" + token + "': expected a whole number"
+    BadName(what, token) => "bad " + what + " '" + token + "'"
+    BadMoney(token) => "bad amount '" + token + "': use 250, 2.50 or $2.50"
+    BadWeight(token) => "bad weight '" + token + "': use 120, 120g or 1.5kg"
+    OutOfRange(what, value, lo, hi) => text.fill(
+      "{} {} is out of range {}..{}",
+      [what, value.str(), lo.str(), hi.str()],
+    )
+  }
+}
+
+const DEFAULT_WEIGHT: Float<g> = 100.0
+const MAX_WEIGHT: Float<g> = 1_000_000.0
+const DEFAULT_HISTORY: Int = 10
+const MAX_QTY: Int = 100_000
+const MAX_CENTS: Int = 100_000_000
+
+/// Parses one input line. Blank lines and comments become `Command.Blank`.
+pub fn parse_line(line: Str) -> Result<Command, ParseError> {
+  let toks = tokenize(line)
+  if toks.is_empty() {
+    return Ok(Command.Blank)
+  }
+  var a = Args { command: toks[0], toks: toks, pos: 1 }
+  let cmd = match toks[0] {
+    "add-item" => parse_add_item(&mut a)?
+    "price" => Command.SetPrice(a.name("sku")?, a.money("price")?)
+    "restock" => Command.Restock(a.name("sku")?, a.count("quantity", 1)?)
+    "order" => parse_order(&mut a)?
+    "cancel" => Command.Cancel(a.count("order id", 1)?, a.rest("no reason given"))
+    "ship" => Command.Ship(a.count("order id", 1)?)
+    "coupon" => parse_coupon(&mut a)?
+    "limit" => Command.SetLimit(a.name("customer")?, a.money("limit")?)
+    "stock" => Command.ShowStock(a.optional_name("sku")?)
+    "customer" => Command.ShowCustomer(a.name("customer")?)
+    "orders" => Command.ListOrders(a.optional_name("customer")?)
+    "history" => Command.History(a.optional_count("count", DEFAULT_HISTORY)?)
+    "report" => Command.Report
+    "help" => Command.Help
+    other => {
+      return Err(ParseError.UnknownCommand(other))
+    }
+  }
+  a.finish()?
+  return Ok(cmd)
+}
+
+fn parse_add_item(a: &mut Args) -> Result<Command, ParseError> {
+  let sku = a.name("sku")?
+  let price = a.money("price")?
+  let stock = a.count("stock", 0)?
+  let weight = match a.next() {
+    Some(tok) => parse_weight(tok)?
+    None => DEFAULT_WEIGHT
+  }
+  return Ok(Command.AddItem(sku, price, stock, weight))
+}
+
+fn parse_order(a: &mut Args) -> Result<Command, ParseError> {
+  let customer = a.name("customer")?
+  var lines = List.new()
+  var coupon = None
+  for a.has_more() {
+    if a.peek() == "with" {
+      let _ = a.next()
+      let code = a.required("coupon code")?
+      if !is_code(code) {
+        return Err(ParseError.BadName("coupon code", code))
+      }
+      coupon = Some(code)
+      break
+    }
+    let sku = a.name("sku")?
+    let qty = a.count("quantity", 1)?
+    lines.push((sku, qty))
+  }
+  if lines.is_empty() {
+    return Err(ParseError.Missing("order", "at least one <sku> <qty> pair"))
+  }
+  return Ok(Command.PlaceOrder(customer, lines, coupon))
+}
+
+fn parse_coupon(a: &mut Args) -> Result<Command, ParseError> {
+  let code = a.required("coupon code")?
+  if !is_code(code) {
+    return Err(ParseError.BadName("coupon code", code))
+  }
+  let pct = a.count("percent", 1)?
+  if pct > 50 {
+    return Err(ParseError.OutOfRange("percent", pct, 1, 50))
+  }
+  return Ok(Command.AddCoupon(code, pct))
+}
+
+/// Parses an amount of money into cents. A bare integer is cents; a
+/// decimal point or a `$` means dollars ("2.5", "2.50" and "$2.50" are
+/// all 250, "$3" is 300).
+fn parse_money(tok: Str) -> Result<Int, ParseError> {
+  let in_dollars = tok.starts_with("$")
+  let body = if in_dollars { tok[1..tok.len()] } else { tok }
+  let parts = body.split(".")
+  if parts.len() == 1 {
+    let n = digits(parts[0]).ok_or(ParseError.BadMoney(tok))?
+    return Ok(if in_dollars { n * 100 } else { n })
+  }
+  if parts.len() != 2 || parts[1].is_empty() || parts[1].len() > 2 {
+    return Err(ParseError.BadMoney(tok))
+  }
+  let dollars = digits(parts[0]).ok_or(ParseError.BadMoney(tok))?
+  let frac = digits(parts[1]).ok_or(ParseError.BadMoney(tok))?
+  let cents = if parts[1].len() == 1 { frac * 10 } else { frac }
+  return Ok(dollars * 100 + cents)
+}
+
+/// Parses a weight in grams ("120", "120g") or kilograms ("1.5kg").
+fn parse_weight(tok: Str) -> Result<Float<g>, ParseError> {
+  let grams = if tok.ends_with("kg") {
+    let kgs = tok[0..tok.len() - 2].to_float().ok_or(ParseError.BadWeight(tok))? as Float<kg>
+    kgs * model.GRAMS_PER_KG
+  } else {
+    let body = if tok.ends_with("g") { tok[0..tok.len() - 1] } else { tok }
+    body.to_float().ok_or(ParseError.BadWeight(tok))? as Float<g>
+  }
+  // `!(x >= 0)` also rejects NaN.
+  if !(grams >= 0.0) || grams > MAX_WEIGHT {
+    return Err(ParseError.BadWeight(tok))
+  }
+  return Ok(grams)
+}
+
+/// Only plain ASCII digits: rejects signs, spaces and underscores,
+/// which `Str.to_int` would accept.
+fn digits(s: Str) -> Option<Int> {
+  if s.is_empty() || s.len() > 12 {
+    return None
+  }
+  if !s.chars().all(fn(c) { c.is_digit() }) {
+    return None
+  }
+  return s.to_int()
+}
+
+/// A cursor over the arguments of one command.
+struct Args {
+  command: Str
+  toks: List<Str>
+  pos: Int
+}
+
+fn Args.has_more(self) -> Bool {
+  return self.pos < self.toks.len()
+}
+
+fn Args.peek(self) -> Str
+  requires self.pos < self.toks.len()
+{
+  return self.toks[self.pos]
+}
+
+fn Args.next(&mut self) -> Option<Str> {
+  if self.pos >= self.toks.len() {
+    return None
+  }
+  self.pos += 1
+  return Some(self.toks[self.pos - 1])
+}
+
+fn Args.required(&mut self, what: Str) -> Result<Str, ParseError> {
+  return self.next().ok_or(ParseError.Missing(self.command, what))
+}
+
+fn Args.name(&mut self, what: Str) -> Result<Str, ParseError> {
+  let tok = self.required(what)?
+  if !is_name(tok) {
+    return Err(ParseError.BadName(what, tok))
+  }
+  return Ok(tok)
+}
+
+fn Args.optional_name(&mut self, what: Str) -> Result<Option<Str>, ParseError> {
+  if !self.has_more() {
+    return Ok(None)
+  }
+  return Ok(Some(self.name(what)?))
+}
+
+fn Args.count(&mut self, what: Str, lo: Int) -> Result<Int, ParseError> {
+  let tok = self.required(what)?
+  let n = digits(tok).ok_or(ParseError.BadNumber(what, tok))?
+  if n < lo || n > MAX_QTY {
+    return Err(ParseError.OutOfRange(what, n, lo, MAX_QTY))
+  }
+  return Ok(n)
+}
+
+fn Args.optional_count(&mut self, what: Str, default: Int) -> Result<Int, ParseError> {
+  if !self.has_more() {
+    return Ok(default)
+  }
+  return self.count(what, 1)
+}
+
+fn Args.money(&mut self, what: Str) -> Result<Int, ParseError> {
+  let tok = self.required(what)?
+  let cents = parse_money(tok)?
+  if cents > MAX_CENTS {
+    return Err(ParseError.OutOfRange(what, cents, 0, MAX_CENTS))
+  }
+  return Ok(cents)
+}
+
+/// Joins all remaining tokens with spaces.
+fn Args.rest(&mut self, default: Str) -> Str {
+  if !self.has_more() {
+    return default
+  }
+  let words = self.toks[self.pos..self.toks.len()]
+  self.pos = self.toks.len()
+  return words.join(" ")
+}
+
+fn Args.finish(self) -> Result<(), ParseError> {
+  if self.has_more() {
+    return Err(ParseError.Extra(self.command, self.peek()))
+  }
+  return Ok(())
+}
+
+test "money accepts cents, dollars and a dollar sign" {
+  assert(parse_money("250") == Ok(250))
+  assert(parse_money("2.50") == Ok(250))
+  assert(parse_money("2.5") == Ok(250))
+  assert(parse_money("$12.05") == Ok(1205))
+  assert(parse_money("$3") == Ok(300))
+  assert(parse_money("-3").is_err())
+  assert(parse_money("2.505").is_err())
+  assert(parse_money("2.").is_err())
+  assert(parse_money("1_000").is_err())
+}
+
+test "weights convert kilograms to grams" {
+  assert(parse_weight("1.5kg") == Ok(1500.0))
+  assert(parse_weight("120g") == Ok(120.0))
+  assert(parse_weight("80") == Ok(80.0))
+  assert(parse_weight("heavy").is_err())
+  assert(parse_weight("-1g").is_err())
+  assert(parse_weight("1e300kg").is_err())
+  assert(parse_weight("nan").is_err())
+}
+
+test "order with several lines and a coupon" {
+  let cmd = parse_line("order alice widget 3 gadget 12 with SAVE10")
+  let want = Command.PlaceOrder("alice", [("widget", 3), ("gadget", 12)], Some("SAVE10"))
+  assert(cmd == Ok(want))
+}
+
+test "parse errors name the problem" {
+  assert(parse_line("frobnicate") == Err(ParseError.UnknownCommand("frobnicate")))
+  assert(parse_line("restock widget") == Err(ParseError.Missing("restock", "quantity")))
+  assert(parse_line("restock widget 0") == Err(ParseError.OutOfRange("quantity", 0, 1, MAX_QTY)))
+  assert(parse_line("ship 3 now") == Err(ParseError.Extra("ship", "now")))
+  assert(
+    parse_line("order alice") == Err(ParseError.Missing("order", "at least one <sku> <qty> pair")),
+  )
+  assert(parse_line("  # just a comment") == Ok(Command.Blank))
+}
+
+test "cancel collects a free-text reason" {
+  assert(
+    parse_line("cancel 4 customer changed mind") == Ok(Command.Cancel(4, "customer changed mind")),
+  )
+  assert(parse_line("cancel 4") == Ok(Command.Cancel(4, "no reason given")))
+}

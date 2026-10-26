@@ -1,0 +1,290 @@
+// The ledger: items, orders, customers and coupons, and the rules that
+// keep them consistent. Every operation is pure and either succeeds
+// completely or changes nothing.
+
+import "model"
+
+pub struct Ledger {
+  items: Map<Str, model.Item>
+  orders: List<model.Order>
+  customers: Map<Str, model.Customer>
+  coupons: Map<Str, model.Coupon>
+  log: List<model.Event>
+}
+
+pub fn Ledger.new() -> Ledger {
+  return Ledger {
+    items: Map.new()
+    orders: List.new()
+    customers: Map.new()
+    coupons: Map.new()
+    log: List.new()
+  }
+}
+
+// ---- items ----
+
+pub fn Ledger.add_item(
+  &mut self,
+  sku: Str,
+  price: model.Cents,
+  stock: model.Qty,
+  weight: Float<g>,
+) -> Result<model.Item, model.LedgerError>
+  requires price >= 0, stock >= 0, weight >= 0.0
+{
+  if self.items.contains(sku) {
+    return Err(model.LedgerError.DuplicateItem(sku))
+  }
+  let item = model.Item { sku: sku, price: price, stock: stock, weight: weight }
+  self.items.insert(sku, item)
+  self.log.push(model.Event.ItemAdded(sku, price, stock))
+  return Ok(item)
+}
+
+pub fn Ledger.restock(&mut self, sku: Str, qty: model.Qty) -> Result<model.Item, model.LedgerError>
+  requires qty > 0
+{
+  var item = self.item(sku)?
+  item.stock += qty
+  self.items.insert(sku, item)
+  self.log.push(model.Event.Restocked(sku, qty, item.stock))
+  return Ok(item)
+}
+
+/// Changes the list price. Orders already placed keep the price they were placed at.
+pub fn Ledger.set_price(
+  &mut self,
+  sku: Str,
+  price: model.Cents,
+) -> Result<(Int, Int), model.LedgerError>
+  requires price >= 0
+{
+  var item = self.item(sku)?
+  let before = item.price
+  item.price = price
+  self.items.insert(sku, item)
+  self.log.push(model.Event.Repriced(sku, before, price))
+  return Ok((before, price))
+}
+
+pub fn Ledger.item(self, sku: Str) -> Result<model.Item, model.LedgerError> {
+  return self.items.get(sku).ok_or(model.LedgerError.UnknownItem(sku))
+}
+
+/// All items, in the order they were added.
+pub fn Ledger.all_items(self) -> List<model.Item> {
+  return self.items.values()
+}
+
+// ---- coupons and customers ----
+
+pub fn Ledger.add_coupon(&mut self, code: Str, percent: Int) -> Result<(), model.LedgerError>
+  requires percent > 0, percent <= 50
+{
+  if self.coupons.contains(code) {
+    return Err(model.LedgerError.DuplicateCoupon(code))
+  }
+  self.coupons.insert(code, model.Coupon { percent: percent, used_by: Set.new() })
+  self.log.push(model.Event.CouponAdded(code, percent))
+  return Ok(())
+}
+
+pub fn Ledger.set_limit(&mut self, name: Str, limit: model.Cents)
+  requires limit >= 0
+{
+  var c = self.customer_or_new(name)
+  c.limit = limit
+  self.customers.insert(name, c)
+  self.log.push(model.Event.LimitSet(name, limit))
+}
+
+pub fn Ledger.customer(self, name: Str) -> Result<model.Customer, model.LedgerError> {
+  return self.customers.get(name).ok_or(model.LedgerError.UnknownCustomer(name))
+}
+
+fn Ledger.customer_or_new(self, name: Str) -> model.Customer {
+  return self.customers
+    .get(name)
+    .unwrap_or(model.Customer { name: name, limit: DEFAULT_LIMIT, orders: List.new() })
+}
+
+/// What a customer owes on orders that have not shipped yet.
+pub fn Ledger.exposure(self, name: Str) -> Int {
+  let open = self.orders.filter(fn(o) { o.customer == name && o.is_open() })
+  return total_value(open)
+}
+
+// ---- orders ----
+
+/// Places an order. Duplicate skus are merged. The whole order is
+/// rejected if any line is short of stock, the coupon is unusable, or the
+/// customer would go over their credit limit.
+pub fn Ledger.place_order(
+  &mut self,
+  customer: Str,
+  wanted: List<(Str, Int)>,
+  coupon: Option<Str>,
+) -> Result<model.Order, model.LedgerError>
+  requires wanted.all(fn(w) { w.1 > 0 })
+  ensures result.is_err() || self.orders.len() == old(self.orders.len()) + 1
+{
+  if wanted.is_empty() {
+    return Err(model.LedgerError.EmptyOrder)
+  }
+  var lines = List.new()
+  var weight: Float<g> = 0.0
+  for (sku, qty) in merge_lines(wanted) {
+    let item = self.item(sku)?
+    if qty > item.stock {
+      return Err(model.LedgerError.OutOfStock(sku, qty, item.stock))
+    }
+    lines.push(price_line(item, qty))
+    weight += item.weight * (qty as Float)
+  }
+  let subtotal = total_value(lines)
+  let coupon_off = match coupon {
+    Some(code) => self.coupon_discount(code, customer, subtotal)?
+    None => 0
+  }
+  let shipping = shipping_for(weight, subtotal - coupon_off)
+  let total = subtotal - coupon_off + shipping
+  var buyer = self.customer_or_new(customer)
+  let needed = self.exposure(customer) + total
+  if needed > buyer.limit {
+    return Err(model.LedgerError.OverLimit(customer, buyer.limit, needed))
+  }
+
+  // Every check passed: commit.
+  for line in lines {
+    self.adjust_stock(line.sku, -line.qty)
+  }
+  let id = self.orders.len() + 1
+  let order = model.Order {
+    id: id
+    customer: customer
+    lines: lines
+    coupon: coupon
+    coupon_off: coupon_off
+    shipping: shipping
+    weight: weight
+    status: model.Status.Open
+  }
+  self.orders.push(order)
+  buyer.orders.push(id)
+  self.customers.insert(customer, buyer)
+  match coupon {
+    Some(code) => self.mark_coupon(code, customer, true)
+    None => ()
+  }
+  self.log.push(model.Event.Placed(id, customer, total))
+  return Ok(order)
+}
+
+/// Cancels an open order, returning its stock and freeing its coupon.
+pub fn Ledger.cancel(&mut self, id: Int, reason: Str) -> Result<model.Order, model.LedgerError> {
+  var order = self.order(id)?
+  if !order.is_open() {
+    return Err(model.LedgerError.NotOpen(id, order.status))
+  }
+  for line in order.lines {
+    self.adjust_stock(line.sku, line.qty)
+  }
+  match order.coupon {
+    Some(code) => self.mark_coupon(code, order.customer, false)
+    None => ()
+  }
+  order.status = model.Status.Cancelled(reason)
+  self.orders[id - 1] = order
+  self.log.push(model.Event.Cancelled(id, order.value()))
+  return Ok(order)
+}
+
+pub fn Ledger.ship(&mut self, id: Int) -> Result<model.Order, model.LedgerError> {
+  var order = self.order(id)?
+  if !order.is_open() {
+    return Err(model.LedgerError.NotOpen(id, order.status))
+  }
+  order.status = model.Status.Shipped
+  self.orders[id - 1] = order
+  self.log.push(model.Event.Shipped(id))
+  return Ok(order)
+}
+
+fn Ledger.order(self, id: Int) -> Result<model.Order, model.LedgerError> {
+  if id < 1 || id > self.orders.len() {
+    return Err(model.LedgerError.UnknownOrder(id))
+  }
+  return Ok(self.orders[id - 1])
+}
+
+/// Orders, oldest first, optionally only one customer's.
+pub fn Ledger.find_orders(self, customer: Option<Str>) -> List<model.Order> {
+  return match customer {
+    Some(name) => self.orders.filter(fn(o) { o.customer == name })
+    None => self.orders
+  }
+}
+
+/// The most recent `n` log entries, oldest first.
+pub fn Ledger.history(self, n: Int) -> List<model.Event>
+  requires n >= 0
+  ensures result.len() <= n
+{
+  let start = max(self.log.len() - n, 0)
+  return self.log[start..self.log.len()]
+}
+
+// ---- helpers ----
+
+fn Ledger.coupon_discount(
+  self,
+  code: Str,
+  customer: Str,
+  subtotal: Int,
+) -> Result<Int, model.LedgerError> {
+  let c = self.coupons.get(code).ok_or(model.LedgerError.UnknownCoupon(code))?
+  if c.used_by.contains(customer) {
+    return Err(model.LedgerError.CouponUsed(code, customer))
+  }
+  return Ok(percent_of(subtotal, c.percent))
+}
+
+fn Ledger.mark_coupon(&mut self, code: Str, customer: Str, used: Bool) {
+  match self.coupons.get(code) {
+    Some(c) => {
+      var coupon = c
+      if used {
+        coupon.used_by.insert(customer)
+      } else {
+        let _ = coupon.used_by.remove(customer)
+      }
+      self.coupons.insert(code, coupon)
+    }
+    None => ()
+  }
+}
+
+/// Moves stock of a known item; `delta` is negative when taking stock.
+// Written as a match rather than `self.items.get(sku).unwrap()`: the
+// native backend cannot compile `unwrap` on an Option of a struct.
+fn Ledger.adjust_stock(&mut self, sku: Str, delta: Int) {
+  match self.items.get(sku) {
+    Some(found) => {
+      var item = found
+      assert(item.stock + delta >= 0)
+      item.stock += delta
+      self.items.insert(sku, item)
+    }
+    None => panic("adjust_stock: unknown item " + sku)
+  }
+}
+
+/// Adds up quantities for repeated skus, keeping first-seen order.
+fn merge_lines(wanted: List<(Str, Int)>) -> Map<Str, Int> {
+  var merged: Map<Str, Int> = Map.new()
+  for (sku, qty) in wanted {
+    merged.insert(sku, merged.get(sku).unwrap_or(0) + qty)
+  }
+  return merged
+}

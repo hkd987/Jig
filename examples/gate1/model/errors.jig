@@ -1,0 +1,77 @@
+// Business errors and the audit log.
+
+import "text"
+
+/// Everything a ledger operation can refuse to do.
+pub enum LedgerError {
+  UnknownItem(sku: Str)
+  DuplicateItem(sku: Str)
+  OutOfStock(sku: Str, wanted: Int, available: Int)
+  UnknownOrder(id: Int)
+  NotOpen(id: Int, status: Status)
+  OverLimit(customer: Str, limit: Int, needed: Int)
+  UnknownCoupon(code: Str)
+  DuplicateCoupon(code: Str)
+  CouponUsed(code: Str, customer: Str)
+  UnknownCustomer(name: Str)
+  EmptyOrder
+}
+
+pub fn LedgerError.str(self) -> Str {
+  return match self {
+    UnknownItem(sku) => "no item named '" + sku + "'"
+    DuplicateItem(sku) => "item '" + sku + "' already exists"
+    OutOfStock(sku, wanted, available) => text.fill(
+      "not enough {}: wanted {}, only {} in stock",
+      [sku, wanted.str(), available.str()],
+    )
+    UnknownOrder(id) => "no order #" + id.str()
+    NotOpen(id, status) => "order #" + id.str() + " is " + status.str()
+    OverLimit(customer, limit, needed) => text.fill(
+      "{} would owe {}, over the limit of {}",
+      [customer, text.money(needed), text.money(limit)],
+    )
+    UnknownCoupon(code) => "no coupon " + code
+    DuplicateCoupon(code) => "coupon " + code + " already exists"
+    CouponUsed(code, customer) => customer + " already used coupon " + code
+    UnknownCustomer(name) => "no customer named '" + name + "'"
+    EmptyOrder => "an order needs at least one line"
+  }
+}
+
+/// One entry in the audit log.
+pub enum Event {
+  ItemAdded(sku: Str, price: Cents, stock: Qty)
+  Restocked(sku: Str, added: Qty, stock: Qty)
+  Repriced(sku: Str, before: Cents, after: Cents)
+  Placed(id: Int, customer: Str, total: Cents)
+  Cancelled(id: Int, refund: Cents)
+  Shipped(id: Int)
+  CouponAdded(code: Str, percent: Int)
+  LimitSet(customer: Str, limit: Cents)
+}
+
+pub fn Event.str(self) -> Str {
+  return match self {
+    ItemAdded(sku, price, stock) => text.fill(
+      "added {} at {}, stock {}",
+      [sku, text.money(price), stock.str()],
+    )
+    Restocked(sku, added, stock) => text.fill(
+      "restocked {} +{} -> {}",
+      [sku, added.str(), stock.str()],
+    )
+    Repriced(sku, before, after) => text.fill(
+      "repriced {} {} -> {}",
+      [sku, text.money(before), text.money(after)],
+    )
+    Placed(id, customer, total) => text.fill(
+      "order #{} by {} for {}",
+      [id.str(), customer, text.money(total)],
+    )
+    Cancelled(id, refund) => "cancelled #" + id.str() + ", refunded " + text.money(refund)
+    Shipped(id) => "shipped #" + id.str()
+    CouponAdded(code, percent) => "coupon " + code + " (" + percent.str() + "% off)"
+    LimitSet(customer, limit) => "limit for " + customer + " set to " + text.money(limit)
+  }
+}

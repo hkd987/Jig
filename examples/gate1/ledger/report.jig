@@ -1,0 +1,118 @@
+// Summary reports over the ledger.
+
+import "model"
+import "text"
+
+const TOP_CUSTOMERS: Int = 3
+const BAR_WIDTH: Int = 20
+
+/// The `n` best elements of `xs` according to `before`, best first.
+fn top_n<T>(xs: List<T>, n: Int, before: fn(T, T) -> Bool) -> List<T>
+  requires n >= 0
+  ensures result.len() <= n
+{
+  var sorted = xs
+  sorted.sort_by(before)
+  sorted.truncate(min(n, sorted.len()))
+  return sorted
+}
+
+/// Total value of sold units per customer, highest first, then by name.
+fn Ledger.spend_by_customer(self) -> List<(Str, Int)> {
+  var spend: Map<Str, Int> = Map.new()
+  for o in self.orders {
+    if o.is_sale() {
+      spend.insert(o.customer, spend.get(o.customer).unwrap_or(0) + o.value())
+    }
+  }
+  return top_n(spend.entries(), spend.len(), fn(a, b) { a.1 > b.1 || (a.1 == b.1 && a.0 < b.0) })
+}
+
+/// Units sold per sku over every order that counts as a sale.
+fn Ledger.units_sold(self) -> Map<Str, Int> {
+  var sold: Map<Str, Int> = Map.new()
+  for o in self.orders {
+    if o.is_sale() {
+      for line in o.lines {
+        sold.insert(line.sku, sold.get(line.sku).unwrap_or(0) + line.qty)
+      }
+    }
+  }
+  return sold
+}
+
+/// The stock table used by `stock` and `report`.
+pub fn stock_table(items: List<model.Item>) -> List<Str> {
+  var rows = List.new()
+  for it in items {
+    let flag = if it.is_low(LOW_STOCK) { "LOW" } else { "" }
+    let weight = model.format_weight(it.weight)
+    rows.push([it.sku, text.money(it.price), it.stock.str(), weight, text.money(it.value()), flag])
+  }
+  return text.table(
+    ["sku", "price", "stock", "weight", "value", ""],
+    rows,
+    [false, true, true, true, true, false],
+  )
+}
+
+/// The full end-of-day report.
+pub fn Ledger.report(self) -> List<Str> {
+  var out = List.new()
+  let items = self.all_items()
+  out.push("== inventory: " + text.plural(items.len(), "item") + " ==")
+  out.extend(stock_table(items))
+  out.push("stock value: " + text.money(total_value(items)))
+  let low = items.filter(fn(it) { it.is_low(LOW_STOCK) }).map(fn(it) { it.sku })
+  let low_text = if low.is_empty() { "none" } else { low.join(", ") }
+  out.push("low stock (< " + LOW_STOCK.str() + "): " + low_text)
+
+  var open = 0
+  var shipped = 0
+  var cancelled = 0
+  for o in self.orders {
+    match o.status {
+      Open => {
+        open += 1
+      }
+      Shipped => {
+        shipped += 1
+      }
+      Cancelled(_) => {
+        cancelled += 1
+      }
+    }
+  }
+  let sales = self.orders.filter(fn(o) { o.is_sale() })
+  let delivered = self.orders.filter(fn(o) {
+    match o.status {
+      Shipped => true
+      _ => false
+    }
+  })
+  out.push("== orders: " + self.orders.len().str() + " ==")
+  out.push("open " + open.str() + ", shipped " + shipped.str() + ", cancelled " + cancelled.str())
+  out.push("booked revenue: " + text.money(total_value(sales)))
+  out.push("shipped revenue: " + text.money(total_value(delivered)))
+  let units = sales.fold(0, fn(acc, o) { acc + o.units() })
+  out.push("units sold: " + units.str())
+
+  let spend = self.spend_by_customer()
+  out.push("== top customers ==")
+  if spend.is_empty() {
+    out.push("(no sales yet)")
+  }
+  let best = if spend.is_empty() { 0 } else { spend[0].1 }
+  for entry in top_n(spend, TOP_CUSTOMERS, fn(a, b) { a.1 > b.1 }) {
+    let amount = text.pad_left(text.money(entry.1), 10)
+    out.push(text.pad_right(entry.0, 10) + amount + "  " + text.bar(entry.1, best, BAR_WIDTH))
+  }
+
+  let sold = self.units_sold().entries()
+  let leaders = top_n(sold, 1, fn(a, b) { a.1 > b.1 || (a.1 == b.1 && a.0 < b.0) })
+  match leaders.first() {
+    Some((sku, n)) => out.push("best seller: " + sku + " (" + text.plural(n, "unit") + ")")
+    None => out.push("best seller: none")
+  }
+  return out
+}

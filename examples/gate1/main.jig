@@ -1,0 +1,215 @@
+// Inventory and order ledger: reads commands from stdin, one per line,
+// and prints what happened. Only `main` touches the console; the session
+// logic below is pure so it can be tested directly.
+
+import "std/io"
+import "ledger"
+import "model"
+import "parse"
+import "text"
+
+struct Session {
+  book: ledger.Ledger
+  line_no: Int
+  commands: Int
+  errors: Int
+}
+
+fn Session.new() -> Session {
+  return Session { book: ledger.Ledger.new(), line_no: 0, commands: 0, errors: 0 }
+}
+
+/// Handles one input line and returns the lines to print.
+fn Session.feed(&mut self, line: Str) -> List<Str> {
+  self.line_no += 1
+  let cmd = match parse.parse_line(line) {
+    Ok(c) => c
+    Err(e) => {
+      self.errors += 1
+      return ["line " + self.line_no.str() + ": " + e.str()]
+    }
+  }
+  match cmd {
+    Blank => {
+      return []
+    }
+    _ => {
+      self.commands += 1
+    }
+  }
+  return match execute(&mut self.book, cmd) {
+    Ok(out) => out
+    Err(e) => {
+      self.errors += 1
+      ["line " + self.line_no.str() + ": error: " + e.str()]
+    }
+  }
+}
+
+fn Session.summary(self) -> Str {
+  return "-- " + text.plural(self.commands, "command") + ", " + text.plural(self.errors, "error")
+}
+
+/// Runs a parsed command against the ledger.
+fn execute(book: &mut ledger.Ledger, cmd: parse.Command) -> Result<List<Str>, model.LedgerError> {
+  return match cmd {
+    AddItem(sku, price, stock, weight) => {
+      let it = book.add_item(sku, price, stock, weight)?
+      let args = [it.sku, text.money(it.price), it.stock.str(), model.format_weight(it.weight)]
+      Ok([text.fill("added {}: {} each, {} in stock, {}", args)])
+    }
+    SetPrice(sku, price) => {
+      let (before, after) = book.set_price(sku, price)?
+      Ok([sku + ": " + text.money(before) + " -> " + text.money(after)])
+    }
+    Restock(sku, qty) => {
+      let it = book.restock(sku, qty)?
+      Ok(["restocked " + sku + ": +" + qty.str() + ", now " + it.stock.str()])
+    }
+    PlaceOrder(customer, lines, coupon) => {
+      let o = book.place_order(customer, lines, coupon)?
+      Ok(render_order(o))
+    }
+    Cancel(id, reason) => {
+      let o = book.cancel(id, reason)?
+      Ok(["cancelled order #" + id.str() + " (" + reason + "), refund " + text.money(o.value())])
+    }
+    Ship(id) => {
+      let o = book.ship(id)?
+      let weight = model.format_weight(o.weight)
+      Ok([text.fill("shipped order #{} to {}, {}", [id.str(), o.customer, weight])])
+    }
+    AddCoupon(code, percent) => {
+      book.add_coupon(code, percent)?
+      Ok(["coupon " + code + ": " + percent.str() + "% off"])
+    }
+    SetLimit(customer, amount) => {
+      book.set_limit(customer, amount)
+      Ok(["credit limit for " + customer + ": " + text.money(amount)])
+    }
+    ShowStock(sku) => match sku {
+      Some(s) => Ok(ledger.stock_table([book.item(s)?]))
+      None => Ok(ledger.stock_table(book.all_items()))
+    }
+    ShowCustomer(name) => Ok(render_customer(book, name)?)
+    ListOrders(customer) => Ok(render_orders(book.find_orders(customer)))
+    History(count) => {
+      let events = book.history(count)
+      var out = ["last " + text.plural(events.len(), "event") + ":"]
+      out.extend(events.map(fn(e) { "  " + e.str() }))
+      Ok(out)
+    }
+    Report => Ok(book.report())
+    Help => Ok(help_text())
+    Blank => Ok([])
+  }
+}
+
+fn render_order(o: model.Order) -> List<Str> {
+  let head = [o.id.str(), o.customer, text.plural(o.units(), "unit"), model.format_weight(o.weight)]
+  var out = [text.fill("order #{} for {}: {}, {}", head)]
+  for line in o.lines {
+    let sku = text.pad_right(line.sku, 10)
+    let qty = text.pad_left("x" + line.qty.str(), 6)
+    let price = text.pad_left(text.money(line.unit_price), 9)
+    var row = "  " + sku + qty + " @ " + price + text.pad_left(text.money(line.value()), 11)
+    if line.discount > 0 {
+      row = row + "  (bulk -" + text.money(line.discount) + ")"
+    }
+    out.push(row)
+  }
+  var totals = "  subtotal " + text.money(o.subtotal())
+  match o.coupon {
+    Some(code) => {
+      totals = totals + ", " + code + " -" + text.money(o.coupon_off)
+    }
+    None => ()
+  }
+  let ship = if o.shipping == 0 { "free" } else { text.money(o.shipping) }
+  out.push(totals + ", shipping " + ship + ", total " + text.money(o.value()))
+  return out
+}
+
+fn render_orders(orders: List<model.Order>) -> List<Str> {
+  if orders.is_empty() {
+    return ["no orders"]
+  }
+  var rows = List.new()
+  for o in orders {
+    rows.push(
+      ["#" + o.id.str(), o.customer, o.units().str(), text.money(o.value()), o.status.str()],
+    )
+  }
+  return text.table(
+    ["id", "customer", "units", "total", "status"],
+    rows,
+    [true, false, true, true, false],
+  )
+}
+
+fn render_customer(book: ledger.Ledger, name: Str) -> Result<List<Str>, model.LedgerError> {
+  let c = book.customer(name)?
+  let orders = book.find_orders(Some(name))
+  let spent = orders.filter(fn(o) { o.is_sale() }).fold(0, fn(acc, o) { acc + o.value() })
+  let count = text.plural(c.orders.len(), "order")
+  let owes = text.money(book.exposure(name))
+  return Ok(
+    [
+      text.fill("{}: {}, spent {}", [c.name, count, text.money(spent)]),
+      text.fill("  owes {} of a {} limit", [owes, text.money(c.limit)]),
+    ],
+  )
+}
+
+fn help_text() -> List<Str> {
+  return [
+    "commands:",
+    "  add-item <sku> <price> <stock> [weight]   e.g. add-item widget 2.50 10 200g",
+    "  price <sku> <price>      restock <sku> <qty>",
+    "  order <customer> <sku> <qty> [<sku> <qty>...] [with <COUPON>]",
+    "  cancel <id> [reason]     ship <id>",
+    "  coupon <CODE> <percent>  limit <customer> <amount>",
+    "  stock [sku]   customer <name>   orders [customer]   history [n]   report",
+  ]
+}
+
+fn main() effects {io} {
+  var session = Session.new()
+  for {
+    match io.read_line() {
+      Some(line) => {
+        for out in session.feed(line) {
+          io.println(out)
+        }
+      }
+      None => {
+        break
+      }
+    }
+  }
+  io.println(session.summary())
+}
+
+test "a session reports parse and business errors with line numbers" {
+  var s = Session.new()
+  var out = List.new()
+  for line in ["add-item widget 250 10", "", "order alice widget 30", "bogus"] {
+    out.extend(s.feed(line))
+  }
+  assert(out[0] == "added widget: $2.50 each, 10 in stock, 100g")
+  assert(out[1] == "line 3: error: not enough widget: wanted 30, only 10 in stock")
+  assert(out[2] == "line 4: unknown command 'bogus' (try 'help')")
+  assert(s.commands == 2 && s.errors == 2)
+}
+
+test "a session places, ships and lists orders" {
+  var s = Session.new()
+  var out = List.new()
+  for line in ["add-item bolt 5 100 10g", "order bob bolt 12", "ship 1", "orders"] {
+    out.extend(s.feed(line))
+  }
+  assert(s.errors == 0)
+  assert(out[1] == "order #1 for bob: 12 units, 120g")
+  assert(out.contains("shipped order #1 to bob, 120g"))
+  assert(out[out.len() - 1] == "#1  bob          12  $3.75  shipped")
+}

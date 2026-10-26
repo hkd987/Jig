@@ -1448,6 +1448,25 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                 self.assign(dest, Rvalue::Unary(op, Operand::local(l), t));
                 true
             }
+            ExprKind::Binary { op: op @ (ast::BinOp::And | ast::BinOp::Or), lhs, rhs } => {
+                // Short-circuit, as in ordinary code.
+                if !self.eval_pred_names(lhs, names, dest.clone()) {
+                    return false;
+                }
+                let rhs_bb = self.new_block();
+                let join = self.new_block();
+                let c = Operand::Copy(dest.clone());
+                if op == ast::BinOp::And {
+                    self.terminate(Terminator::If(c, rhs_bb, join));
+                } else {
+                    self.terminate(Terminator::If(c, join, rhs_bb));
+                }
+                self.cur = rhs_bb;
+                let ok = self.eval_pred_names(rhs, names, dest);
+                self.goto(join);
+                self.cur = join;
+                ok
+            }
             ExprKind::Binary { op, lhs, rhs } => {
                 let t = self.ty(lhs);
                 let a = self.temp(t);

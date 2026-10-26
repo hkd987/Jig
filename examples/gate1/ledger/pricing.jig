@@ -1,0 +1,100 @@
+// Pricing rules: bulk discounts, coupons and shipping.
+
+import "model"
+
+/// Lines of at least this many units get the bulk discount.
+pub const BULK_QTY: Int = 10
+/// Percent off a line that qualifies for the bulk discount.
+pub const BULK_PERCENT: Int = 5
+/// Orders whose discounted subtotal reaches this ship free.
+pub const FREE_SHIPPING_FROM: Int = 10_000
+/// Flat handling fee for orders that do not ship free.
+pub const BASE_SHIPPING: Int = 300
+/// Weight-based part of the shipping fee.
+const RATE_PER_KG: Float<cent/kg> = 150.0
+/// Credit limit for customers who have not been given one.
+pub const DEFAULT_LIMIT: Int = 50_000
+/// Items with fewer units than this are flagged in reports.
+pub const LOW_STOCK: Int = 5
+
+/// Anything with a value in cents: items on the shelf, order lines, orders.
+pub interface Valued {
+  fn value(self) -> Int
+}
+
+/// Sums the values of a list of valued things.
+fn total_value<T: Valued>(xs: List<T>) -> Int {
+  return xs.fold(0, fn(acc, x) { acc + x.value() })
+}
+
+/// `pct` percent of `amount`, rounded down to a whole cent.
+fn percent_of(amount: model.Cents, pct: Int) -> model.Cents
+  requires amount >= 0, pct >= 0, pct <= 100
+  ensures result >= 0, result <= amount
+{
+  return amount * pct / 100
+}
+
+/// The bulk discount on one order line.
+fn line_discount(qty: model.Qty, unit_price: model.Cents) -> model.Cents
+  requires qty > 0, unit_price >= 0
+  ensures result <= qty * unit_price
+{
+  if qty < BULK_QTY {
+    return 0
+  }
+  return percent_of(qty * unit_price, BULK_PERCENT)
+}
+
+/// Shipping for a parcel: free over the threshold, otherwise a flat fee
+/// plus a per-kilogram rate rounded up to the next cent.
+fn shipping_for(weight: Float<g>, subtotal: model.Cents) -> model.Cents
+  requires weight >= 0.0, subtotal >= 0
+  ensures result >= 0
+{
+  if subtotal >= FREE_SHIPPING_FROM {
+    return 0
+  }
+  let kgs = weight / model.GRAMS_PER_KG
+  let variable: Float<cent> = kgs * RATE_PER_KG
+  return BASE_SHIPPING + (variable as Float).ceil() as Int
+}
+
+/// Builds a priced order line from an item and a quantity.
+fn price_line(item: model.Item, qty: model.Qty) -> model.OrderLine
+  requires qty > 0
+  ensures result.value() <= qty * item.price
+{
+  return model.OrderLine {
+    sku: item.sku
+    qty: qty
+    unit_price: item.price
+    discount: line_discount(qty, item.price)
+  }
+}
+
+// Written as an exhaustive loop rather than a property test: in this
+// build, property-test parameters are never bound (see docs/gates/phase1.md).
+test "percent_of rounds down and never exceeds the amount" {
+  for pct in 0..101 {
+    for amount in [0, 1, 7, 99, 100, 101, 12_345, 999_999] {
+      let p = percent_of(amount, pct)
+      assert(p >= 0 && p <= amount)
+      assert(p * 100 <= amount * pct)
+      assert((p + 1) * 100 > amount * pct)
+    }
+  }
+}
+
+test "bulk discount starts at the threshold" {
+  assert(line_discount(BULK_QTY - 1, 1_000) == 0)
+  assert(line_discount(BULK_QTY, 1_000) == 500)
+  assert(line_discount(20, 199) == 199)
+}
+
+test "shipping is weight based below the free threshold" {
+  assert(shipping_for(0.0, 500) == BASE_SHIPPING)
+  assert(shipping_for(2_000.0, 500) == BASE_SHIPPING + 300)
+  assert(shipping_for(1.0, 500) == BASE_SHIPPING + 1)
+  assert(shipping_for(50_000.0, FREE_SHIPPING_FROM) == 0)
+}

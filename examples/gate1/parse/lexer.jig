@@ -1,0 +1,64 @@
+// Splits a command line into tokens.
+
+/// Splits on runs of whitespace and drops everything after `#`.
+fn tokenize(line: Str) -> List<Str> {
+  var toks = List.new()
+  var cur = ""
+  for c in line.chars() {
+    if c == '#' {
+      break
+    }
+    if c.is_space() {
+      if !cur.is_empty() {
+        toks.push(cur)
+        cur = ""
+      }
+    } else {
+      cur = cur + c.str()
+    }
+  }
+  if !cur.is_empty() {
+    toks.push(cur)
+  }
+  return toks
+}
+
+/// A lower-case name: a letter, then letters, digits, `-` or `_`.
+fn is_name(s: Str) -> Bool {
+  if s.is_empty() || s.len() > MAX_NAME {
+    return false
+  }
+  let cs = s.chars()
+  if !cs[0].is_lower() {
+    return false
+  }
+  return cs.all(fn(c) { c.is_lower() || c.is_digit() || c == '-' || c == '_' })
+}
+
+/// A coupon code: upper-case letters and digits, starting with a letter.
+fn is_code(s: Str) -> Bool {
+  if s.is_empty() || s.len() > MAX_NAME {
+    return false
+  }
+  let cs = s.chars()
+  return cs[0].is_upper() && cs.all(fn(c) { c.is_upper() || c.is_digit() })
+}
+
+const MAX_NAME: Int = 24
+
+test "tokenize collapses whitespace and strips comments" {
+  let t = tokenize("  order   alice\twidget 3  # rush")
+  assert(t == ["order", "alice", "widget", "3"])
+  assert(tokenize("# only a comment").is_empty())
+  assert(tokenize("").is_empty())
+}
+
+test "names and codes" {
+  assert(is_name("widget"))
+  assert(is_name("blue-widget_2"))
+  assert(!is_name("Widget"))
+  assert(!is_name("2fast"))
+  assert(is_code("SAVE10"))
+  assert(!is_code("save10"))
+  assert(!is_code("10OFF"))
+}

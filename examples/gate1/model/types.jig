@@ -1,0 +1,126 @@
+// Domain types shared by the parser, the ledger and the front end.
+
+/// An amount of money in cents. Never negative.
+pub type Cents = Int where self >= 0
+
+/// A count of physical units. Never negative.
+pub type Qty = Int where self >= 0
+
+unit g
+unit kg
+unit cent
+
+/// Conversion factor between the two mass units.
+pub const GRAMS_PER_KG: Float<g/kg> = 1000.0
+
+/// Formats a weight as grams, or kilograms from 1kg up.
+pub fn format_weight(w: Float<g>) -> Str {
+  let grams = (w as Float).round() as Int
+  if grams >= 1_000 {
+    let kgs = w / GRAMS_PER_KG
+    return ((kgs as Float * 100.0).round() / 100.0).str() + "kg"
+  }
+  return grams.str() + "g"
+}
+
+/// A stock-keeping unit held in the warehouse.
+pub struct Item {
+  pub sku: Str
+  pub price: Cents
+  pub stock: Qty
+  pub weight: Float<g>
+  invariant price >= 0 && stock >= 0
+}
+
+/// Value of the units currently on the shelf.
+pub fn Item.value(self) -> Int {
+  return self.price * self.stock
+}
+
+pub fn Item.is_low(self, threshold: Int) -> Bool {
+  return self.stock < threshold
+}
+
+pub enum Status {
+  Open
+  Shipped
+  Cancelled(reason: Str)
+}
+
+pub fn Status.str(self) -> Str {
+  return match self {
+    Open => "open"
+    Shipped => "shipped"
+    Cancelled(reason) => "cancelled (" + reason + ")"
+  }
+}
+
+/// One product on an order, priced when the order was placed.
+pub struct OrderLine {
+  pub sku: Str
+  pub qty: Qty
+  pub unit_price: Cents
+  pub discount: Cents
+  invariant qty > 0 && discount <= qty * unit_price
+}
+
+fn OrderLine.gross(self) -> Int {
+  return self.qty * self.unit_price
+}
+
+pub fn OrderLine.value(self) -> Int
+  ensures result >= 0
+{
+  return self.gross() - self.discount
+}
+
+pub struct Order {
+  pub id: Int
+  pub customer: Str
+  pub lines: List<OrderLine>
+  pub coupon: Option<Str>
+  pub coupon_off: Cents
+  pub shipping: Cents
+  pub weight: Float<g>
+  pub status: Status
+}
+
+/// Sum of the discounted line values, before coupon and shipping.
+pub fn Order.subtotal(self) -> Int {
+  return self.lines.fold(0, fn(acc, l) { acc + l.value() })
+}
+
+/// What the customer pays.
+pub fn Order.value(self) -> Int {
+  return self.subtotal() - self.coupon_off + self.shipping
+}
+
+pub fn Order.units(self) -> Int {
+  return self.lines.fold(0, fn(acc, l) { acc + l.qty })
+}
+
+pub fn Order.is_open(self) -> Bool {
+  return match self.status {
+    Open => true
+    Shipped | Cancelled(_) => false
+  }
+}
+
+/// Open and shipped orders count as sales; cancelled ones do not.
+pub fn Order.is_sale(self) -> Bool {
+  return match self.status {
+    Open | Shipped => true
+    Cancelled(_) => false
+  }
+}
+
+pub struct Customer {
+  pub name: Str
+  pub limit: Cents
+  pub orders: List<Int>
+}
+
+pub struct Coupon {
+  pub percent: Int where percent > 0 && percent <= 50
+  pub used_by: Set<Str>
+}

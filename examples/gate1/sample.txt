@@ -1,0 +1,30 @@
+# A day at the warehouse.
+add-item widget 250 10 200g
+add-item gadget 12.00 40 1.5kg
+add-item bolt $0.05 500 10
+add-item widget 300 5
+coupon SAVE10 10
+
+order alice widget 3 bolt 20
+order bob gadget 10 widget 2 with SAVE10
+order carol widget 9
+order carol widget 1 widget 2 gadget 1   # repeated skus are merged
+restock widget 5
+restock gizmo 5
+limit dave $100
+order dave gadget 9
+limit dave 150.00
+order dave gadget 9 with SAVE10
+order bob bolt 1 with SAVE10
+order erin widget 0
+ship 2
+cancel 2
+cancel 4 customer changed their mind
+price widget 2,75
+price widget 2.75
+stock widget
+orders dave
+customer dave
+history 4
+frobnicate now
+report

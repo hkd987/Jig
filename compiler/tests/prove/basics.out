@@ -1,0 +1,16 @@
+may trap overflow in `transfer` at tests/prove/basics/main.jig:17:3: `to.bal += amt` does not overflow Int
+  counterexample: from.name.len() = 0, from.bal = 9223372036853775808, to.name.len() = 0, to.bal = 1000000, amt = 9223372036853775808
+may trap overflow in `transfer` at tests/prove/basics/main.jig:14:11: `from.bal + to.bal` does not overflow Int
+  counterexample: from.name.len() = 0, from.bal = 9223372036854775807, to.name.len() = 0, to.bal = 1, amt = 1
+FAILED postcondition in `wrong_max` at tests/prove/basics/main.jig:34:11: result >= a
+  counterexample: a = 0, b = -1
+FAILED postcondition in `wrong_max` at tests/prove/basics/main.jig:34:24: result >= b
+  counterexample: a = -2, b = -1
+may trap overflow in `sum_to` at tests/prove/basics/main.jig:48:5: `total += i` does not overflow Int
+  counterexample: n = 2
+may trap bounds in `last` at tests/prove/basics/main.jig:61:10: index in bounds: xs[xs.len() - 1]
+  counterexample: xs.len() = 0
+FAILED precondition in `caller` at tests/prove/basics/main.jig:73:25: `halve` requires x != 0
+may trap overflow in `main` at tests/prove/basics/main.jig:81:15: `first_or_zero([1]) + last([2])` does not overflow Int
+may trap overflow in `main` at tests/prove/basics/main.jig:81:15: `first_or_zero([1]) + last([2]) + caller()` does not overflow Int
+proved 31 of 34 contract obligations and 8 of 14 safety obligations in 9 functions (0 from cache)

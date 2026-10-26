@@ -10,6 +10,7 @@ const USAGE: &str = "usage: jig <command> [path] [options]
 commands:
   check [--json]          parse, types, effects, lints and dead code for the project
   test [filter] [--json]  run tests in the deterministic runner
+  prove [filter] [--json] [--verbose]  prove contracts and safety with an SMT solver (cached)
   run [--native] [-- args]  run main (interpreter, or a native debug build)
   build [--release] [-o out]  compile main to a native executable (C; LLVM via clang for release)
   fmt [--check]           format .jig files in place
@@ -196,6 +197,55 @@ fn cmd_build(args: &[String]) -> i32 {
     }
 }
 
+fn proof_cache_dir(o: &Opts) -> PathBuf {
+    let root = crate::sema::load::find_project_root(&Sources::Disk, &o.path).unwrap_or_else(|| o.path.clone());
+    root.join(".jig").join("proofs")
+}
+
+fn cmd_prove(args: &[String]) -> i32 {
+    let o = parse_opts(args);
+    let verbose = o.rest.iter().any(|a| a == "--verbose");
+    let no_cache = o.rest.iter().any(|a| a == "--no-cache");
+    let filter = o.rest.iter().find(|a| !a.starts_with("--")).cloned();
+    let Some(mut prog) = analyze_or_report(&o) else { return 1 };
+    let opts = crate::verify::ProveOpts {
+        cache_dir: if no_cache { None } else { Some(proof_cache_dir(&o)) },
+        timeout_ms: 2000,
+        filter,
+    };
+    let report = match crate::verify::prove(&mut prog, &opts) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+    if o.json {
+        for f in &report.fns {
+            for ob in &f.obligations {
+                println!("{}", crate::verify::obligation_json(&prog, f, ob).to_string_compact());
+            }
+        }
+        let (cp, ct, sp, stot) = report.counts();
+        let summary = crate::util::json::Json::obj()
+            .with("kind", "summary")
+            .with("contracts_proved", cp as i64)
+            .with("contracts", ct as i64)
+            .with("safety_proved", sp as i64)
+            .with("safety", stot as i64)
+            .with("functions", report.fns.len() as i64)
+            .with("millis", report.millis as i64);
+        println!("{}", summary.to_string_compact());
+    } else {
+        print!("{}", crate::verify::render(&prog, &report, verbose));
+    }
+    if report.failed_contracts() > 0 {
+        1
+    } else {
+        0
+    }
+}
+
 fn cmd_test(args: &[String]) -> i32 {
     let o = parse_opts(args);
     let filter = o.rest.iter().find(|a| !a.starts_with("--")).cloned();
@@ -316,6 +366,7 @@ pub fn main() -> i32 {
         Some("check") => cmd_check(rest),
         Some("run") => cmd_run(rest),
         Some("build") => cmd_build(rest),
+        Some("prove") => cmd_prove(rest),
         Some("test") => cmd_test(rest),
         Some("fmt") => cmd_fmt(rest),
         Some("mcp") => crate::tools::mcp::serve(),

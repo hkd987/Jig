@@ -1,0 +1,210 @@
+// Business-rule tests for the ledger. Each test builds the stock it
+// needs: Jig counts functions used only by tests as dead code, so there
+// is no shared fixture function.
+
+import "model"
+
+test "adding an item twice is refused" {
+  var l = Ledger.new()
+  let _ = l.add_item("widget", 250, 10, 200.0)
+  let r = l.add_item("widget", 100, 1, 1.0)
+  assert(r == Err(model.LedgerError.DuplicateItem("widget")))
+  assert(l.item("widget").unwrap().price == 250)
+}
+
+test "restock adds units and rejects unknown items" {
+  var l = Ledger.new()
+  let _ = l.add_item("widget", 250, 10, 200.0)
+  assert(l.restock("widget", 5).is_ok())
+  assert(l.item("widget").unwrap().stock == 15)
+  assert(l.restock("sprocket", 5) == Err(model.LedgerError.UnknownItem("sprocket")))
+}
+
+test "an order takes stock and gets the next id" {
+  var l = Ledger.new()
+  let _ = l.add_item("widget", 250, 10, 200.0)
+  let _ = l.add_item("bolt", 5, 500, 10.0)
+  let a = l.place_order("alice", [("widget", 3)], None).unwrap()
+  let b = l.place_order("bob", [("bolt", 7)], None).unwrap()
+  assert(a.id == 1 && b.id == 2)
+  assert(l.item("widget").unwrap().stock == 7)
+  assert(l.item("bolt").unwrap().stock == 493)
+}
+
+test "a short line rejects the whole order" {
+  var l = Ledger.new()
+  let _ = l.add_item("widget", 250, 10, 200.0)
+  let _ = l.add_item("bolt", 5, 500, 10.0)
+  let r = l.place_order("alice", [("bolt", 2), ("widget", 11)], None)
+  assert(r == Err(model.LedgerError.OutOfStock("widget", 11, 10)))
+  assert(l.item("bolt").unwrap().stock == 500)
+  assert(l.find_orders(None).is_empty())
+  assert(l.place_order("alice", [("nope", 1)], None) == Err(model.LedgerError.UnknownItem("nope")))
+}
+
+test "repeated skus are merged before the stock check" {
+  var l = Ledger.new()
+  let _ = l.add_item("widget", 250, 10, 200.0)
+  let _ = l.add_item("bolt", 5, 500, 10.0)
+  let r = l.place_order("alice", [("widget", 6), ("widget", 6)], None)
+  assert(r == Err(model.LedgerError.OutOfStock("widget", 12, 10)))
+  let o = l.place_order("alice", [("widget", 4), ("bolt", 1), ("widget", 2)], None).unwrap()
+  assert(o.lines.len() == 2)
+  assert(o.lines[0].sku == "widget" && o.lines[0].qty == 6)
+}
+
+test "bulk lines are discounted" {
+  var l = Ledger.new()
+  let _ = l.add_item("widget", 250, 10, 200.0)
+  let _ = l.add_item("gadget", 1_000, 20, 1_500.0)
+  let o = l.place_order("alice", [("gadget", 10), ("widget", 9)], None).unwrap()
+  assert(o.lines[0].discount == 500)
+  assert(o.lines[1].discount == 0)
+  assert(o.subtotal() == 10_000 - 500 + 9 * 250)
+}
+
+test "small orders pay weight based shipping" {
+  var l = Ledger.new()
+  let _ = l.add_item("widget", 250, 10, 200.0)
+  let o = l.place_order("alice", [("widget", 5)], None).unwrap()
+  assert(o.weight == 1_000.0)
+  assert(o.shipping == BASE_SHIPPING + 150)
+  assert(o.value() == 1_250 + BASE_SHIPPING + 150)
+}
+
+test "large orders ship free" {
+  var l = Ledger.new()
+  let _ = l.add_item("gadget", 1_000, 20, 1_500.0)
+  let o = l.place_order("alice", [("gadget", 11)], None).unwrap()
+  assert(o.subtotal() >= FREE_SHIPPING_FROM)
+  assert(o.shipping == 0)
+}
+
+test "a coupon takes a percentage off the subtotal" {
+  var l = Ledger.new()
+  let _ = l.add_item("gadget", 1_000, 20, 1_500.0)
+  assert(l.add_coupon("SAVE10", 10).is_ok())
+  assert(l.add_coupon("SAVE10", 20) == Err(model.LedgerError.DuplicateCoupon("SAVE10")))
+  let o = l.place_order("alice", [("gadget", 2)], Some("SAVE10")).unwrap()
+  assert(o.coupon_off == 200)
+  assert(o.value() == 2_000 - 200 + o.shipping)
+}
+
+test "a coupon works once per customer" {
+  var l = Ledger.new()
+  let _ = l.add_item("bolt", 5, 500, 10.0)
+  let _ = l.add_coupon("SAVE10", 10)
+  assert(l.place_order("alice", [("bolt", 1)], Some("SAVE10")).is_ok())
+  let again = l.place_order("alice", [("bolt", 1)], Some("SAVE10"))
+  assert(again == Err(model.LedgerError.CouponUsed("SAVE10", "alice")))
+  assert(l.place_order("bob", [("bolt", 1)], Some("SAVE10")).is_ok())
+  assert(
+    l.place_order("bob", [("bolt", 1)], Some("NOPE")) ==
+      Err(model.LedgerError.UnknownCoupon("NOPE")),
+  )
+}
+
+test "cancelling returns stock and frees the coupon" {
+  var l = Ledger.new()
+  let _ = l.add_item("widget", 250, 10, 200.0)
+  let _ = l.add_coupon("SAVE10", 10)
+  let o = l.place_order("alice", [("widget", 4)], Some("SAVE10")).unwrap()
+  assert(l.item("widget").unwrap().stock == 6)
+  let c = l.cancel(o.id, "changed mind").unwrap()
+  assert(c.status == model.Status.Cancelled("changed mind"))
+  assert(l.item("widget").unwrap().stock == 10)
+  assert(l.place_order("alice", [("widget", 1)], Some("SAVE10")).is_ok())
+}
+
+test "only open orders can be cancelled or shipped" {
+  var l = Ledger.new()
+  let _ = l.add_item("bolt", 5, 500, 10.0)
+  let a = l.place_order("alice", [("bolt", 3)], None).unwrap()
+  let b = l.place_order("bob", [("bolt", 3)], None).unwrap()
+  assert(l.ship(a.id).is_ok())
+  assert(l.cancel(a.id, "late") == Err(model.LedgerError.NotOpen(a.id, model.Status.Shipped)))
+  assert(l.ship(a.id) == Err(model.LedgerError.NotOpen(a.id, model.Status.Shipped)))
+  assert(l.cancel(b.id, "dup").is_ok())
+  assert(
+    l.cancel(b.id, "dup") == Err(model.LedgerError.NotOpen(b.id, model.Status.Cancelled("dup"))),
+  )
+  assert(l.ship(99) == Err(model.LedgerError.UnknownOrder(99)))
+  assert(l.cancel(0, "zero") == Err(model.LedgerError.UnknownOrder(0)))
+  assert(l.item("bolt").unwrap().stock == 497)
+}
+
+test "the credit limit counts unshipped orders" {
+  var l = Ledger.new()
+  let _ = l.add_item("gadget", 1_000, 120, 1_500.0)
+  assert(l.place_order("alice", [("gadget", 30)], None).is_ok())
+  let r = l.place_order("alice", [("gadget", 30)], None)
+  assert(r == Err(model.LedgerError.OverLimit("alice", DEFAULT_LIMIT, 2 * 28_500)))
+  l.set_limit("alice", 100_000)
+  assert(l.place_order("alice", [("gadget", 30)], None).is_ok())
+  assert(l.exposure("alice") == 2 * 28_500)
+  assert(l.customer("alice").unwrap().orders == [1, 2])
+}
+
+test "shipping or cancelling frees credit" {
+  var l = Ledger.new()
+  let _ = l.add_item("gadget", 1_000, 20, 1_500.0)
+  l.set_limit("bob", 3_000)
+  let a = l.place_order("bob", [("gadget", 2)], None).unwrap()
+  assert(l.place_order("bob", [("gadget", 2)], None).is_err())
+  let _ = l.ship(a.id)
+  assert(l.exposure("bob") == 0)
+  assert(l.place_order("bob", [("gadget", 2)], None).is_ok())
+}
+
+test "repricing does not change placed orders" {
+  var l = Ledger.new()
+  let _ = l.add_item("widget", 250, 10, 200.0)
+  let o = l.place_order("alice", [("widget", 2)], None).unwrap()
+  assert(l.set_price("widget", 400) == Ok((250, 400)))
+  let again = l.order(o.id).unwrap()
+  assert(again.lines[0].unit_price == 250)
+  assert(l.item("widget").unwrap().price == 400)
+}
+
+test "the log records every change" {
+  var l = Ledger.new()
+  let _ = l.add_item("bolt", 5, 500, 10.0)
+  let _ = l.restock("bolt", 5)
+  let o = l.place_order("carol", [("bolt", 2)], None).unwrap()
+  let _ = l.ship(o.id)
+  let h = l.history(3)
+  assert(h.len() == 3)
+  assert(h[0] == model.Event.Restocked("bolt", 5, 505))
+  assert(h[2] == model.Event.Shipped(1))
+  assert(l.history(100).len() == 4)
+}
+
+test "total_value works for items, lines and orders" {
+  var l = Ledger.new()
+  let _ = l.add_item("widget", 250, 10, 200.0)
+  let _ = l.add_item("bolt", 5, 500, 10.0)
+  assert(total_value(l.all_items()) == 2_500 + 2_500)
+  let o = l.place_order("alice", [("bolt", 10)], None).unwrap()
+  assert(total_value(o.lines) == o.subtotal())
+  assert(total_value(l.find_orders(None)) == o.value())
+}
+
+test "top_n keeps the best n" {
+  let xs = [5, 1, 9, 3]
+  assert(top_n(xs, 2, fn(a, b) { a > b }) == [9, 5])
+  assert(top_n(xs, 10, fn(a, b) { a < b }) == [1, 3, 5, 9])
+  assert(top_n(xs, 0, fn(a, b) { a < b }).is_empty())
+}
+
+test "spend ranks customers and skips cancelled orders" {
+  var l = Ledger.new()
+  let _ = l.add_item("widget", 250, 10, 200.0)
+  let _ = l.add_item("gadget", 1_000, 20, 1_500.0)
+  let _ = l.add_item("bolt", 5, 500, 10.0)
+  let _ = l.place_order("alice", [("bolt", 10)], None)
+  let b = l.place_order("bob", [("gadget", 1)], None).unwrap()
+  let _ = l.place_order("carol", [("widget", 1)], None)
+  let _ = l.cancel(b.id, "test")
+  let spend = l.spend_by_customer()
+  assert(spend == [("carol", 580), ("alice", 363)])
+}

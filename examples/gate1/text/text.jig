@@ -1,0 +1,144 @@
+// Plain-text formatting helpers: money, padding, tables and bars.
+// Everything here is pure; callers decide where the text goes.
+
+/// Formats an amount of cents as dollars, e.g. 123456 -> "$1,234.56".
+pub fn money(cents: Int) -> Str {
+  let sign = if cents < 0 { "-" } else { "" }
+  let whole = cents.abs() / 100
+  let frac = cents.abs() % 100
+  let pad = if frac < 10 { "0" } else { "" }
+  return sign + "$" + group_thousands(whole) + "." + pad + frac.str()
+}
+
+/// Inserts a comma between each group of three digits.
+fn group_thousands(n: Int) -> Str
+  requires n >= 0
+{
+  let digits = n.str()
+  var out = ""
+  var i = 0
+  for i < digits.len() {
+    if i > 0 && (digits.len() - i) % 3 == 0 {
+      out = out + ","
+    }
+    out = out + digits[i..i + 1]
+    i += 1
+  }
+  return out
+}
+
+/// Replaces each `{}` in `template` with the next argument, in order:
+/// fill("{} of {}", ["3", "10"]) -> "3 of 10".
+pub fn fill(template: Str, args: List<Str>) -> Str
+  requires template.split("{}").len() == args.len() + 1
+{
+  let parts = template.split("{}")
+  var out = parts[0]
+  for i in 0..args.len() {
+    out = out + args[i] + parts[i + 1]
+  }
+  return out
+}
+
+/// Formats a count with a noun, e.g. plural(1, "unit") -> "1 unit".
+pub fn plural(n: Int, noun: Str) -> Str {
+  if n == 1 {
+    return "1 " + noun
+  }
+  return n.str() + " " + noun + "s"
+}
+
+/// Pads `s` with spaces on the right up to `width` bytes.
+pub fn pad_right(s: Str, width: Int) -> Str
+  ensures result.len() >= s.len()
+{
+  if s.len() >= width {
+    return s
+  }
+  return s + " ".repeat(width - s.len())
+}
+
+/// Pads `s` with spaces on the left up to `width` bytes.
+pub fn pad_left(s: Str, width: Int) -> Str
+  ensures result.len() >= s.len()
+{
+  if s.len() >= width {
+    return s
+  }
+  return " ".repeat(width - s.len()) + s
+}
+
+/// A horizontal bar of `#` scaled so that `top` fills `width` characters.
+pub fn bar(n: Int, top: Int, width: Int) -> Str
+  requires n >= 0, top >= 0, width > 0
+{
+  if top == 0 || n == 0 {
+    return ""
+  }
+  let len = n * width / top
+  return "#".repeat(max(len, 1))
+}
+
+/// Renders rows as an aligned table with a header and a rule line.
+/// `right[i]` right-aligns column i (for numbers).
+pub fn table(header: List<Str>, rows: List<List<Str>>, right: List<Bool>) -> List<Str>
+  requires right.len() == header.len()
+{
+  var widths = header.map(fn(h) { h.len() })
+  for row in rows {
+    for i in 0..min(row.len(), widths.len()) {
+      if row[i].len() > widths[i] {
+        widths[i] = row[i].len()
+      }
+    }
+  }
+  var out = List.new()
+  out.push(render_row(header, widths, right))
+  out.push(widths.map(fn(w) { "-".repeat(w) }).join("  ").trim())
+  for row in rows {
+    out.push(render_row(row, widths, right))
+  }
+  return out
+}
+
+fn render_row(cells: List<Str>, widths: List<Int>, right: List<Bool>) -> Str {
+  var parts = List.new()
+  for i in 0..min(cells.len(), widths.len()) {
+    if right[i] {
+      parts.push(pad_left(cells[i], widths[i]))
+    } else {
+      parts.push(pad_right(cells[i], widths[i]))
+    }
+  }
+  return parts.join("  ").trim()
+}
+
+test "money formats cents with grouping" {
+  assert(money(0) == "$0.00")
+  assert(money(5) == "$0.05")
+  assert(money(250) == "$2.50")
+  assert(money(123456789) == "$1,234,567.89")
+  assert(money(-1999) == "-$19.99")
+}
+
+test "fill substitutes in order" {
+  assert(fill("{} of {}", ["3", "10"]) == "3 of 10")
+  assert(fill("[{}]", ["x"]) == "[x]")
+  assert(fill("{}{}", ["a", "b"]) == "ab")
+  assert(fill("plain", []) == "plain")
+}
+
+test "padding never truncates" {
+  assert(pad_left("7", 3) == "  7")
+  assert(pad_right("ab", 4) == "ab  ")
+  assert(pad_right("toolong", 3) == "toolong")
+}
+
+test "table aligns columns" {
+  let t = table(["sku", "qty"], [["a", "10"], ["bolt", "2"]], [false, true])
+  assert(t.len() == 4)
+  assert(t[0] == "sku   qty")
+  assert(t[1] == "----  ---")
+  assert(t[2] == "a      10")
+  assert(t[3] == "bolt    2")
+}
