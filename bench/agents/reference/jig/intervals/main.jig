@@ -1,0 +1,32 @@
+import "std/io"
+
+/// Merge intervals sorted by start: overlapping or touching ones become one.
+fn merge(sorted: List<(Int, Int)>) -> List<(Int, Int)>
+  ensures result.len() <= sorted.len()
+{
+  var out: List<(Int, Int)> = []
+  for i in 0..sorted.len() invariant out.len() <= i {
+    let (a, b) = sorted[i]
+    if !out.is_empty() && a <= out[out.len() - 1].1 {
+      let last = out.len() - 1
+      out[last] = (out[last].0, max(out[last].1, b))
+    } else {
+      out.push((a, b))
+    }
+  }
+  return out
+}
+
+fn main() effects {io} {
+  var v: List<(Int, Int)> = []
+  for line in io.read_all().lines() {
+    let parts = line.split(" ").filter(fn(p) { !p.is_empty() })
+    if parts.len() == 2 {
+      v.push((parts[0].to_int().unwrap_or(0), parts[1].to_int().unwrap_or(0)))
+    }
+  }
+  v.sort()
+  for (a, b) in merge(v) {
+    io.println(a.str() + " " + b.str())
+  }
+}

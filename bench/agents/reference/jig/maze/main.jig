@@ -1,0 +1,58 @@
+import "std/io"
+
+struct Grid {
+  rows: List<Str>
+}
+
+fn Grid.open(self, r: Int, c: Int) -> Bool {
+  return r >= 0 &&
+    r < self.rows.len() &&
+    c >= 0 &&
+    c < self.rows[r].len() &&
+    self.rows[r][c] != 35 as U8
+}
+
+fn Grid.find(self, ch: U8) -> (Int, Int) {
+  for r in 0..self.rows.len() {
+    for c in 0..self.rows[r].len() {
+      if self.rows[r][c] == ch {
+        return (r, c)
+      }
+    }
+  }
+  return (0, 0)
+}
+
+/// Breadth-first search: moves on a shortest path from `S` to `E`.
+fn shortest(g: Grid) -> Option<Int> {
+  let width = 1_000_000
+  let (sr, sc) = g.find(83 as U8)
+  let goal = g.find(69 as U8)
+  var dist: Map<Int, Int> = Map.new()
+  dist.insert(sr * width + sc, 0)
+  var queue = [(sr, sc)]
+  var head = 0
+  for head < queue.len() invariant head >= 0 {
+    let (r, c) = queue[head]
+    head += 1
+    let d = dist.get(r * width + c).unwrap_or(0)
+    if (r, c) == goal {
+      return Some(d)
+    }
+    for (nr, nc) in [(r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)] {
+      if g.open(nr, nc) && !dist.contains(nr * width + nc) {
+        dist.insert(nr * width + nc, d + 1)
+        queue.push((nr, nc))
+      }
+    }
+  }
+  return None
+}
+
+fn main() effects {io} {
+  let g = Grid { rows: io.read_all().lines().filter(fn(l) { !l.is_empty() }) }
+  match shortest(g) {
+    Some(d) => io.println(d.str())
+    None => io.println("no path")
+  }
+}

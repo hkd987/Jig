@@ -1,0 +1,5 @@
+open a 100
+open b 5
+transfer a b 30
+show a
+show b

@@ -35,6 +35,11 @@ jobs:
             ./target/debug/jig check "$d"
             ./target/debug/jig test "$d"
           done
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Agent benchmark tasks (reference solutions in Jig, Rust and TypeScript)
+        run: python3 bench/agents/run.py ./target/debug/jig --reference
 
   memcheck:
     runs-on: ubuntu-latest

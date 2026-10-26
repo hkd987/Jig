@@ -1,0 +1,52 @@
+import "std/io"
+
+fn apply(op: Str, a: Int, b: Int) -> Result<Int, Str> {
+  return match op {
+    "+" => Ok(a + b)
+    "-" => Ok(a - b)
+    "*" => Ok(a * b)
+    _ => if b == 0 { Err("division by zero") } else { Ok(a / b) }
+  }
+}
+
+fn eval(line: Str) -> Result<Int, Str> {
+  var stack: List<Int> = []
+  for tok in line.split(" ") {
+    if tok.is_empty() {
+      continue
+    }
+    match tok.to_int() {
+      Some(n) => stack.push(n)
+      None => {
+        if tok != "+" && tok != "-" && tok != "*" && tok != "/" {
+          return Err("bad token " + tok)
+        }
+        if stack.len() < 2 {
+          return Err("not enough operands")
+        }
+        let b = stack.pop().unwrap()
+        let a = stack.pop().unwrap()
+        stack.push(apply(tok, a, b)?)
+      }
+    }
+  }
+  if stack.is_empty() {
+    return Err("not enough operands")
+  }
+  if stack.len() > 1 {
+    return Err("too many operands")
+  }
+  return Ok(stack[0])
+}
+
+fn main() effects {io} {
+  for line in io.read_all().lines() {
+    if line.trim().is_empty() {
+      continue
+    }
+    match eval(line) {
+      Ok(v) => io.println(v.str())
+      Err(e) => io.println("error: " + e)
+    }
+  }
+}

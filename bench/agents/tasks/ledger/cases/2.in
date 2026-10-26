@@ -1,0 +1,4 @@
+open a 10
+transfer a b 1
+transfer a a 1
+show c

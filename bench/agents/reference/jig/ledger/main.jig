@@ -1,0 +1,72 @@
+import "std/io"
+
+/// A transfer between two accounts keeps the total.
+fn transfer(from: &mut Int, to: &mut Int, amount: Int)
+  requires amount > 0, from >= amount, to <= 9223372036854775807 - amount
+  ensures from + to == old(from + to)
+{
+  from -= amount
+  to += amount
+}
+
+fn amount(s: Str) -> Option<Int> {
+  return s.to_int()
+}
+
+struct Ledger {
+  balances: Map<Str, Int>
+  out: Str
+}
+
+fn Ledger.say(&mut self, line: Str) {
+  self.out = self.out + line + "\n"
+}
+
+fn Ledger.run(&mut self, w: List<Str>) {
+  if w.len() == 3 && w[0] == "open" {
+    match amount(w[2]) {
+      Some(a) if a >= 0 => if self.balances.contains(w[1]) {
+        self.say("error: account " + w[1] + " exists")
+      } else {
+        self.balances.insert(w[1], a)
+      }
+      _ => self.say("error: bad command")
+    }
+  } else if w.len() == 4 && w[0] == "transfer" {
+    match amount(w[3]) {
+      Some(a) if a > 0 && w[1] != w[2] => match (self.balances.get(w[1]), self.balances.get(w[2])) {
+        (None, _) => self.say("error: no account " + w[1])
+        (_, None) => self.say("error: no account " + w[2])
+        (Some(f), Some(t)) => if f < a || t > 9223372036854775807 - a {
+          self.say("error: insufficient funds")
+        } else {
+          var from = f
+          var to = t
+          transfer(&mut from, &mut to, a)
+          self.balances.insert(w[1], from)
+          self.balances.insert(w[2], to)
+        }
+      }
+      _ => self.say("error: bad command")
+    }
+  } else if w.len() == 2 && w[0] == "show" {
+    match self.balances.get(w[1]) {
+      Some(b) => self.say(w[1] + " " + b.str())
+      None => self.say("error: no account " + w[1])
+    }
+  } else if !w.is_empty() {
+    self.say("error: bad command")
+  }
+}
+
+fn main() effects {io} {
+  var l = Ledger { balances: Map.new(), out: "" }
+  for line in io.read_all().lines() {
+    l.run(line.split(" ").filter(fn(p) { !p.is_empty() }))
+  }
+  var total = 0
+  for b in l.balances.values() {
+    total += b
+  }
+  io.print(l.out + "total " + total.str() + "\n")
+}

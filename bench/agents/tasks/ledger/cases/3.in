@@ -1,0 +1,5 @@
+open a 10
+open b 0
+transfer a b 11
+transfer a b -1
+open a 3

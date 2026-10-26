@@ -1,0 +1,36 @@
+import "std/io"
+
+/// Words: maximal runs of ASCII letters, lowercased.
+fn words(text: Str) -> List<Str> {
+  var out: List<Str> = []
+  var cur: List<Char> = []
+  for c in text.chars() {
+    if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+      cur.push(c.to_lower())
+    } else if !cur.is_empty() {
+      out.push(Str.from_chars(cur))
+      cur = []
+    }
+  }
+  if !cur.is_empty() {
+    out.push(Str.from_chars(cur))
+  }
+  return out
+}
+
+/// Higher counts first, then alphabetical.
+fn before(a: (Str, Int), b: (Str, Int)) -> Bool {
+  return a.1 > b.1 || (a.1 == b.1 && a.0 < b.0)
+}
+
+fn main() effects {io} {
+  var counts: Map<Str, Int> = Map.new()
+  for w in words(io.read_all()) {
+    counts.insert(w, counts.get(w).unwrap_or(0) + 1)
+  }
+  var entries = counts.entries()
+  entries.sort_by(before)
+  for i in 0..min(3, entries.len()) {
+    io.println(entries[i].0 + " " + entries[i].1.str())
+  }
+}
