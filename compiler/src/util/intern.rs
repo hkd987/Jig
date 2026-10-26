@@ -58,11 +58,7 @@ impl Interner {
 fn interner() -> &'static Mutex<Interner> {
     static I: OnceLock<Mutex<Interner>> = OnceLock::new();
     I.get_or_init(|| {
-        let mut i = Interner {
-            map: FxHashMap::default(),
-            count: 0,
-            chunk: String::with_capacity(64 * 1024),
-        };
+        let mut i = Interner { map: FxHashMap::default(), count: 0, chunk: String::with_capacity(64 * 1024) };
         for s in sym::PREDEFINED {
             i.intern(s);
         }

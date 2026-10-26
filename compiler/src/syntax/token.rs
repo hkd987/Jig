@@ -146,8 +146,22 @@ impl TokenKind {
         use TokenKind::*;
         matches!(
             self,
-            Ident | Int | Float | Str | Char | True | False | Return | Break | Continue | RParen
-                | RBracket | RBrace | Gt | Shr | Question
+            Ident
+                | Int
+                | Float
+                | Str
+                | Char
+                | True
+                | False
+                | Return
+                | Break
+                | Continue
+                | RParen
+                | RBracket
+                | RBrace
+                | Gt
+                | Shr
+                | Question
         )
     }
 

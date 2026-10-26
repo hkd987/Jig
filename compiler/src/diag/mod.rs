@@ -217,10 +217,7 @@ impl Diagnostic {
         self
     }
     pub fn fix(mut self, msg: impl Into<String>, span: Span, replacement: impl Into<String>) -> Self {
-        self.fixes.push(Fix {
-            message: msg.into(),
-            edits: vec![Edit { span, replacement: replacement.into() }],
-        });
+        self.fixes.push(Fix { message: msg.into(), edits: vec![Edit { span, replacement: replacement.into() }] });
         self
     }
     pub fn fix_edits(mut self, msg: impl Into<String>, edits: Vec<Edit>) -> Self {
@@ -291,8 +288,7 @@ impl Diagnostic {
             Severity::Error => ("error", "\x1b[1;31m"),
             Severity::Info => ("info", "\x1b[1;36m"),
         };
-        let (bold, reset, blue) =
-            if color { ("\x1b[1m", "\x1b[0m", "\x1b[1;34m") } else { ("", "", "") };
+        let (bold, reset, blue) = if color { ("\x1b[1m", "\x1b[0m", "\x1b[1;34m") } else { ("", "", "") };
         let sevc = if color { sev_color } else { "" };
         let _ = writeln!(out, "{sevc}{sev}[{}]{reset}{bold}: {}{reset}", self.code.name(), self.message);
         let mut spans: Vec<(Span, Option<&str>, bool)> = Vec::new();
@@ -337,11 +333,21 @@ impl Diagnostic {
             let line = sm.line_text(fid, lc.line);
             let _ = writeln!(out, "{blue}{:>w$} |{reset} {}", lc.line, line, w = gutter - 1);
             let end = sm.line_col(span.hi).map(|(_, e)| e).unwrap_or(lc);
-            let width = if end.line == lc.line { (end.col.saturating_sub(lc.col)).max(1) } else {
+            let width = if end.line == lc.line {
+                (end.col.saturating_sub(lc.col)).max(1)
+            } else {
                 (line.chars().count() as u32 + 1).saturating_sub(lc.col).max(1)
             };
             let marker = if primary { '^' } else { '-' };
-            let mc = if color { if primary { sev_color } else { blue } } else { "" };
+            let mc = if color {
+                if primary {
+                    sev_color
+                } else {
+                    blue
+                }
+            } else {
+                ""
+            };
             let _ = writeln!(
                 out,
                 "{:w$}{blue}|{reset} {:pad$}{mc}{}{}{reset}",
@@ -354,8 +360,7 @@ impl Diagnostic {
             );
         }
         if !self.counterexample.is_empty() {
-            let vals: Vec<String> =
-                self.counterexample.iter().map(|(k, v)| format!("{k} = {v}")).collect();
+            let vals: Vec<String> = self.counterexample.iter().map(|(k, v)| format!("{k} = {v}")).collect();
             let _ = writeln!(out, "{:w$}{blue}={reset} counterexample: {}", "", vals.join(", "), w = gutter);
         }
         for n in &self.notes {

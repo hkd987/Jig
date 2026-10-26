@@ -25,6 +25,8 @@ impl Printer<'_> {
                     ItemKind::Const { .. } => 2,
                     ItemKind::Unit => 3,
                     ItemKind::TypeAlias { .. } => 4,
+                    // Bodiless function declarations (std intrinsics).
+                    ItemKind::Fn(f) if f.body.is_none() => 5,
                     _ => return None,
                 };
                 (!el.text.contains('\n')).then_some(kind)
@@ -200,7 +202,8 @@ impl Printer<'_> {
         } else {
             None
         };
-        let has_clauses = !f.requires.is_empty() || !f.ensures.is_empty() || f.effects.is_some() || self.has(Key::Clauses(id));
+        let has_clauses =
+            !f.requires.is_empty() || !f.ensures.is_empty() || f.effects.is_some() || self.has(Key::Clauses(id));
         if let Some(eff) = &effects_inline {
             let mut one = s.clone();
             let mut elems = Vec::new();

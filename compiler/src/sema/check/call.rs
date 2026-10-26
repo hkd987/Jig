@@ -72,12 +72,20 @@ impl Cx<'_> {
                         match self.pkgs[target].scope.get(&name.sym).copied() {
                             Some(d) => {
                                 if !self.def_is_pub(d) {
-                                    self.err(codes::E0205, name.span, format!("`{}` is private to package `{}`", name.sym, self.pkgs[target].path));
+                                    self.err(
+                                        codes::E0205,
+                                        name.span,
+                                        format!("`{}` is private to package `{}`", name.sym, self.pkgs[target].path),
+                                    );
                                 }
                                 d
                             }
                             None => {
-                                self.err(codes::E0201, name.span, format!("package `{}` has no type `{}`", self.pkgs[target].path, name.sym));
+                                self.err(
+                                    codes::E0201,
+                                    name.span,
+                                    format!("package `{}` has no type `{}`", self.pkgs[target].path, name.sym),
+                                );
                                 return self.tys.error;
                             }
                         }
@@ -100,7 +108,15 @@ impl Cx<'_> {
                                 targs = (0..want).map(|_| self.fresh()).collect();
                             }
                             if targs.len() != want {
-                                self.err(codes::E0313, t.span, format!("`{}` takes {want} type argument{}", name.sym, if want == 1 { "" } else { "s" }));
+                                self.err(
+                                    codes::E0313,
+                                    t.span,
+                                    format!(
+                                        "`{}` takes {want} type argument{}",
+                                        name.sym,
+                                        if want == 1 { "" } else { "s" }
+                                    ),
+                                );
                                 return self.tys.error;
                             }
                             return match b {
@@ -131,7 +147,16 @@ impl Cx<'_> {
                             targs = (0..n).map(|_| self.fresh()).collect();
                         }
                         if targs.len() != n {
-                            self.err(codes::E0313, t.span, format!("`{}` takes {n} type argument{}, found {}", name.sym, if n == 1 { "" } else { "s" }, targs.len()));
+                            self.err(
+                                codes::E0313,
+                                t.span,
+                                format!(
+                                    "`{}` takes {n} type argument{}, found {}",
+                                    name.sym,
+                                    if n == 1 { "" } else { "s" },
+                                    targs.len()
+                                ),
+                            );
                             return self.tys.error;
                         }
                         self.tys.adt(a, targs)
@@ -149,7 +174,11 @@ impl Cx<'_> {
                         self.tys.subst(at, &targs)
                     }
                     Def::Iface(_) => {
-                        self.err(codes::E0325, name.span, format!("interface `{}` is not a type; use it as a bound", name.sym));
+                        self.err(
+                            codes::E0325,
+                            name.span,
+                            format!("interface `{}` is not a type; use it as a bound", name.sym),
+                        );
                         self.tys.error
                     }
                     _ => {
@@ -167,7 +196,11 @@ impl Cx<'_> {
         for x in fs {
             let known = self.pkgs.iter().any(|p| p.scope.get(&x.name.sym) == Some(&Def::Unit));
             if !known {
-                self.err(codes::E0201, x.name.span, format!("cannot find unit `{}`; declare it with `unit {}`", x.name.sym, x.name.sym));
+                self.err(
+                    codes::E0201,
+                    x.name.span,
+                    format!("cannot find unit `{}`; declare it with `unit {}`", x.name.sym, x.name.sym),
+                );
             }
             out.push((x.name.sym, x.exp));
         }
@@ -267,7 +300,11 @@ impl Cx<'_> {
                 };
                 self.imports_used.insert((self.file, p));
                 if !self.def_is_pub(def) {
-                    self.err(codes::E0205, name.span, format!("`{}` is private to package `{}`", name.sym, self.pkgs[target].path));
+                    self.err(
+                        codes::E0205,
+                        name.span,
+                        format!("`{}` is private to package `{}`", name.sym, self.pkgs[target].path),
+                    );
                 }
                 Some(t)
             }
@@ -316,13 +353,21 @@ impl Cx<'_> {
                     return match self.pkgs[target].scope.get(&name.sym).copied() {
                         Some(def) => {
                             if !self.def_is_pub(def) {
-                                self.err(codes::E0205, name.span, format!("`{}` is private to package `{}`", name.sym, self.pkgs[target].path));
+                                self.err(
+                                    codes::E0205,
+                                    name.span,
+                                    format!("`{}` is private to package `{}`", name.sym, self.pkgs[target].path),
+                                );
                             }
                             self.value_of_def(e, def, name.sym, span, None, expected)
                         }
                         None => {
                             let cands: Vec<&str> = self.pkgs[target].scope.keys().map(|s| s.as_str()).collect();
-                            let mut d = Diagnostic::error(codes::E0201, name.span, format!("package `{}` has no item `{}`", self.pkgs[target].path, name.sym));
+                            let mut d = Diagnostic::error(
+                                codes::E0201,
+                                name.span,
+                                format!("package `{}` has no item `{}`", self.pkgs[target].path, name.sym),
+                            );
                             if let Some(b) = closest(name.sym.as_str(), cands.into_iter()) {
                                 d = d.fix(format!("did you mean `{b}`?"), name.span, b);
                             }
@@ -354,7 +399,7 @@ impl Cx<'_> {
                         let ptys: Vec<Ty> = ptys.into_iter().map(|t| self.tys.subst(t, &inst)).collect();
                         let ret = self.tys.subst(ret, &inst);
                         self.set_res(e, Res::Fn(f));
-                        self.tables.expr_inst.insert(e, inst.into_boxed_slice());
+                        self.set_inst(e, inst.into_boxed_slice());
                         self.add_ref(f);
                         return self.tys.func(ptys, ret, eff);
                     }
@@ -479,7 +524,17 @@ impl Cx<'_> {
         match self.tys.kind(r).clone() {
             TyKind::Fn(ps, ret, eff) => {
                 if ps.len() != args.len() {
-                    self.err(codes::E0302, span, format!("this function takes {} argument{}, but {} {} given", ps.len(), if ps.len() == 1 { "" } else { "s" }, args.len(), if args.len() == 1 { "was" } else { "were" }));
+                    self.err(
+                        codes::E0302,
+                        span,
+                        format!(
+                            "this function takes {} argument{}, but {} {} given",
+                            ps.len(),
+                            if ps.len() == 1 { "" } else { "s" },
+                            args.len(),
+                            if args.len() == 1 { "was" } else { "were" }
+                        ),
+                    );
                 }
                 for (i, &a) in args.iter().enumerate() {
                     if let ExprKind::MutArg(inner) = self.ast.exprs[a].kind {
@@ -533,14 +588,24 @@ impl Cx<'_> {
             let _ = self.unify(ty, exp);
         }
         self.set_res(callee, Res::Variant(adt, v));
-        self.tables.expr_inst.insert(callee, targs.clone().into_boxed_slice());
+        self.set_inst(callee, targs.clone().into_boxed_slice());
         self.note_variant_built(adt, v);
         let fields: Vec<Ty> = self.defs.adts[adt].variants()[v as usize].fields.iter().map(|f| f.ty).collect();
         let vname = self.defs.adts[adt].variants()[v as usize].name;
         if fields.is_empty() {
             self.err(codes::E0303, span, format!("variant `{vname}` has no fields; write it without parentheses"));
         } else if fields.len() != args.len() {
-            self.err(codes::E0302, span, format!("variant `{vname}` takes {} value{}, but {} {} given", fields.len(), if fields.len() == 1 { "" } else { "s" }, args.len(), if args.len() == 1 { "was" } else { "were" }));
+            self.err(
+                codes::E0302,
+                span,
+                format!(
+                    "variant `{vname}` takes {} value{}, but {} {} given",
+                    fields.len(),
+                    if fields.len() == 1 { "" } else { "s" },
+                    args.len(),
+                    if args.len() == 1 { "was" } else { "were" }
+                ),
+            );
         }
         for (i, &a) in args.iter().enumerate() {
             let ft = fields.get(i).map(|&t| self.tys.subst(t, &targs));
@@ -573,7 +638,11 @@ impl Cx<'_> {
                     match self.pkgs[target].scope.get(&name.sym).copied() {
                         Some(Def::Fn(f)) => {
                             if !self.defs.fns[f].is_pub {
-                                self.err(codes::E0205, name.span, format!("`{}` is private to package `{}`", name.sym, self.pkgs[target].path));
+                                self.err(
+                                    codes::E0205,
+                                    name.span,
+                                    format!("`{}` is private to package `{}`", name.sym, self.pkgs[target].path),
+                                );
                             }
                             self.set_res(callee, Res::Fn(f));
                             return self.call_fn(e, callee, f, Vec::new(), None, args, None, expected);
@@ -583,7 +652,11 @@ impl Cx<'_> {
                         }
                         None => {
                             let cands: Vec<&str> = self.pkgs[target].scope.keys().map(|s| s.as_str()).collect();
-                            let mut d = Diagnostic::error(codes::E0201, name.span, format!("package `{}` has no function `{}`", self.pkgs[target].path, name.sym));
+                            let mut d = Diagnostic::error(
+                                codes::E0201,
+                                name.span,
+                                format!("package `{}` has no function `{}`", self.pkgs[target].path, name.sym),
+                            );
                             if let Some(b) = closest(name.sym.as_str(), cands.into_iter()) {
                                 d = d.fix(format!("did you mean `{b}`?"), name.span, b);
                             }
@@ -611,9 +684,11 @@ impl Cx<'_> {
                 if let Some(f) = self.defs.method(key, name.sym) {
                     if self.defs.fns[f].self_mode.is_some() {
                         let ts = self.show(t);
-                        self.push(
-                            Diagnostic::error(codes::E0327, name.span, format!("`{}` is a method of `{ts}`; call it on a value: `x.{}(...)`", name.sym, name.sym)),
-                        );
+                        self.push(Diagnostic::error(
+                            codes::E0327,
+                            name.span,
+                            format!("`{}` is a method of `{ts}`; call it on a value: `x.{}(...)`", name.sym, name.sym),
+                        ));
                         return self.tys.error;
                     }
                     let recv = self.type_args_of(r);
@@ -622,7 +697,11 @@ impl Cx<'_> {
                 }
             }
             let ts = self.show(t);
-            let mut d = Diagnostic::error(codes::E0207, name.span, format!("`{ts}` has no variant or associated function `{}`", name.sym));
+            let mut d = Diagnostic::error(
+                codes::E0207,
+                name.span,
+                format!("`{ts}` has no variant or associated function `{}`", name.sym),
+            );
             if let TyKind::Adt(a, _) = self.tys.kind(r) {
                 let names: Vec<&str> = self.defs.adts[*a].variants().iter().map(|v| v.name.as_str()).collect();
                 if let Some(b) = closest(name.sym.as_str(), names.into_iter()) {
@@ -661,8 +740,12 @@ impl Cx<'_> {
         let r = self.resolve(r);
         if matches!(kind, TyKind::Infer(_)) {
             self.push(
-                Diagnostic::error(codes::E0305, self.ast.exprs[base].span, format!("type annotations needed before calling `.{}()`", name.sym))
-                    .note("annotate the variable, e.g. `let xs: List<Int> = []`"),
+                Diagnostic::error(
+                    codes::E0305,
+                    self.ast.exprs[base].span,
+                    format!("type annotations needed before calling `.{}()`", name.sym),
+                )
+                .note("annotate the variable, e.g. `let xs: List<Int> = []`"),
             );
             for &a in args {
                 self.check_expr(a, None);
@@ -677,7 +760,11 @@ impl Cx<'_> {
                 let fd = &self.defs.fns[f];
                 if fd.self_mode.is_none() {
                     let ts = self.show(r);
-                    self.err(codes::E0327, name.span, format!("`{}` is an associated function; call it as `{ts}.{}(...)`", name.sym, name.sym));
+                    self.err(
+                        codes::E0327,
+                        name.span,
+                        format!("`{}` is an associated function; call it as `{ts}.{}(...)`", name.sym, name.sym),
+                    );
                     return self.tys.error;
                 }
                 if !fd.is_pub && fd.pkg != self.pkg {
@@ -735,7 +822,11 @@ impl Cx<'_> {
                 }
                 return self.tys.str;
             }
-            let mut d = Diagnostic::error(codes::E0207, name.span, format!("type parameter `{pname}` has no method `{}`", name.sym));
+            let mut d = Diagnostic::error(
+                codes::E0207,
+                name.span,
+                format!("type parameter `{pname}` has no method `{}`", name.sym),
+            );
             if name.sym == sym::STR_METHOD {
                 d = d.note(format!("add a bound: `{pname}: Show`"));
             } else {
@@ -773,7 +864,8 @@ impl Cx<'_> {
         let ts = self.show(r);
         let mut d = Diagnostic::error(codes::E0207, name.span, format!("`{ts}` has no method `{}`", name.sym));
         if let Some(key) = TyKey::of(self.tys, lookup_ty) {
-            let names: Vec<&str> = self.defs.methods.keys().filter(|(k, _)| *k == key).map(|(_, n)| n.as_str()).collect();
+            let names: Vec<&str> =
+                self.defs.methods.keys().filter(|(k, _)| *k == key).map(|(_, n)| n.as_str()).collect();
             if let Some(b) = closest(name.sym.as_str(), names.into_iter()) {
                 d = d.fix(format!("did you mean `{b}`?"), name.span, b);
             }
@@ -805,7 +897,17 @@ impl Cx<'_> {
         let (ret, eff) = (fd.ret, fd.effects);
         let name = fd.name;
         if params.len() != args.len() {
-            self.err(codes::E0302, span, format!("`{name}` takes {} argument{}, but {} {} given", params.len(), if params.len() == 1 { "" } else { "s" }, args.len(), if args.len() == 1 { "was" } else { "were" }));
+            self.err(
+                codes::E0302,
+                span,
+                format!(
+                    "`{name}` takes {} argument{}, but {} {} given",
+                    params.len(),
+                    if params.len() == 1 { "" } else { "s" },
+                    args.len(),
+                    if args.len() == 1 { "was" } else { "were" }
+                ),
+            );
         }
         let mut places = Vec::new();
         for (i, &a) in args.iter().enumerate() {
@@ -836,7 +938,8 @@ impl Cx<'_> {
             }
             (Mode::MutRef, _) => {
                 let snippet = self.snippet(asp);
-                let mut d = Diagnostic::error(codes::E0314, asp, "this parameter is `&mut`: pass a mutable place with `&mut`");
+                let mut d =
+                    Diagnostic::error(codes::E0314, asp, "this parameter is `&mut`: pass a mutable place with `&mut`");
                 if !snippet.is_empty() {
                     d = d.fix("add `&mut`", asp, format!("&mut {snippet}"));
                 }
@@ -846,7 +949,8 @@ impl Cx<'_> {
             (Mode::Value, ExprKind::MutArg(inner)) => {
                 let isp = self.ast.exprs[inner].span;
                 let snippet = self.snippet(isp);
-                let mut d = Diagnostic::error(codes::E0314, asp, "this parameter takes its argument by value; remove `&mut`");
+                let mut d =
+                    Diagnostic::error(codes::E0314, asp, "this parameter takes its argument by value; remove `&mut`");
                 if !snippet.is_empty() {
                     d = d.fix("remove `&mut`", asp, snippet);
                 }
@@ -885,7 +989,7 @@ impl Cx<'_> {
     ) -> Ty {
         let span = self.ast.exprs[e].span;
         let inst = self.instantiate(f, &recv, explicit, span);
-        self.tables.expr_inst.insert(callee, inst.clone().into_boxed_slice());
+        self.set_inst(callee, inst.clone().into_boxed_slice());
         self.add_ref(f);
         let fd = &self.defs.fns[f];
         let params: Vec<(Ty, Mode, Symbol)> = fd.params.iter().map(|p| (p.ty, p.mode, p.name)).collect();
@@ -898,14 +1002,27 @@ impl Cx<'_> {
             }
         }
         if params.len() != args.len() {
-            let sig: Vec<String> = params.iter().map(|(t, m, n)| {
-                let t = self.tys.subst(*t, &inst);
-                let ts = self.show(t);
-                format!("{n}: {}{ts}", if *m == Mode::MutRef { "&mut " } else { "" })
-            }).collect();
+            let sig: Vec<String> = params
+                .iter()
+                .map(|(t, m, n)| {
+                    let t = self.tys.subst(*t, &inst);
+                    let ts = self.show(t);
+                    format!("{n}: {}{ts}", if *m == Mode::MutRef { "&mut " } else { "" })
+                })
+                .collect();
             self.push(
-                Diagnostic::error(codes::E0302, span, format!("`{display}` takes {} argument{}, but {} {} given", params.len(), if params.len() == 1 { "" } else { "s" }, args.len(), if args.len() == 1 { "was" } else { "were" }))
-                    .note(format!("signature: {display}({})", sig.join(", "))),
+                Diagnostic::error(
+                    codes::E0302,
+                    span,
+                    format!(
+                        "`{display}` takes {} argument{}, but {} {} given",
+                        params.len(),
+                        if params.len() == 1 { "" } else { "s" },
+                        args.len(),
+                        if args.len() == 1 { "was" } else { "were" }
+                    ),
+                )
+                .note(format!("signature: {display}({})", sig.join(", "))),
             );
         }
         let mut places: Vec<ExprId> = Vec::new();
@@ -1002,7 +1119,11 @@ impl Cx<'_> {
             let mut d = Diagnostic::error(codes::E0307, span, format!("cannot {what} `{name}`, which is not mutable"));
             match kind {
                 LocalKind::Let => {
-                    d = d.label(lspan, "declared with `let`").fix("declare it with `var`", Span::new(lspan.lo, lspan.lo), "");
+                    d = d.label(lspan, "declared with `let`").fix(
+                        "declare it with `var`",
+                        Span::new(lspan.lo, lspan.lo),
+                        "",
+                    );
                     d.fixes.clear();
                     d = d.note("declare it with `var` instead of `let`");
                 }
@@ -1062,7 +1183,8 @@ impl Cx<'_> {
                     continue;
                 }
                 let n = pi.len().min(pj.len());
-                let overlap = pi[..n].iter().zip(pj[..n].iter()).all(|(a, b)| a == b || (*a == Proj::Index && *b == Proj::Index));
+                let overlap =
+                    pi[..n].iter().zip(pj[..n].iter()).all(|(a, b)| a == b || (*a == Proj::Index && *b == Proj::Index));
                 if overlap {
                     let (si, sj) = (self.ast.exprs[places[i]].span, self.ast.exprs[places[j]].span);
                     self.push(

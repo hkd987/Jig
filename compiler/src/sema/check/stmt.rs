@@ -55,15 +55,20 @@ impl Cx<'_> {
         if self.diverges {
             return self.tys.never;
         }
-        if n == 0 || !matches!(self.ast.stmts[*self.ast.stmt_lists.get(stmts).last().unwrap()].kind, StmtKind::Expr(_)) {
+        if n == 0 || !matches!(self.ast.stmts[*self.ast.stmt_lists.get(stmts).last().unwrap()].kind, StmtKind::Expr(_))
+        {
             if let Some(exp) = expected {
                 let r = self.resolve(exp);
                 if !self.tys.is_unit(r) && !matches!(self.tys.kind(r), TyKind::Infer(_) | TyKind::Error) {
                     let span = self.ast.exprs[block].span;
                     let es = self.show(exp);
                     self.push(
-                        Diagnostic::error(codes::E0301, span, format!("this block has no value, but `{es}` is expected"))
-                            .note("end the block with an expression"),
+                        Diagnostic::error(
+                            codes::E0301,
+                            span,
+                            format!("this block has no value, but `{es}` is expected"),
+                        )
+                        .note("end the block with an expression"),
                     );
                     return exp;
                 }
@@ -109,7 +114,9 @@ impl Cx<'_> {
                 match op {
                     None => {
                         self.check_expr(value, Some(tt));
-                        if let (ExprKind::Name(a), ExprKind::Name(b)) = (self.ast.exprs[target].kind, self.ast.exprs[value].kind) {
+                        if let (ExprKind::Name(a), ExprKind::Name(b)) =
+                            (self.ast.exprs[target].kind, self.ast.exprs[value].kind)
+                        {
                             if a == b {
                                 self.err(codes::E0508, st.span, format!("`{a}` is assigned to itself"));
                             }
@@ -309,7 +316,11 @@ impl Cx<'_> {
             }
             _ => {
                 let ts = self.show(t);
-                self.err(codes::E0306, span, format!("cannot iterate over `{ts}`; `for` works on ranges, `List`, `Set` and `Map`"));
+                self.err(
+                    codes::E0306,
+                    span,
+                    format!("cannot iterate over `{ts}`; `for` works on ranges, `List`, `Set` and `Map`"),
+                );
                 self.tys.error
             }
         }
@@ -320,7 +331,7 @@ impl Cx<'_> {
     /// Patterns in `let` and `for`: bindings, `_` and tuples only.
     fn check_pat_irrefutable(&mut self, p: PatId, t: Ty, kind: LocalKind) {
         let pat = self.ast.pats[p];
-        self.tables.pat_ty[p.0 as usize] = t;
+        self.set_pat_ty(p, t);
         match pat.kind {
             PatKind::Wild => {}
             PatKind::Bind(name) => {
@@ -350,15 +361,21 @@ impl Cx<'_> {
                 }
             }
             PatKind::Error => {}
-            PatKind::Variant { name, args, has_parens: false } if args.is_empty() && self.prelude_variant(name.sym).is_none() => {
+            PatKind::Variant { name, args, has_parens: false }
+                if args.is_empty() && self.prelude_variant(name.sym).is_none() =>
+            {
                 // `let Total = ...`: a binding with a bad name, not a variant.
                 let id = self.declare_local(name.sym, t, kind, pat.span);
                 self.tables.pat_local.insert(p, id);
             }
             _ => {
                 self.push(
-                    Diagnostic::error(codes::E0323, pat.span, "this pattern can fail to match; `let` and `for` need irrefutable patterns")
-                        .note("use `match` to handle each case"),
+                    Diagnostic::error(
+                        codes::E0323,
+                        pat.span,
+                        "this pattern can fail to match; `let` and `for` need irrefutable patterns",
+                    )
+                    .note("use `match` to handle each case"),
                 );
             }
         }
@@ -378,7 +395,7 @@ impl Cx<'_> {
 
     fn check_pat_inner(&mut self, p: PatId, t: Ty, rebind: bool, binds: &mut Vec<(Symbol, LocalId)>) {
         let pat = self.ast.pats[p];
-        self.tables.pat_ty[p.0 as usize] = t;
+        self.set_pat_ty(p, t);
         let r = self.resolve(t);
         match pat.kind {
             PatKind::Wild | PatKind::Error => {}
@@ -393,7 +410,11 @@ impl Cx<'_> {
                             self.tables.pat_local.insert(p, id);
                         }
                         None => {
-                            self.err(codes::E0323, pat.span, format!("`{name}` must be bound in every alternative of the pattern"));
+                            self.err(
+                                codes::E0323,
+                                pat.span,
+                                format!("`{name}` must be bound in every alternative of the pattern"),
+                            );
                         }
                     }
                 } else {
@@ -406,9 +427,19 @@ impl Cx<'_> {
                 let et = self.check_expr(e, Some(t));
                 let er = self.resolve(et);
                 if matches!(self.tys.kind(er), TyKind::Float(_)) {
-                    self.err(codes::E0323, pat.span, "floats cannot be matched exactly; compare with a tolerance in a guard");
+                    self.err(
+                        codes::E0323,
+                        pat.span,
+                        "floats cannot be matched exactly; compare with a tolerance in a guard",
+                    );
                 }
-                if let ExprKind::Str(_) | ExprKind::Int(_) | ExprKind::Char(_) | ExprKind::Bool(_) | ExprKind::Unary { .. } | ExprKind::Float(_) = self.ast.exprs[e].kind {
+                if let ExprKind::Str(_)
+                | ExprKind::Int(_)
+                | ExprKind::Char(_)
+                | ExprKind::Bool(_)
+                | ExprKind::Unary { .. }
+                | ExprKind::Float(_) = self.ast.exprs[e].kind
+                {
                 } else {
                     self.err(codes::E0323, pat.span, "patterns may only contain literals");
                 }
@@ -426,13 +457,21 @@ impl Cx<'_> {
                             let _ = self.unify(r, at);
                             (a, vs.into_boxed_slice())
                         } else {
-                            self.err(codes::E0305, pat.span, "type annotations needed: the matched value's type is not known");
+                            self.err(
+                                codes::E0305,
+                                pat.span,
+                                "type annotations needed: the matched value's type is not known",
+                            );
                             return;
                         }
                     }
                     _ => {
                         let ts = self.show(t);
-                        self.err(codes::E0323, pat.span, format!("variant pattern `{}` cannot match a value of type `{ts}`", name.sym));
+                        self.err(
+                            codes::E0323,
+                            pat.span,
+                            format!("variant pattern `{}` cannot match a value of type `{ts}`", name.sym),
+                        );
                         return;
                     }
                 };
@@ -440,7 +479,8 @@ impl Cx<'_> {
                 let Some(vi) = variants.iter().position(|v| v.name == name.sym) else {
                     let ename = self.defs.adts[adt].name;
                     let names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
-                    let mut d = Diagnostic::error(codes::E0208, name.span, format!("`{ename}` has no variant `{}`", name.sym));
+                    let mut d =
+                        Diagnostic::error(codes::E0208, name.span, format!("`{ename}` has no variant `{}`", name.sym));
                     if let Some(b) = super::expr::closest(name.sym.as_str(), names.into_iter()) {
                         d = d.fix(format!("did you mean `{b}`?"), name.span, b);
                     }
@@ -453,13 +493,32 @@ impl Cx<'_> {
                 if !has_parens && !ftys.is_empty() {
                     let wild = vec!["_"; ftys.len()].join(", ");
                     self.push(
-                        Diagnostic::error(codes::E0323, pat.span, format!("variant `{}` has {} field{}", name.sym, ftys.len(), if ftys.len() == 1 { "" } else { "s" }))
-                            .fix("match its fields", pat.span, format!("{}({wild})", name.sym)),
+                        Diagnostic::error(
+                            codes::E0323,
+                            pat.span,
+                            format!(
+                                "variant `{}` has {} field{}",
+                                name.sym,
+                                ftys.len(),
+                                if ftys.len() == 1 { "" } else { "s" }
+                            ),
+                        )
+                        .fix("match its fields", pat.span, format!("{}({wild})", name.sym)),
                     );
                     return;
                 }
                 if has_parens && ftys.len() != subs.len() {
-                    self.err(codes::E0323, pat.span, format!("variant `{}` has {} field{}, but the pattern has {}", name.sym, ftys.len(), if ftys.len() == 1 { "" } else { "s" }, subs.len()));
+                    self.err(
+                        codes::E0323,
+                        pat.span,
+                        format!(
+                            "variant `{}` has {} field{}, but the pattern has {}",
+                            name.sym,
+                            ftys.len(),
+                            if ftys.len() == 1 { "" } else { "s" },
+                            subs.len()
+                        ),
+                    );
                     return;
                 }
                 for (sp, ft) in subs.into_iter().zip(ftys) {
@@ -497,7 +556,7 @@ impl Cx<'_> {
                         let _ = n_sub;
                     }
                 }
-                self.tables.pat_ty[p.0 as usize] = t;
+                self.set_pat_ty(p, t);
             }
         }
     }
@@ -550,7 +609,10 @@ impl Cx<'_> {
         }
         for i in report.unreachable {
             let aspan = arms_v[i].span;
-            self.push(Diagnostic::error(codes::E0452, aspan, "this match arm can never match").note("earlier arms already cover every value it matches"));
+            self.push(
+                Diagnostic::error(codes::E0452, aspan, "this match arm can never match")
+                    .note("earlier arms already cover every value it matches"),
+            );
         }
         if !as_value {
             return if all_diverge { self.tys.never } else { self.tys.unit };

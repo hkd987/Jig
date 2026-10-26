@@ -33,8 +33,7 @@ impl Sources {
         match self {
             Sources::Disk => {
                 let rd = std::fs::read_dir(dir).ok()?;
-                let mut v: Vec<PathBuf> =
-                    rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_file()).collect();
+                let mut v: Vec<PathBuf> = rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_file()).collect();
                 v.sort();
                 Some(v)
             }
@@ -111,7 +110,11 @@ pub fn load_program(sources: &Sources, dir: &Path) -> Program {
         Some(r) => {
             let rel = dir.strip_prefix(r).unwrap_or(Path::new(""));
             let s = rel.to_string_lossy().replace('\\', "/");
-            if s.is_empty() { "main".to_string() } else { s }
+            if s.is_empty() {
+                "main".to_string()
+            } else {
+                s
+            }
         }
         None => "main".to_string(),
     };
@@ -161,11 +164,9 @@ impl Loader<'_> {
 
     fn parse_into(&mut self, pid: PkgId, path: PathBuf, text: String) {
         let fid = self.sm.add(path, text);
-        let base = self.sm.file(fid).base;
-        let src: &str = &self.sm.file(fid).text;
-        // The source map owns the text; parse a borrowed copy of it.
-        let src = src.to_string();
-        let out = parser::parse_file(&mut self.pkgs[pid].ast, fid, &src, base, &mut self.interner);
+        let Loader { sm, pkgs, interner, .. } = self;
+        let file = sm.file(fid);
+        let out = parser::parse_file(&mut pkgs[pid].ast, fid, &file.text, file.base, interner);
         for d in out.diags {
             self.diags.push(d);
         }
@@ -194,8 +195,7 @@ impl Loader<'_> {
                 return None;
             }
         };
-        let jig_files: Vec<&PathBuf> =
-            files.iter().filter(|p| p.extension().is_some_and(|e| e == "jig")).collect();
+        let jig_files: Vec<&PathBuf> = files.iter().filter(|p| p.extension().is_some_and(|e| e == "jig")).collect();
         if jig_files.is_empty() {
             let span = import_span.unwrap_or(Span::DUMMY);
             self.diags.push(Diagnostic::error(
@@ -212,11 +212,7 @@ impl Loader<'_> {
                 continue;
             }
             let Some(text) = self.sources.read(f) else {
-                self.diags.push(Diagnostic::error(
-                    codes::E0902,
-                    Span::DUMMY,
-                    format!("cannot read {}", f.display()),
-                ));
+                self.diags.push(Diagnostic::error(codes::E0902, Span::DUMMY, format!("cannot read {}", f.display())));
                 continue;
             };
             if ext == "jig" {
@@ -254,12 +250,8 @@ impl Loader<'_> {
                 if let Some(&(_, prev)) = map.get(&item.name.sym) {
                     let prev_span = self.pkgs[pid].ast.items[prev].span;
                     self.diags.push(
-                        Diagnostic::error(
-                            codes::E0209,
-                            item.span,
-                            format!("`{}` is imported twice", item.name.sym),
-                        )
-                        .label(prev_span, "first imported here"),
+                        Diagnostic::error(codes::E0209, item.span, format!("`{}` is imported twice", item.name.sym))
+                            .label(prev_span, "first imported here"),
                     );
                     continue;
                 }
@@ -278,12 +270,8 @@ impl Loader<'_> {
         let key = Symbol::intern(path);
         if let Some(&p) = self.by_path.get(&key) {
             if !self.done[p.0 as usize] && self.stack.contains(&p) {
-                let mut chain: Vec<String> = self
-                    .stack
-                    .iter()
-                    .skip_while(|&&q| q != p)
-                    .map(|&q| self.pkgs[q].path.to_string())
-                    .collect();
+                let mut chain: Vec<String> =
+                    self.stack.iter().skip_while(|&&q| q != p).map(|&q| self.pkgs[q].path.to_string()).collect();
                 chain.push(path.to_string());
                 self.diags.push(
                     Diagnostic::error(codes::E0204, span, format!("import cycle: {}", chain.join(" -> ")))

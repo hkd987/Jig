@@ -64,15 +64,39 @@ pub struct Item {
 #[derive(Clone, Copy, Debug)]
 pub enum ItemKind {
     /// `import "path"`; `name` is the binding (last path segment), `path` the full string.
-    Import { path: Symbol, path_span: Span },
+    Import {
+        path: Symbol,
+        path_span: Span,
+    },
     Fn(FnDecl),
-    Struct { generics: List<GenericParam>, fields: List<FieldDecl>, invariants: List<ExprId> },
-    Enum { generics: List<GenericParam>, variants: List<VariantDecl> },
-    Interface { generics: List<GenericParam>, methods: List<ItemId> },
-    TypeAlias { generics: List<GenericParam>, ty: TypeExprId },
-    Const { ty: TypeExprId, value: ExprId },
+    Struct {
+        generics: List<GenericParam>,
+        fields: List<FieldDecl>,
+        invariants: List<ExprId>,
+    },
+    Enum {
+        generics: List<GenericParam>,
+        variants: List<VariantDecl>,
+    },
+    Interface {
+        generics: List<GenericParam>,
+        methods: List<ItemId>,
+    },
+    TypeAlias {
+        generics: List<GenericParam>,
+        ty: TypeExprId,
+    },
+    Const {
+        ty: TypeExprId,
+        value: ExprId,
+    },
     Unit,
-    Test { label: Symbol, params: List<Param>, requires: List<ExprId>, body: ExprId },
+    Test {
+        label: Symbol,
+        params: List<Param>,
+        requires: List<ExprId>,
+        body: ExprId,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -157,12 +181,24 @@ pub struct TypeExpr {
 #[derive(Clone, Copy, Debug)]
 pub enum TypeExprKind {
     /// `Name`, `pkg.Name`, `Name<A, B>`, `Float<m/s>`.
-    Named { pkg: Option<Name>, name: Name, args: List<TypeExprId>, unit: Option<List<UnitFactor>> },
+    Named {
+        pkg: Option<Name>,
+        name: Name,
+        args: List<TypeExprId>,
+        unit: Option<List<UnitFactor>>,
+    },
     /// `()` and `(A, B)`.
     Tuple(List<TypeExprId>),
-    Fn { params: List<TypeExprId>, ret: Option<TypeExprId>, effects: Option<List<Name>> },
+    Fn {
+        params: List<TypeExprId>,
+        ret: Option<TypeExprId>,
+        effects: Option<List<Name>>,
+    },
     /// `T where pred` (aliases use `self` in `pred`).
-    Refined { base: TypeExprId, pred: ExprId },
+    Refined {
+        base: TypeExprId,
+        pred: ExprId,
+    },
     Error,
 }
 
@@ -271,26 +307,75 @@ pub enum ExprKind {
     Paren(ExprId),
     Tuple(List<ExprId>),
     List(List<ExprId>),
-    Field { base: ExprId, name: Name },
-    TupleField { base: ExprId, index: u32, index_span: Span },
-    Call { callee: ExprId, args: List<ExprId> },
+    Field {
+        base: ExprId,
+        name: Name,
+    },
+    TupleField {
+        base: ExprId,
+        index: u32,
+        index_span: Span,
+    },
+    Call {
+        callee: ExprId,
+        args: List<ExprId>,
+    },
     /// `&mut place`, only valid as a call argument.
     MutArg(ExprId),
-    Index { base: ExprId, index: ExprId },
-    Range { lo: Option<ExprId>, hi: Option<ExprId> },
-    Unary { op: UnOp, expr: ExprId },
-    Binary { op: BinOp, lhs: ExprId, rhs: ExprId },
-    Cast { expr: ExprId, ty: TypeExprId },
+    Index {
+        base: ExprId,
+        index: ExprId,
+    },
+    Range {
+        lo: Option<ExprId>,
+        hi: Option<ExprId>,
+    },
+    Unary {
+        op: UnOp,
+        expr: ExprId,
+    },
+    Binary {
+        op: BinOp,
+        lhs: ExprId,
+        rhs: ExprId,
+    },
+    Cast {
+        expr: ExprId,
+        ty: TypeExprId,
+    },
     Try(ExprId),
-    If { cond: ExprId, then: ExprId, els: Option<ExprId> },
-    Match { scrut: ExprId, arms: List<Arm> },
+    If {
+        cond: ExprId,
+        then: ExprId,
+        els: Option<ExprId>,
+    },
+    Match {
+        scrut: ExprId,
+        arms: List<Arm>,
+    },
     Block(List<StmtId>),
-    StructLit { ty: TypeExprId, fields: List<FieldInit> },
-    Closure { params: List<Param>, ret: Option<TypeExprId>, body: ExprId },
+    StructLit {
+        ty: TypeExprId,
+        fields: List<FieldInit>,
+    },
+    Closure {
+        params: List<Param>,
+        ret: Option<TypeExprId>,
+        body: ExprId,
+    },
     /// Explicit type arguments in expression position: `List<Int>.new()`.
-    TypeArgs { base: ExprId, args: List<TypeExprId> },
+    TypeArgs {
+        base: ExprId,
+        args: List<TypeExprId>,
+    },
     /// `forall i in lo..hi: body` / `exists ...`
-    Quant { forall: bool, var: Name, lo: ExprId, hi: ExprId, body: ExprId },
+    Quant {
+        forall: bool,
+        var: Name,
+        lo: ExprId,
+        hi: ExprId,
+        body: ExprId,
+    },
     Error,
 }
 
@@ -344,7 +429,11 @@ pub enum PatKind {
     Bind(Symbol),
     /// A literal expression: Int, Float, Str, Char, Bool, or a negated number.
     Lit(ExprId),
-    Variant { name: Name, args: List<PatId>, has_parens: bool },
+    Variant {
+        name: Name,
+        args: List<PatId>,
+        has_parens: bool,
+    },
     Tuple(List<PatId>),
     Or(List<PatId>),
     Error,

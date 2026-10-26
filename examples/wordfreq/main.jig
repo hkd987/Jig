@@ -1,0 +1,53 @@
+// Count words on standard input and print the most frequent ones.
+import "std/io"
+
+fn normalize(word: Str) -> Str {
+  var out: List<Char> = []
+  for c in word.to_lower().chars() {
+    if c.is_alnum() || c == '\'' {
+      out.push(c)
+    }
+  }
+  return Str.from_chars(out)
+}
+
+fn count(text: Str) -> Map<Str, Int> {
+  var counts: Map<Str, Int> = Map.new()
+  for line in text.lines() {
+    for raw in line.split(" ") {
+      let w = normalize(raw)
+      if !w.is_empty() {
+        counts.insert(w, counts.get(w).unwrap_or(0) + 1)
+      }
+    }
+  }
+  return counts
+}
+
+fn top(counts: Map<Str, Int>, n: Int) -> List<(Str, Int)> {
+  var entries = counts.entries()
+  entries.sort_by(fn(a, b) { a.1 > b.1 || (a.1 == b.1 && a.0 < b.0) })
+  entries.truncate(n)
+  return entries
+}
+
+fn main() effects {io} {
+  let text = io.read_all()
+  for (w, n) in top(count(text), 10) {
+    io.println(n.str() + " " + w)
+  }
+}
+
+test "counts words case-insensitively without punctuation" {
+  let c = count("The cat. the CAT!\nA dog")
+  assert(c.get("the") == Some(2))
+  assert(c.get("cat") == Some(2))
+  assert(c.get("dog") == Some(1))
+  assert(c.len() == 4)
+}
+
+test "top orders by count then word" {
+  let c = count("b a b c a b")
+  let t = top(c, 2)
+  assert(t == [("b", 3), ("a", 2)])
+}

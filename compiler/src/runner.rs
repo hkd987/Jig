@@ -1,6 +1,5 @@
 //! Running programs and tests on the interpreter.
 
-use crate::diag::Diagnostic;
 use crate::mir::interp::{Effects, Interp, Trap};
 use crate::mir::lower::Lowerer;
 use crate::mir::LowerOpts;
@@ -27,7 +26,12 @@ fn location(prog_sm: &crate::diag::SourceMap, span: crate::diag::Span) -> String
 /// Run on a big stack so deeply recursive programs don't overflow the host.
 pub fn with_big_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
     std::thread::scope(|s| {
-        std::thread::Builder::new().stack_size(1 << 30).spawn_scoped(s, f).expect("spawn interpreter thread").join().expect("interpreter thread panicked")
+        std::thread::Builder::new()
+            .stack_size(1 << 30)
+            .spawn_scoped(s, f)
+            .expect("spawn interpreter thread")
+            .join()
+            .expect("interpreter thread panicked")
     })
 }
 
@@ -54,8 +58,24 @@ pub fn run_tests(prog: &mut Program, filter: Option<&str>) -> Vec<TestResult> {
         let stdout = std::mem::take(&mut it.fx.stdout);
         let (name, pkg) = labels[i].clone();
         match r {
-            Ok(_) | Err(Trap::Exit(0)) => out.push(TestResult { name, pkg, passed: true, message: String::new(), location: String::new(), stdout, backtrace: Vec::new() }),
-            Err(Trap::Exit(c)) => out.push(TestResult { name, pkg, passed: false, message: format!("exited with code {c}"), location: String::new(), stdout, backtrace: Vec::new() }),
+            Ok(_) | Err(Trap::Exit(0)) => out.push(TestResult {
+                name,
+                pkg,
+                passed: true,
+                message: String::new(),
+                location: String::new(),
+                stdout,
+                backtrace: Vec::new(),
+            }),
+            Err(Trap::Exit(c)) => out.push(TestResult {
+                name,
+                pkg,
+                passed: false,
+                message: format!("exited with code {c}"),
+                location: String::new(),
+                stdout,
+                backtrace: Vec::new(),
+            }),
             Err(Trap::Panic { msg, span, backtrace }) => {
                 let location = location(lw.sm, span);
                 out.push(TestResult { name, pkg, passed: false, message: msg, location, stdout, backtrace })
@@ -110,10 +130,10 @@ pub fn run_main_captured(prog: &mut Program, args: Vec<String>, stdin: &str) -> 
 }
 
 /// Run `main` on the interpreter with real effects. Returns the exit code.
-pub fn run_main(prog: &mut Program, args: Vec<String>) -> Result<i32, Diagnostic> {
+pub fn run_main(prog: &mut Program, args: Vec<String>) -> Result<i32, String> {
     let mut lw = Lowerer::new(prog, LowerOpts { check_contracts: true });
     let Some(m) = lw.main() else {
-        return Err(Diagnostic::error(crate::diag::codes::E0318, crate::diag::Span::DUMMY, "this package has no `main` function"));
+        return Err("this package has no `main` function".to_string());
     };
     let mut it = Interp::new(&mut lw, Effects::real(args));
     match it.call(m, Vec::new()) {

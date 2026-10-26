@@ -10,16 +10,13 @@ use std::path::PathBuf;
 const PROTOCOL: &str = "2025-11-25";
 
 fn tool(name: &str, description: &str, props: Json, required: &[&str]) -> Json {
-    Json::obj()
-        .with("name", name)
-        .with("description", description)
-        .with(
-            "inputSchema",
-            Json::obj()
-                .with("type", "object")
-                .with("properties", props)
-                .with("required", Json::Arr(required.iter().map(|r| Json::from(*r)).collect())),
-        )
+    Json::obj().with("name", name).with("description", description).with(
+        "inputSchema",
+        Json::obj()
+            .with("type", "object")
+            .with("properties", props)
+            .with("required", Json::Arr(required.iter().map(|r| Json::from(*r)).collect())),
+    )
 }
 
 fn prop(ty: &str, desc: &str) -> Json {
@@ -91,11 +88,19 @@ fn text_result(text: String, structured: Option<Json>, is_error: bool) -> Json {
 }
 
 fn arg_path(args: &Json) -> PathBuf {
-    args.get("path").and_then(|p| p.as_str()).filter(|s| !s.is_empty()).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+    args.get("path")
+        .and_then(|p| p.as_str())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn pkg_dir(p: PathBuf) -> PathBuf {
-    if p.is_file() { p.parent().map(|x| x.to_path_buf()).unwrap_or_else(|| PathBuf::from(".")) } else { p }
+    if p.is_file() {
+        p.parent().map(|x| x.to_path_buf()).unwrap_or_else(|| PathBuf::from("."))
+    } else {
+        p
+    }
 }
 
 pub fn call_tool(name: &str, args: &Json) -> Json {
@@ -103,7 +108,11 @@ pub fn call_tool(name: &str, args: &Json) -> Json {
         "check" => {
             let report = super::project::check_project(&arg_path(args));
             let n = report.errors();
-            let mut text = if n == 0 { "ok: no errors\n".to_string() } else { format!("{n} error{}\n\n", if n == 1 { "" } else { "s" }) };
+            let mut text = if n == 0 {
+                "ok: no errors\n".to_string()
+            } else {
+                format!("{n} error{}\n\n", if n == 1 { "" } else { "s" })
+            };
             for d in report.diags.iter().take(40) {
                 text.push_str(&d.text);
                 text.push('\n');
@@ -118,7 +127,14 @@ pub fn call_tool(name: &str, args: &Json) -> Json {
             let filter = args.get("filter").and_then(|f| f.as_str()).map(|s| s.to_string());
             let mut prog = crate::sema::analyze(&crate::sema::load::Sources::Disk, &dir);
             if prog.diags.has_errors() {
-                let text: String = prog.diags.list.iter().filter(|d| d.is_error()).take(20).map(|d| d.render(&prog.sm, false)).collect();
+                let text: String = prog
+                    .diags
+                    .list
+                    .iter()
+                    .filter(|d| d.is_error())
+                    .take(20)
+                    .map(|d| d.render(&prog.sm, false))
+                    .collect();
                 return text_result(format!("the package does not check; fix these first:\n\n{text}"), None, true);
             }
             let results = crate::runner::with_big_stack(move || crate::runner::run_tests(&mut prog, filter.as_deref()));
@@ -128,7 +144,12 @@ pub fn call_tool(name: &str, args: &Json) -> Json {
                 if r.passed {
                     text.push_str(&format!("ok      {}\n", r.name));
                 } else {
-                    text.push_str(&format!("FAILED  {}\n        {}\n        at {}\n", r.name, r.message.replace('\n', "\n        "), r.location));
+                    text.push_str(&format!(
+                        "FAILED  {}\n        {}\n        at {}\n",
+                        r.name,
+                        r.message.replace('\n', "\n        "),
+                        r.location
+                    ));
                 }
             }
             let structured = Json::obj()
@@ -141,13 +162,29 @@ pub fn call_tool(name: &str, args: &Json) -> Json {
             let dir = pkg_dir(arg_path(args));
             let mut prog = crate::sema::analyze(&crate::sema::load::Sources::Disk, &dir);
             if prog.diags.has_errors() {
-                let text: String = prog.diags.list.iter().filter(|d| d.is_error()).take(20).map(|d| d.render(&prog.sm, false)).collect();
+                let text: String = prog
+                    .diags
+                    .list
+                    .iter()
+                    .filter(|d| d.is_error())
+                    .take(20)
+                    .map(|d| d.render(&prog.sm, false))
+                    .collect();
                 return text_result(format!("the program does not check; fix these first:\n\n{text}"), None, true);
             }
             let stdin = args.get("stdin").and_then(|s| s.as_str()).unwrap_or("").to_string();
-            let argv: Vec<String> = args.get("args").and_then(|a| a.as_arr()).map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()).unwrap_or_default();
-            let (out, status) = crate::runner::with_big_stack(move || crate::runner::run_main_captured(&mut prog, argv, &stdin));
-            text_result(format!("{out}\n[{status}]"), Some(Json::obj().with("stdout", out.as_str()).with("status", status.as_str())), false)
+            let argv: Vec<String> = args
+                .get("args")
+                .and_then(|a| a.as_arr())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                .unwrap_or_default();
+            let (out, status) =
+                crate::runner::with_big_stack(move || crate::runner::run_main_captured(&mut prog, argv, &stdin));
+            text_result(
+                format!("{out}\n[{status}]"),
+                Some(Json::obj().with("stdout", out.as_str()).with("status", status.as_str())),
+                false,
+            )
         }
         "fmt" => {
             let mut files = Vec::new();
@@ -166,16 +203,26 @@ pub fn call_tool(name: &str, args: &Json) -> Json {
                     Err(e) => errors.push(format!("{}: {e}", f.display())),
                 }
             }
-            let mut text = if changed.is_empty() { "already formatted\n".to_string() } else { format!("formatted:\n{}\n", changed.join("\n")) };
+            let mut text = if changed.is_empty() {
+                "already formatted\n".to_string()
+            } else {
+                format!("formatted:\n{}\n", changed.join("\n"))
+            };
             for e in &errors {
                 text.push_str(e);
             }
-            text_result(text, Some(Json::obj().with("changed", Json::Arr(changed.iter().map(|c| Json::from(c.as_str())).collect()))), !errors.is_empty())
+            text_result(
+                text,
+                Some(Json::obj().with("changed", Json::Arr(changed.iter().map(|c| Json::from(c.as_str())).collect()))),
+                !errors.is_empty(),
+            )
         }
         "explain" => {
             let code = args.get("code").and_then(|c| c.as_str()).unwrap_or("");
             match crate::diag::Code::parse(code).and_then(|c| c.info().map(|i| (c, i))) {
-                Some((c, i)) => text_result(format!("{} ({}): {}\n\n{}", c.name(), i.slug, i.summary, i.explain), None, false),
+                Some((c, i)) => {
+                    text_result(format!("{} ({}): {}\n\n{}", c.name(), i.slug, i.summary, i.explain), None, false)
+                }
                 None => text_result(format!("unknown diagnostic code `{code}`"), None, true),
             }
         }
@@ -192,7 +239,16 @@ pub fn call_tool(name: &str, args: &Json) -> Json {
                     if hits.is_empty() {
                         text.push_str("no matches\n");
                     }
-                    let s = Json::Arr(hits.iter().map(|h| Json::obj().with("name", h.name.as_str()).with("signature", h.signature.as_str()).with("package", h.package.as_str())).collect());
+                    let s = Json::Arr(
+                        hits.iter()
+                            .map(|h| {
+                                Json::obj()
+                                    .with("name", h.name.as_str())
+                                    .with("signature", h.signature.as_str())
+                                    .with("package", h.package.as_str())
+                            })
+                            .collect(),
+                    );
                     text_result(text, Some(Json::obj().with("matches", s)), false)
                 }
                 Err(e) => text_result(e, None, true),

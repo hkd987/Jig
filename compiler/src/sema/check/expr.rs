@@ -135,7 +135,11 @@ impl Cx<'_> {
                     TyKind::Tuple(ts) => match ts.get(index as usize) {
                         Some(&t) => t,
                         None => {
-                            self.err(codes::E0206, index_span, format!("tuple has no field `{index}` (it has {} fields)", ts.len()));
+                            self.err(
+                                codes::E0206,
+                                index_span,
+                                format!("tuple has no field `{index}` (it has {} fields)", ts.len()),
+                            );
                             self.tys.error
                         }
                     },
@@ -159,8 +163,12 @@ impl Cx<'_> {
             ExprKind::Index { base, index } => self.check_index(e, base, index),
             ExprKind::Range { .. } => {
                 self.push(
-                    Diagnostic::error(codes::E0306, ex.span, "a range is only allowed in `for`, slices and quantifiers")
-                        .note("build a list with a loop, e.g. `for i in 0..n { xs.push(i) }`"),
+                    Diagnostic::error(
+                        codes::E0306,
+                        ex.span,
+                        "a range is only allowed in `for`, slices and quantifiers",
+                    )
+                    .note("build a list with a loop, e.g. `for i in 0..n { xs.push(i) }`"),
                 );
                 self.tys.error
             }
@@ -205,8 +213,12 @@ impl Cx<'_> {
                     let en = self.show(r);
                     let text = format!("{}{v}.0", if neg { "-" } else { "" });
                     self.push(
-                        Diagnostic::error(codes::E0301, span, format!("mismatched types: expected `{en}`, found an integer literal"))
-                            .fix("write a float literal", span, text),
+                        Diagnostic::error(
+                            codes::E0301,
+                            span,
+                            format!("mismatched types: expected `{en}`, found an integer literal"),
+                        )
+                        .fix("write a float literal", span, text),
                     );
                     return r;
                 }
@@ -324,7 +336,11 @@ impl Cx<'_> {
         let fd = &self.defs.fns[f];
         if fd.params.iter().any(|p| p.mode == Mode::MutRef) {
             let n = fd.name;
-            self.err(codes::E0314, span, format!("`{n}` takes `&mut` parameters and cannot be used as a function value"));
+            self.err(
+                codes::E0314,
+                span,
+                format!("`{n}` takes `&mut` parameters and cannot be used as a function value"),
+            );
         }
         let inst = self.instantiate(f, &[], explicit, span);
         let fd = &self.defs.fns[f];
@@ -333,7 +349,7 @@ impl Cx<'_> {
         let ptys: Vec<Ty> = ptys.into_iter().map(|t| self.tys.subst(t, &inst)).collect();
         let ret = self.tys.subst(ret, &inst);
         self.set_res(e, Res::Fn(f));
-        self.tables.expr_inst.insert(e, inst.into_boxed_slice());
+        self.set_inst(e, inst.into_boxed_slice());
         self.add_ref(f);
         self.tys.func(ptys, ret, eff)
     }
@@ -358,7 +374,15 @@ impl Cx<'_> {
             Some(ex) => {
                 if ex.len() != own {
                     let name = self.defs.fns[f].name;
-                    self.err(codes::E0313, span, format!("`{name}` takes {own} type argument{}, found {}", if own == 1 { "" } else { "s" }, ex.len()));
+                    self.err(
+                        codes::E0313,
+                        span,
+                        format!(
+                            "`{name}` takes {own} type argument{}, found {}",
+                            if own == 1 { "" } else { "s" },
+                            ex.len()
+                        ),
+                    );
                     for _ in 0..own {
                         let v = self.fresh();
                         inst.push(v);
@@ -405,7 +429,7 @@ impl Cx<'_> {
             let _ = self.unify(ty, exp);
         }
         self.set_res(e, Res::Variant(adt, v));
-        self.tables.expr_inst.insert(e, args.clone().into_boxed_slice());
+        self.set_inst(e, args.clone().into_boxed_slice());
         let field_tys: Vec<Ty> = self.defs.adts[adt].variants()[v as usize].fields.iter().map(|f| f.ty).collect();
         if field_tys.is_empty() {
             self.note_variant_built(adt, v);
@@ -428,8 +452,15 @@ impl Cx<'_> {
         }
     }
 
-    fn check_type_args_value(&mut self, e: ExprId, base: ExprId, args: List<ast::TypeExprId>, expected: Option<Ty>) -> Ty {
-        let targs: Vec<Ty> = self.ast.type_lists.get(args).to_vec().into_iter().map(|t| self.resolve_type_expr(t)).collect();
+    fn check_type_args_value(
+        &mut self,
+        e: ExprId,
+        base: ExprId,
+        args: List<ast::TypeExprId>,
+        expected: Option<Ty>,
+    ) -> Ty {
+        let targs: Vec<Ty> =
+            self.ast.type_lists.get(args).to_vec().into_iter().map(|t| self.resolve_type_expr(t)).collect();
         let span = self.ast.exprs[e].span;
         match self.ast.exprs[base].kind {
             ExprKind::Name(n) if self.lookup_local(n).is_none() => match self.lookup_def(n) {
@@ -562,7 +593,11 @@ impl Cx<'_> {
                     || matches!(self.tys.kind(r), TyKind::Infer(v) if self.vars[*v as usize].1 == VarKind::Int);
                 if !ok {
                     let s = self.show(lt);
-                    self.err(codes::E0306, span, format!("`{}` needs integers without units, found `{s}`", op.as_str()));
+                    self.err(
+                        codes::E0306,
+                        span,
+                        format!("`{}` needs integers without units, found `{s}`", op.as_str()),
+                    );
                 }
                 lt
             }
@@ -587,9 +622,12 @@ impl Cx<'_> {
                     .note("add and compare values with the same unit; convert with `as` if needed"),
             );
         } else {
-            let mut d = Diagnostic::error(codes::E0306, span, format!("`{}` cannot combine `{a}` and `{b}`", op.as_str()));
+            let mut d =
+                Diagnostic::error(codes::E0306, span, format!("`{}` cannot combine `{a}` and `{b}`", op.as_str()));
             if self.tys.is_numeric(ra) && self.tys.is_numeric(rb) {
-                d = d.note(format!("Jig has no implicit numeric conversions; convert one side with `as {a}` or `as {b}`"));
+                d = d.note(format!(
+                    "Jig has no implicit numeric conversions; convert one side with `as {a}` or `as {b}`"
+                ));
             }
             self.push(d);
         }
@@ -753,8 +791,14 @@ impl Cx<'_> {
                 if !self.unify(ret, want) {
                     let rs = self.show(ret);
                     self.push(
-                        Diagnostic::error(codes::E0309, span, format!("`?` on an `Option` needs the function to return an `Option`, but it returns `{rs}`"))
-                            .note("convert with `.ok_or(error)` to use `?` in a function returning `Result`"),
+                        Diagnostic::error(
+                            codes::E0309,
+                            span,
+                            format!(
+                                "`?` on an `Option` needs the function to return an `Option`, but it returns `{rs}`"
+                            ),
+                        )
+                        .note("convert with `.ok_or(error)` to use `?` in a function returning `Result`"),
                     );
                 }
                 args[0]
@@ -843,7 +887,9 @@ impl Cx<'_> {
             self.err(codes::E0509, cs, format!("condition is always `{v}`"));
         }
         self.diverges = false;
-        let t1 = if as_value { self.check_block_value(then, expected) } else {
+        let t1 = if as_value {
+            self.check_block_value(then, expected)
+        } else {
             self.check_block_stmts(then);
             self.tys.unit
         };
@@ -887,7 +933,11 @@ impl Cx<'_> {
         }
         let sp = els.map(|x| self.ast.exprs[x].span).unwrap_or(span);
         let t = self.join(t1, t2, sp);
-        if self.diverges { self.tys.never } else { t }
+        if self.diverges {
+            self.tys.never
+        } else {
+            t
+        }
     }
 
     // ---------- struct literals ----------
@@ -936,13 +986,21 @@ impl Cx<'_> {
                     }
                     seen.push(init.name.sym);
                     if foreign && !decl[i].2 {
-                        self.err(codes::E0206, init.name.span, format!("field `{}` of `{sname}` is private", init.name.sym));
+                        self.err(
+                            codes::E0206,
+                            init.name.span,
+                            format!("field `{}` of `{sname}` is private", init.name.sym),
+                        );
                     }
                     let ft = self.tys.subst(decl[i].1, &args);
                     self.check_expr(init.value, Some(ft));
                 }
                 None => {
-                    let mut d = Diagnostic::error(codes::E0206, init.name.span, format!("`{sname}` has no field `{}`", init.name.sym));
+                    let mut d = Diagnostic::error(
+                        codes::E0206,
+                        init.name.span,
+                        format!("`{sname}` has no field `{}`", init.name.sym),
+                    );
                     if let Some(best) = closest(init.name.sym.as_str(), decl.iter().map(|(n, _, _)| n.as_str())) {
                         d = d.fix(format!("did you mean `{best}`?"), init.name.span, best);
                     }
@@ -955,8 +1013,16 @@ impl Cx<'_> {
             decl.iter().filter(|(n, _, _)| !seen.contains(n)).map(|(n, _, _)| format!("`{n}`")).collect();
         if !missing.is_empty() {
             self.push(
-                Diagnostic::error(codes::E0304, span, format!("missing field{} {} in `{sname}`", if missing.len() > 1 { "s" } else { "" }, missing.join(", ")))
-                    .note("Jig has no default values: every field needs a value"),
+                Diagnostic::error(
+                    codes::E0304,
+                    span,
+                    format!(
+                        "missing field{} {} in `{sname}`",
+                        if missing.len() > 1 { "s" } else { "" },
+                        missing.join(", ")
+                    ),
+                )
+                .note("Jig has no default values: every field needs a value"),
             );
         }
         r
@@ -980,7 +1046,17 @@ impl Cx<'_> {
         let ps: Vec<ast::Param> = self.ast.params.get(params).to_vec();
         if let Some((eps, _, _)) = &exp_fn {
             if eps.len() != ps.len() {
-                self.err(codes::E0302, span, format!("this closure takes {} parameter{}, but {} {} expected", ps.len(), if ps.len() == 1 { "" } else { "s" }, eps.len(), if eps.len() == 1 { "is" } else { "are" }));
+                self.err(
+                    codes::E0302,
+                    span,
+                    format!(
+                        "this closure takes {} parameter{}, but {} {} expected",
+                        ps.len(),
+                        if ps.len() == 1 { "" } else { "s" },
+                        eps.len(),
+                        if eps.len() == 1 { "is" } else { "are" }
+                    ),
+                );
             }
         }
         let mut ptys = Vec::with_capacity(ps.len());

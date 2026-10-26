@@ -67,6 +67,9 @@ pub struct Cx<'a> {
     pending_bounds: Vec<(Span, Ty, Bound)>,
     int_lits: Vec<(ExprId, u128, bool)>,
     touched: Vec<ExprId>,
+    /// Patterns and instantiations recorded by this body (finalized in `finish`).
+    pub(crate) touched_pats: Vec<crate::syntax::ast::PatId>,
+    pub(crate) touched_insts: Vec<ExprId>,
     pub(crate) diverges: bool,
     pub imports_used: &'a mut FxHashSet<(usize, Symbol)>,
     /// Report "cannot infer" once per variable.
@@ -88,7 +91,8 @@ pub fn check_bodies(prog: &mut Program) {
         }
         let pid = fd.pkg;
         let body = {
-            let mut cx = Cx::new(sm, pkgs, defs, tys, &mut tables[pid], diags, *prelude, pid, &mut imports_used[pid.0 as usize]);
+            let mut cx =
+                Cx::new(sm, pkgs, defs, tys, &mut tables[pid], diags, *prelude, pid, &mut imports_used[pid.0 as usize]);
             cx.check_fn(fid)
         };
         bodies[fid] = Some(body);
@@ -98,7 +102,8 @@ pub fn check_bodies(prog: &mut Program) {
         let tid = TestId(i as u32);
         let pid = defs.tests[tid].pkg;
         let body = {
-            let mut cx = Cx::new(sm, pkgs, defs, tys, &mut tables[pid], diags, *prelude, pid, &mut imports_used[pid.0 as usize]);
+            let mut cx =
+                Cx::new(sm, pkgs, defs, tys, &mut tables[pid], diags, *prelude, pid, &mut imports_used[pid.0 as usize]);
             cx.check_test(tid)
         };
         test_bodies[tid] = Some(body);
@@ -107,13 +112,15 @@ pub fn check_bodies(prog: &mut Program) {
     for i in 0..defs.adts.len() {
         let aid = AdtId(i as u32);
         let pid = defs.adts[aid].pkg;
-        let mut cx = Cx::new(sm, pkgs, defs, tys, &mut tables[pid], diags, *prelude, pid, &mut imports_used[pid.0 as usize]);
+        let mut cx =
+            Cx::new(sm, pkgs, defs, tys, &mut tables[pid], diags, *prelude, pid, &mut imports_used[pid.0 as usize]);
         cx.check_adt_predicates(aid);
     }
     for i in 0..defs.aliases.len() {
         let al = AliasId(i as u32);
         let pid = defs.aliases[al].pkg;
-        let mut cx = Cx::new(sm, pkgs, defs, tys, &mut tables[pid], diags, *prelude, pid, &mut imports_used[pid.0 as usize]);
+        let mut cx =
+            Cx::new(sm, pkgs, defs, tys, &mut tables[pid], diags, *prelude, pid, &mut imports_used[pid.0 as usize]);
         cx.check_alias_predicate(al);
     }
     // Unused imports.
@@ -126,8 +133,12 @@ pub fn check_bodies(prog: &mut Program) {
                 if !imports_used[pi.0 as usize].contains(&(fi, *name)) {
                     let span = pkg.ast.items[item].span;
                     diags.push(
-                        Diagnostic::error(codes::E0502, span, format!("unused import `{}`", pkg.ast.items[item].name.sym))
-                            .fix("remove the import", span, ""),
+                        Diagnostic::error(
+                            codes::E0502,
+                            span,
+                            format!("unused import `{}`", pkg.ast.items[item].name.sym),
+                        )
+                        .fix("remove the import", span, ""),
                     );
                 }
             }
@@ -176,6 +187,8 @@ impl<'a> Cx<'a> {
             pending_bounds: Vec::new(),
             int_lits: Vec::new(),
             touched: Vec::new(),
+            touched_pats: Vec::new(),
+            touched_insts: Vec::new(),
             diverges: false,
             imports_used,
             reported_vars: FxHashSet::default(),
@@ -208,7 +221,9 @@ impl<'a> Cx<'a> {
         let fk = self.tys.kind(self.resolve(found)).clone();
         let snippet = self.snippet(span);
         match (&ek, &fk) {
-            (TyKind::Float(_), TyKind::Int(..)) | (TyKind::Int(..), TyKind::Float(_)) | (TyKind::Int(..), TyKind::Int(..)) => {
+            (TyKind::Float(_), TyKind::Int(..))
+            | (TyKind::Int(..), TyKind::Float(_))
+            | (TyKind::Int(..), TyKind::Int(..)) => {
                 if !snippet.is_empty() {
                     d = d.fix(format!("convert with `as {e}`"), span, format!("({snippet}) as {e}"));
                 }
@@ -501,9 +516,11 @@ impl<'a> Cx<'a> {
             return;
         }
         if self.ctx != Ctx::Code {
-            self.push(
-                Diagnostic::error(codes::E0321, span, format!("contracts must be pure, but {what} has effects {}", eff.render())),
-            );
+            self.push(Diagnostic::error(
+                codes::E0321,
+                span,
+                format!("contracts must be pure, but {what} has effects {}", eff.render()),
+            ));
             return;
         }
         if let Some(frame) = self.closures.last_mut() {
@@ -518,7 +535,11 @@ impl<'a> Cx<'a> {
                         Diagnostic::error(
                             codes::E0401,
                             span,
-                            format!("{what} performs {} but the closure's type allows only {}", missing.render(), allowed.render()),
+                            format!(
+                                "{what} performs {} but the closure's type allows only {}",
+                                missing.render(),
+                                allowed.render()
+                            ),
                         )
                         .note("a function value's effects are part of its type"),
                     );
@@ -536,7 +557,11 @@ impl<'a> Cx<'a> {
                 Diagnostic::error(
                     codes::E0401,
                     span,
-                    format!("{what} needs effect{} `{}`, which this function does not declare", if names.len() > 1 { "s" } else { "" }, names.join("`, `")),
+                    format!(
+                        "{what} needs effect{} `{}`, which this function does not declare",
+                        if names.len() > 1 { "s" } else { "" },
+                        names.join("`, `")
+                    ),
                 )
                 .note(format!("declare it: `effects {{{}}}`", want.join(", "))),
             );
@@ -559,9 +584,7 @@ impl<'a> Cx<'a> {
             if let Err(why) = self.satisfies(t, b, &mut FxHashSet::default()) {
                 let tn = self.tys.display(t);
                 let bn = bound_name(self.defs, b);
-                self.push(
-                    Diagnostic::error(codes::E0312, span, format!("`{tn}` does not satisfy `{bn}`")).note(why),
-                );
+                self.push(Diagnostic::error(codes::E0312, span, format!("`{tn}` does not satisfy `{bn}`")).note(why));
             }
         }
     }
@@ -582,9 +605,13 @@ impl<'a> Cx<'a> {
                     Err(format!("add the bound to the type parameter: `{name}: {}`", bound_name(self.defs, b)))
                 }
             }
-            (TyKind::Fn(..), _) => Err("functions cannot be compared, hashed, shown or used as interface values".into()),
+            (TyKind::Fn(..), _) => {
+                Err("functions cannot be compared, hashed, shown or used as interface values".into())
+            }
             (_, Bound::Iface(iid)) => self.satisfies_iface(t, iid),
-            (TyKind::Float(_), Bound::Ord | Bound::Hash) => Err("`Float` is not totally ordered; use `sort_by` with an explicit comparison".into()),
+            (TyKind::Float(_), Bound::Ord | Bound::Hash) => {
+                Err("`Float` is not totally ordered; use `sort_by` with an explicit comparison".into())
+            }
             (TyKind::Int(..) | TyKind::Float(_) | TyKind::Bool | TyKind::Char | TyKind::Str, _) => Ok(()),
             (TyKind::Tuple(ts), _) => {
                 for &x in ts.iter() {
@@ -636,7 +663,10 @@ impl<'a> Cx<'a> {
                 return Err(format!("missing method `{}` required by `{iname}`", md.name));
             };
             let cd = &self.defs.fns[cf];
-            if cd.self_mode != md.self_mode || cd.params.len() != md.params.len() || cd.generics.len() != cd.n_recv_generics {
+            if cd.self_mode != md.self_mode
+                || cd.params.len() != md.params.len()
+                || cd.generics.len() != cd.n_recv_generics
+            {
                 return Err(format!("method `{}` does not match the signature required by `{iname}`", md.name));
             }
             // Compare signatures with Self := t (iface) and the receiver params := targs.
@@ -655,7 +685,10 @@ impl<'a> Cx<'a> {
             let ra = self.tys.subst(cd.ret, &targs);
             let rb = self.tys.subst(md.ret, &self_sub);
             if ra != rb || !md.effects.contains(cd.effects) {
-                return Err(format!("method `{}` does not match the return type or effects required by `{iname}`", md.name));
+                return Err(format!(
+                    "method `{}` does not match the return type or effects required by `{iname}`",
+                    md.name
+                ));
             }
         }
         Ok(())
@@ -684,18 +717,18 @@ impl<'a> Cx<'a> {
             self.tables.expr_ty[e.0 as usize] = z;
         }
         self.touched = touched;
-        let pats: Vec<usize> = (0..self.tables.pat_ty.len()).collect();
+        let pats = std::mem::take(&mut self.touched_pats);
         for p in pats {
-            let t = self.tables.pat_ty[p];
+            let t = self.tables.pat_ty[p.0 as usize];
             if self.tys.has_infer(t) {
-                self.tables.pat_ty[p] = self.zonk(t);
+                self.tables.pat_ty[p.0 as usize] = self.zonk(t);
             }
         }
         for id in self.body.locals.indices().collect::<Vec<_>>() {
             let t = self.body.locals[id].ty;
             self.body.locals[id].ty = self.zonk(t);
         }
-        let insts: Vec<ExprId> = self.tables.expr_inst.keys().copied().filter(|e| self.touched.contains(e)).collect();
+        let insts = std::mem::take(&mut self.touched_insts);
         for e in insts {
             let args = self.tables.expr_inst[&e].clone();
             let z: Vec<Ty> = args.iter().map(|&t| self.zonk(t)).collect();
@@ -709,7 +742,11 @@ impl<'a> Cx<'a> {
                 let val = if neg { -(v as i128) } else { v as i128 };
                 if val < k.min() || val > k.max() {
                     let span = self.ast.exprs[e].span;
-                    self.err(codes::E0104, span, format!("literal `{val}` does not fit in `{}` ({}..={})", k.name(), k.min(), k.max()));
+                    self.err(
+                        codes::E0104,
+                        span,
+                        format!("literal `{val}` does not fit in `{}` ({}..={})", k.name(), k.min(), k.max()),
+                    );
                 }
             }
         }
@@ -729,13 +766,25 @@ impl<'a> Cx<'a> {
     fn first_var(&self, t: Ty) -> Ty {
         match self.tys.kind(t) {
             TyKind::Infer(_) => t,
-            TyKind::Tuple(ts) | TyKind::Adt(_, ts) => ts.iter().map(|&x| self.first_var(x)).find(|&x| matches!(self.tys.kind(x), TyKind::Infer(_))).unwrap_or(t),
+            TyKind::Tuple(ts) | TyKind::Adt(_, ts) => ts
+                .iter()
+                .map(|&x| self.first_var(x))
+                .find(|&x| matches!(self.tys.kind(x), TyKind::Infer(_)))
+                .unwrap_or(t),
             TyKind::List(x) | TyKind::Set(x) => self.first_var(*x),
             TyKind::Map(k, v) => {
                 let a = self.first_var(*k);
-                if matches!(self.tys.kind(a), TyKind::Infer(_)) { a } else { self.first_var(*v) }
+                if matches!(self.tys.kind(a), TyKind::Infer(_)) {
+                    a
+                } else {
+                    self.first_var(*v)
+                }
             }
-            TyKind::Fn(ps, r, _) => ps.iter().map(|&x| self.first_var(x)).find(|&x| matches!(self.tys.kind(x), TyKind::Infer(_))).unwrap_or_else(|| self.first_var(*r)),
+            TyKind::Fn(ps, r, _) => ps
+                .iter()
+                .map(|&x| self.first_var(x))
+                .find(|&x| matches!(self.tys.kind(x), TyKind::Infer(_)))
+                .unwrap_or_else(|| self.first_var(*r)),
             _ => t,
         }
     }
@@ -753,24 +802,36 @@ impl<'a> Cx<'a> {
                 LocalKind::SelfValue => {}
                 LocalKind::SelfMut => {
                     if !mutated {
-                        self.push(
-                            Diagnostic::error(codes::E0510, span, "`&mut self` is never mutated")
-                                .fix("take `self` by value", span, "self"),
-                        );
+                        self.push(Diagnostic::error(codes::E0510, span, "`&mut self` is never mutated").fix(
+                            "take `self` by value",
+                            span,
+                            "self",
+                        ));
                     }
                 }
                 _ if !used => {
-                    let what = if matches!(kind, LocalKind::Param | LocalKind::MutParam) { "parameter" } else { "variable" };
+                    let what =
+                        if matches!(kind, LocalKind::Param | LocalKind::MutParam) { "parameter" } else { "variable" };
                     self.push(
                         Diagnostic::error(codes::E0501, span, format!("unused {what} `{name}`"))
                             .note(format!("remove it, or rename it to `_{name}` if it must exist")),
                     );
                 }
                 LocalKind::Var if !mutated => {
-                    self.push(Diagnostic::error(codes::E0503, span, format!("`{name}` is declared `var` but never mutated")).note("use `let`"));
+                    self.push(
+                        Diagnostic::error(codes::E0503, span, format!("`{name}` is declared `var` but never mutated"))
+                            .note("use `let`"),
+                    );
                 }
                 LocalKind::MutParam if !mutated => {
-                    self.push(Diagnostic::error(codes::E0510, span, format!("parameter `{name}` is `&mut` but never mutated")).note("take it by value"));
+                    self.push(
+                        Diagnostic::error(
+                            codes::E0510,
+                            span,
+                            format!("parameter `{name}` is `&mut` but never mutated"),
+                        )
+                        .note("take it by value"),
+                    );
                 }
                 _ => {}
             }
@@ -838,8 +899,12 @@ impl<'a> Cx<'a> {
                 let close = Span::new(span.hi.saturating_sub(1), span.hi);
                 let rt = self.show(ret);
                 self.push(
-                    Diagnostic::error(codes::E0308, close, format!("missing `return`: this function must return `{rt}` on every path"))
-                        .note("Jig function bodies do not return their last expression; write `return <value>`"),
+                    Diagnostic::error(
+                        codes::E0308,
+                        close,
+                        format!("missing `return`: this function must return `{rt}` on every path"),
+                    )
+                    .note("Jig function bodies do not return their last expression; write `return <value>`"),
                 );
             }
         }
@@ -858,8 +923,16 @@ impl<'a> Cx<'a> {
             if !unused.is_pure() && fd.iface.is_none() {
                 let span = if f.effects_span.is_dummy() { item.name.span } else { f.effects_span };
                 self.push(
-                    Diagnostic::error(codes::E0403, span, format!("declared effect{} {} never used", if unused.names().len() > 1 { "s" } else { "" }, unused.names().iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")))
-                        .note("remove unused effects so callers do not have to declare them"),
+                    Diagnostic::error(
+                        codes::E0403,
+                        span,
+                        format!(
+                            "declared effect{} {} never used",
+                            if unused.names().len() > 1 { "s" } else { "" },
+                            unused.names().iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")
+                        ),
+                    )
+                    .note("remove unused effects so callers do not have to declare them"),
                 );
             }
         }
@@ -976,6 +1049,16 @@ impl<'a> Cx<'a> {
         t
     }
 
+    pub(crate) fn set_inst(&mut self, e: ExprId, args: Box<[Ty]>) {
+        self.tables.expr_inst.insert(e, args);
+        self.touched_insts.push(e);
+    }
+
+    pub(crate) fn set_pat_ty(&mut self, p: crate::syntax::ast::PatId, t: Ty) {
+        self.tables.pat_ty[p.0 as usize] = t;
+        self.touched_pats.push(p);
+    }
+
     pub(crate) fn set_res(&mut self, e: ExprId, r: Res) {
         self.tables.expr_res[e.0 as usize] = r;
     }
@@ -1012,7 +1095,7 @@ pub fn is_snake(s: &str) -> bool {
 }
 
 pub fn is_camel(s: &str) -> bool {
-    s.starts_with(|c: char| c.is_ascii_uppercase()) && !s.contains('_') && (s.len() == 1 || s.chars().any(|c| c.is_ascii_lowercase()) || s.len() <= 2)
+    s.starts_with(|c: char| c.is_ascii_uppercase()) && !s.contains('_')
 }
 
 pub fn to_snake(s: &str) -> String {
@@ -1031,13 +1114,16 @@ pub fn to_snake(s: &str) -> String {
 }
 
 pub fn to_camel(s: &str) -> String {
-    s.split('_').filter(|p| !p.is_empty()).map(|p| {
-        let mut cs = p.chars();
-        match cs.next() {
-            Some(c) => c.to_ascii_uppercase().to_string() + cs.as_str(),
-            None => String::new(),
-        }
-    }).collect()
+    s.split('_')
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let mut cs = p.chars();
+            match cs.next() {
+                Some(c) => c.to_ascii_uppercase().to_string() + cs.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn check_snake(cx: &mut Cx, name: Symbol, span: Span, what: &str) {
@@ -1047,10 +1133,11 @@ pub(crate) fn check_snake(cx: &mut Cx, name: Symbol, span: Span, what: &str) {
         return;
     }
     let fixed = to_snake(s);
-    cx.push(
-        Diagnostic::error(codes::E0504, span, format!("{what} `{s}` should be snake_case"))
-            .fix(format!("rename to `{fixed}`"), span, fixed),
-    );
+    cx.push(Diagnostic::error(codes::E0504, span, format!("{what} `{s}` should be snake_case")).fix(
+        format!("rename to `{fixed}`"),
+        span,
+        fixed,
+    ));
 }
 
 pub(crate) fn check_camel(cx: &mut Cx, name: Symbol, span: Span, what: &str) {
@@ -1059,8 +1146,12 @@ pub(crate) fn check_camel(cx: &mut Cx, name: Symbol, span: Span, what: &str) {
         return;
     }
     let fixed = to_camel(s);
-    cx.push(
-        Diagnostic::error(codes::E0504, span, format!("{what} `{s}` should be UpperCamel"))
-            .fix(format!("rename to `{fixed}`"), span, fixed),
-    );
+    if fixed == s {
+        return;
+    }
+    cx.push(Diagnostic::error(codes::E0504, span, format!("{what} `{s}` should be UpperCamel")).fix(
+        format!("rename to `{fixed}`"),
+        span,
+        fixed,
+    ));
 }

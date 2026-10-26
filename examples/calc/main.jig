@@ -1,0 +1,216 @@
+// A calculator: tokenizer, recursive-descent parser and evaluator for integer arithmetic
+// with variables, e.g. `x = 3 * (4 + 5)` then `x / 2`.
+import "std/io"
+
+enum Token {
+  Num(value: Int)
+  Ident(name: Str)
+  Op(op: Char)
+  LParen
+  RParen
+  Assign
+}
+
+enum Expr {
+  Lit(value: Int)
+  Var(name: Str)
+  Neg(inner: Expr)
+  Bin(op: Char, left: Expr, right: Expr)
+}
+
+fn tokenize(src: Str) -> Result<List<Token>, Str> {
+  let cs = src.chars()
+  var out: List<Token> = []
+  var i = 0
+  for i < cs.len() {
+    let c = cs[i]
+    if c.is_space() {
+      i += 1
+    } else if c.is_digit() {
+      var n = 0
+      for i < cs.len() && cs[i].is_digit() {
+        n = n * 10 + (cs[i] as Int - '0' as Int)
+        i += 1
+      }
+      out.push(Token.Num(n))
+    } else if c.is_alpha() {
+      var name: List<Char> = []
+      for i < cs.len() && cs[i].is_alnum() {
+        name.push(cs[i])
+        i += 1
+      }
+      out.push(Token.Ident(Str.from_chars(name)))
+    } else {
+      let t = match c {
+        '+' | '-' | '*' | '/' | '%' => Token.Op(c)
+        '(' => Token.LParen
+        ')' => Token.RParen
+        '=' => Token.Assign
+        _ => {
+          return Err("unexpected character '" + c.str() + "'")
+        }
+      }
+      out.push(t)
+      i += 1
+    }
+  }
+  return Ok(out)
+}
+
+struct Parser {
+  toks: List<Token>
+  pos: Int
+}
+
+fn Parser.peek(self) -> Option<Token> {
+  return self.toks.get(self.pos)
+}
+
+fn Parser.advance(&mut self) {
+  self.pos += 1
+}
+
+fn Parser.expr(&mut self) -> Result<Expr, Str> {
+  var left = self.term()?
+  for {
+    match self.peek() {
+      Some(Op(op)) if op == '+' || op == '-' => {
+        self.advance()
+        let right = self.term()?
+        left = Expr.Bin(op, left, right)
+      }
+      _ => {
+        return Ok(left)
+      }
+    }
+  }
+}
+
+fn Parser.term(&mut self) -> Result<Expr, Str> {
+  var left = self.factor()?
+  for {
+    match self.peek() {
+      Some(Op(op)) if op == '*' || op == '/' || op == '%' => {
+        self.advance()
+        let right = self.factor()?
+        left = Expr.Bin(op, left, right)
+      }
+      _ => {
+        return Ok(left)
+      }
+    }
+  }
+}
+
+fn Parser.factor(&mut self) -> Result<Expr, Str> {
+  let t = self.peek()
+  self.advance()
+  return match t {
+    Some(Num(v)) => Ok(Expr.Lit(v))
+    Some(Ident(n)) => Ok(Expr.Var(n))
+    Some(Op(op)) if op == '-' => Ok(Expr.Neg(self.factor()?))
+    Some(LParen) => {
+      let e = self.expr()?
+      match self.peek() {
+        Some(RParen) => {
+          self.advance()
+          Ok(e)
+        }
+        _ => Err("expected ')'")
+      }
+    }
+    Some(_) => Err("unexpected token")
+    None => Err("unexpected end of input")
+  }
+}
+
+fn eval(e: Expr, vars: Map<Str, Int>) -> Result<Int, Str> {
+  return match e {
+    Lit(v) => Ok(v)
+    Var(n) => vars.get(n).ok_or("unknown variable " + n)
+    Neg(x) => Ok(0 - eval(x, vars)?)
+    Bin(op, a, b) => {
+      let x = eval(a, vars)?
+      let y = eval(b, vars)?
+      match op {
+        '+' => Ok(x + y)
+        '-' => Ok(x - y)
+        '*' => Ok(x * y)
+        _ => if y == 0 {
+          Err("division by zero")
+        } else if op == '/' {
+          Ok(x / y)
+        } else {
+          Ok(x % y)
+        }
+      }
+    }
+  }
+}
+
+/// Run one line: an expression, or `name = expression`.
+fn run_line(line: Str, vars: &mut Map<Str, Int>) -> Result<Int, Str> {
+  let toks = tokenize(line)?
+  var target: Option<Str> = None
+  var start = 0
+  if toks.len() >= 2 {
+    match (toks[0], toks[1]) {
+      (Ident(n), Assign) => {
+        target = Some(n)
+        start = 2
+      }
+      _ => {}
+    }
+  }
+  var p = Parser { toks: toks[start..], pos: 0 }
+  let e = p.expr()?
+  if p.pos != p.toks.len() {
+    return Err("unexpected input after the expression")
+  }
+  let v = eval(e, vars)?
+  match target {
+    Some(n) => vars.insert(n, v)
+    None => {}
+  }
+  return Ok(v)
+}
+
+fn main() effects {io} {
+  var vars: Map<Str, Int> = Map.new()
+  for {
+    match io.read_line() {
+      Some(line) => {
+        if !line.trim().is_empty() {
+          match run_line(line, &mut vars) {
+            Ok(v) => io.println(v.str())
+            Err(e) => io.println("error: " + e)
+          }
+        }
+      }
+      None => {
+        break
+      }
+    }
+  }
+}
+
+test "precedence and parentheses" {
+  var vars: Map<Str, Int> = Map.new()
+  assert(run_line("1 + 2 * 3", &mut vars) == Ok(7))
+  assert(run_line("(1 + 2) * 3", &mut vars) == Ok(9))
+  assert(run_line("-4 + 10 % 3", &mut vars) == Ok(-3))
+}
+
+test "variables persist" {
+  var vars: Map<Str, Int> = Map.new()
+  assert(run_line("x = 6 * 7", &mut vars) == Ok(42))
+  assert(run_line("x / 2", &mut vars) == Ok(21))
+}
+
+test "errors are values" {
+  var vars: Map<Str, Int> = Map.new()
+  assert(run_line("1 / 0", &mut vars) == Err("division by zero"))
+  assert(run_line("y + 1", &mut vars) == Err("unknown variable y"))
+  assert(run_line("2 $ 3", &mut vars) == Err("unexpected character '$'"))
+  assert(run_line("(1 + 2", &mut vars) == Err("expected ')'"))
+}

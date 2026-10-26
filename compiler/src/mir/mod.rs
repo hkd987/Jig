@@ -149,7 +149,13 @@ pub enum CheckKind {
 pub enum Stmt {
     Assign(Place, Rvalue),
     /// Abort with a message unless `cond` holds. `values` are shown on failure.
-    Check { cond: Operand, kind: CheckKind, msg: Symbol, values: Vec<(Symbol, Operand, Ty)>, span: Span },
+    Check {
+        cond: Operand,
+        kind: CheckKind,
+        msg: Symbol,
+        values: Vec<(Symbol, Operand, Ty)>,
+        span: Span,
+    },
     /// The local is dead from here on (releases its storage).
     Drop(Local),
 }
@@ -207,6 +213,12 @@ pub struct Mir {
 
 impl Mir {
     pub fn new(opts: LowerOpts) -> Mir {
-        Mir { fns: IndexVec::new(), instances: FxHashMap::default(), tests: FxHashMap::default(), pending: Vec::new(), opts }
+        Mir {
+            fns: IndexVec::new(),
+            instances: FxHashMap::default(),
+            tests: FxHashMap::default(),
+            pending: Vec::new(),
+            opts,
+        }
     }
 }

@@ -119,7 +119,8 @@ pub fn check_dead_code(prog: &mut Program) {
             continue; // checked against scenarios
         }
         let name = fd.display_name(defs, tys);
-        let mut d = Diagnostic::error(codes::E0601, fd.name_span, format!("`{name}` is never reached from an entrypoint"));
+        let mut d =
+            Diagnostic::error(codes::E0601, fd.name_span, format!("`{name}` is never reached from an entrypoint"));
         if test_refs.contains(&fid) {
             d = d.note("only tests use it; tests do not justify code");
         } else if library {
@@ -161,8 +162,12 @@ pub fn check_dead_code(prog: &mut Program) {
                         continue;
                     }
                     diags.push(
-                        Diagnostic::error(codes::E0602, f.span, format!("field `{}` of `{}` is never read", f.name, ad.name))
-                            .note("remove it"),
+                        Diagnostic::error(
+                            codes::E0602,
+                            f.span,
+                            format!("field `{}` of `{}` is never read", f.name, ad.name),
+                        )
+                        .note("remove it"),
                     );
                 }
             }
@@ -172,8 +177,12 @@ pub fn check_dead_code(prog: &mut Program) {
                         continue;
                     }
                     diags.push(
-                        Diagnostic::error(codes::E0604, v.span, format!("variant `{}` of `{}` is never constructed", v.name, ad.name))
-                            .note("remove it; matches on it can never succeed"),
+                        Diagnostic::error(
+                            codes::E0604,
+                            v.span,
+                            format!("variant `{}` of `{}` is never constructed", v.name, ad.name),
+                        )
+                        .note("remove it; matches on it can never succeed"),
                     );
                 }
             }
@@ -186,7 +195,9 @@ pub fn check_dead_code(prog: &mut Program) {
             continue;
         }
         let span = pkgs[cd.pkg].ast.items[cd.item].name.span;
-        diags.push(Diagnostic::error(codes::E0606, span, format!("constant `{}` is never used", cd.name)).note("remove it"));
+        diags.push(
+            Diagnostic::error(codes::E0606, span, format!("constant `{}` is never used", cd.name)).note("remove it"),
+        );
     }
     diags.sort();
 }
@@ -213,7 +224,10 @@ fn struct_invariant_mentions(pkgs: &crate::util::IndexVec<PkgId, Package>, ad: &
         match k {
             ExprKind::Name(n) if n == field => return true,
             ExprKind::Field { base, .. } | ExprKind::TupleField { base, .. } => stack.push(base),
-            ExprKind::Paren(x) | ExprKind::Try(x) | ExprKind::Unary { expr: x, .. } | ExprKind::Cast { expr: x, .. } => stack.push(x),
+            ExprKind::Paren(x)
+            | ExprKind::Try(x)
+            | ExprKind::Unary { expr: x, .. }
+            | ExprKind::Cast { expr: x, .. } => stack.push(x),
             ExprKind::Binary { lhs, rhs, .. } => {
                 stack.push(lhs);
                 stack.push(rhs);

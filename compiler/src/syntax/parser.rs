@@ -14,27 +14,11 @@ pub struct ParseOutput {
 }
 
 /// Parse one file into `ast`, appending a `FileAst`.
-pub fn parse_file(
-    ast: &mut Ast,
-    file: FileId,
-    src: &str,
-    base: u32,
-    interner: &mut LocalInterner,
-) -> ParseOutput {
+pub fn parse_file(ast: &mut Ast, file: FileId, src: &str, base: u32, interner: &mut LocalInterner) -> ParseOutput {
     let Lexed { tokens, comments, blank_lines, diags } = lexer::lex(src, base);
     let file_index = ast.files.len() as u32;
-    let mut p = Parser {
-        src,
-        base,
-        toks: tokens,
-        pos: 0,
-        ast,
-        diags,
-        interner,
-        no_struct: false,
-        file_index,
-        prev_hi: base,
-    };
+    let mut p =
+        Parser { src, base, toks: tokens, pos: 0, ast, diags, interner, no_struct: false, file_index, prev_hi: base };
     let items = p.parse_items();
     let span = Span::new(base, base + src.len() as u32);
     p.ast.files.push(FileAst { file, items, comments, blank_lines, span });
@@ -55,13 +39,11 @@ struct Parser<'a> {
     prev_hi: u32,
 }
 
-/// Heuristic used by the parser: does this identifier name a type (UpperCamel)?
+/// Can this identifier start a struct literal? Types are capitalized; a constant (also
+/// capitalized) followed by `{` is never valid where struct literals are allowed, so the first
+/// letter decides.
 pub fn is_type_like(s: &str) -> bool {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_uppercase() => s.len() == 1 || s.chars().any(|c| c.is_ascii_lowercase()),
-        _ => false,
-    }
+    s.starts_with(|c: char| c.is_ascii_uppercase())
 }
 
 impl<'a> Parser<'a> {
@@ -238,14 +220,21 @@ impl<'a> Parser<'a> {
                 T::Eof => return,
                 T::LBrace | T::LParen | T::LBracket => depth += 1,
                 T::RBrace | T::RParen | T::RBracket => depth -= 1,
-                T::Fn | T::Struct | T::Enum | T::Interface | T::Type | T::Const | T::Unit | T::Test
-                | T::Step | T::Import | T::Pub
-                    if depth <= 0 =>
-                {
+                T::Fn
+                | T::Struct
+                | T::Enum
+                | T::Interface
+                | T::Type
+                | T::Const
+                | T::Unit
+                | T::Test
+                | T::Step
+                | T::Import
+                | T::Pub
                     // only at a line start
-                    if self.pos == 0 || self.toks[self.pos - 1].kind == T::Semi {
-                        return;
-                    }
+                    if depth <= 0 && (self.pos == 0 || self.toks[self.pos - 1].kind == T::Semi) =>
+                {
+                    return;
                 }
                 _ => {}
             }
@@ -360,8 +349,7 @@ impl<'a> Parser<'a> {
                 let raw = self.text(t);
                 let label = lexer::unescape(&raw[1..raw.len().saturating_sub(1).max(1)]);
                 let label = self.interner.intern(&label);
-                let params =
-                    if self.at(T::LParen) { self.parse_params(false)?.1 } else { List::EMPTY };
+                let params = if self.at(T::LParen) { self.parse_params(false)?.1 } else { List::EMPTY };
                 let mut requires = List::EMPTY;
                 if self.skip_semis_before(T::Requires) {
                     self.bump();
@@ -473,13 +461,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_fn(
-        &mut self,
-        lo: u32,
-        is_pub: bool,
-        step: Option<(Symbol, Span)>,
-        need_body: bool,
-    ) -> PResult<ItemId> {
+    fn parse_fn(&mut self, lo: u32, is_pub: bool, step: Option<(Symbol, Span)>, need_body: bool) -> PResult<ItemId> {
         self.expect(T::Fn)?;
         let first = self.expect_ident("a function name")?;
         let first_generics = self.parse_generic_params_opt()?;
@@ -1116,6 +1098,10 @@ impl<'a> Parser<'a> {
         }
         let e = self.parse_expr()?;
         if self.eat(T::DotDot) {
+            // `xs[a..]` slices to the end.
+            if self.at(T::RBracket) {
+                return Ok(self.mk_expr(ExprKind::Range { lo: Some(e), hi: None }, self.span_from(lo)));
+            }
             let hi = self.parse_expr()?;
             return Ok(self.mk_expr(ExprKind::Range { lo: Some(e), hi: Some(hi) }, self.span_from(lo)));
         }
@@ -1320,10 +1306,9 @@ impl<'a> Parser<'a> {
             ExprKind::Field { base, name } => {
                 matches!(self.ast.exprs[base].kind, ExprKind::Name(_)) && is_type_like(name.sym.as_str())
             }
-            ExprKind::TypeArgs { base, .. } => matches!(
-                self.ast.exprs[base].kind,
-                ExprKind::Name(_) | ExprKind::Field { .. }
-            ),
+            ExprKind::TypeArgs { base, .. } => {
+                matches!(self.ast.exprs[base].kind, ExprKind::Name(_) | ExprKind::Field { .. })
+            }
             _ => false,
         }
     }
@@ -1431,8 +1416,9 @@ impl<'a> Parser<'a> {
                     self.bump();
                     e = self.mk_expr(ExprKind::Try(e), self.span_from(lo));
                 }
-                T::Lt if matches!(self.ast.exprs[e].kind, ExprKind::Name(_) | ExprKind::Field { .. })
-                    && self.looks_like_type_args() =>
+                T::Lt
+                    if matches!(self.ast.exprs[e].kind, ExprKind::Name(_) | ExprKind::Field { .. })
+                        && self.looks_like_type_args() =>
                 {
                     self.bump();
                     let args = self.parse_type_args_after_lt()?;
@@ -1657,11 +1643,7 @@ impl<'a> Parser<'a> {
             }
             T::LBrace => self.parse_block(),
             T::Amp => {
-                self.diags.push(Diagnostic::error(
-                    codes::E0314,
-                    t.span(),
-                    "`&mut` is only allowed in call arguments",
-                ));
+                self.diags.push(Diagnostic::error(codes::E0314, t.span(), "`&mut` is only allowed in call arguments"));
                 self.bump();
                 if self.tok_is_ident("mut") {
                     self.bump();
@@ -1769,7 +1751,11 @@ mod tests {
 
     fn ok(src: &str) -> Ast {
         let (ast, diags) = parse_src(src);
-        assert!(diags.is_empty(), "unexpected diagnostics: {:#?}", diags.iter().map(|d| &d.message).collect::<Vec<_>>());
+        assert!(
+            diags.is_empty(),
+            "unexpected diagnostics: {:#?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
         ast
     }
 
@@ -1782,7 +1768,9 @@ mod tests {
 
     #[test]
     fn generic_disambiguation() {
-        let ast = ok("fn f() {\n  let a = x < y\n  let b = List<Int>.new()\n  let c = g(a < b, c > d)\n  if i < n {\n  }\n}\n");
+        let ast = ok(
+            "fn f() {\n  let a = x < y\n  let b = List<Int>.new()\n  let c = g(a < b, c > d)\n  if i < n {\n  }\n}\n",
+        );
         let mut type_args = 0;
         for e in ast.exprs.iter() {
             if matches!(e.kind, ExprKind::TypeArgs { .. }) {
@@ -1803,6 +1791,12 @@ mod tests {
         let ast = ok("fn f() -> Map<Str, List<Int>> {\n  let p = Point { x: 1, y: 2 }\n  let q = geom.Point {\n    x: 1\n    y: 2\n  }\n  return Map.new()\n}\n");
         let n = ast.exprs.iter().filter(|e| matches!(e.kind, ExprKind::StructLit { .. })).count();
         assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn short_type_names_start_struct_literals() {
+        let ast = ok("fn f() -> S1 {\n  return S1 { a: MAX }\n}\n");
+        assert_eq!(ast.exprs.iter().filter(|e| matches!(e.kind, ExprKind::StructLit { .. })).count(), 1);
     }
 
     #[test]

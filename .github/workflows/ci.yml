@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the pinned Z3 solver
+        run: pip install --user z3-solver==5.3.2.0 && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build
+        run: cargo build --locked
+      - name: Test
+        run: cargo test --locked
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Rust formatting
+        run: cargo fmt --check
+      - name: Jig formatting
+        run: ./target/debug/jig fmt --check compiler/std compiler/tests/run compiler/tests/fixtures examples
+      - name: Check examples
+        run: |
+          for d in examples/*/; do
+            echo "== $d"
+            ./target/debug/jig check "$d"
+            ./target/debug/jig test "$d"
+          done
+
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Rust and Valgrind
+        run: |
+          rustup toolchain install stable --profile minimal && rustup default stable
+          sudo apt-get update -qq && sudo apt-get install -y -qq valgrind
+      - uses: Swatinem/rust-cache@v2
+      - name: Pick the baseline
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "sha=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+            echo "signoff=${{ contains(github.event.pull_request.labels.*.name, 'perf-signoff') }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=$(git rev-parse HEAD~1)" >> "$GITHUB_OUTPUT"
+            if git log -1 --format=%B | grep -q '\[perf-signoff\]'; then echo "signoff=true" >> "$GITHUB_OUTPUT"; else echo "signoff=false" >> "$GITHUB_OUTPUT"; fi
+          fi
+      - name: Build head
+        run: cargo build --release --locked && cp target/release/jig /tmp/jig-head && cp -r bench /tmp/bench
+      - name: Build baseline
+        run: |
+          git checkout --quiet ${{ steps.base.outputs.sha }}
+          if cargo build --release; then cp target/release/jig /tmp/jig-base; else echo "baseline does not build"; fi
+          git checkout --quiet ${{ github.sha }}
+      - name: Measure
+        run: |
+          python3 /tmp/bench/run.py /tmp/jig-head --out head.json
+          if [ -x /tmp/jig-base ]; then python3 /tmp/bench/run.py /tmp/jig-base --out base.json; fi
+      - name: Compare (fails on a >2% regression without sign-off)
+        run: |
+          if [ -f base.json ]; then
+            python3 /tmp/bench/compare.py base.json head.json --threshold 2 --signoff ${{ steps.base.outputs.signoff }} | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No baseline to compare against." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-results
+          path: "*.json"

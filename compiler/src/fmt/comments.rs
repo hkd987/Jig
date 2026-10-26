@@ -176,9 +176,9 @@ impl Printer<'_> {
             match ex.kind {
                 ExprKind::Paren(x) | ExprKind::MutArg(x) | ExprKind::Try(x) => e = x,
                 ExprKind::Unary { expr, .. } | ExprKind::Cast { expr, .. } => e = expr,
-                ExprKind::Field { base, .. }
-                | ExprKind::TupleField { base, .. }
-                | ExprKind::TypeArgs { base, .. } => e = base,
+                ExprKind::Field { base, .. } | ExprKind::TupleField { base, .. } | ExprKind::TypeArgs { base, .. } => {
+                    e = base
+                }
                 ExprKind::Index { base, index } => {
                     self.walk_expr(index);
                     e = base;

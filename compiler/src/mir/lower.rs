@@ -40,7 +40,11 @@ impl<'a> Lowerer<'a> {
             None
         } else {
             let path = self.pkgs[fd.pkg].path.as_str();
-            intrinsics::lookup(path, fd.recv, fd.name.as_str()).map(|(op, int)| Intrinsic { op, tys: args.clone(), int })
+            intrinsics::lookup(path, fd.recv, fd.name.as_str()).map(|(op, int)| Intrinsic {
+                op,
+                tys: args.clone(),
+                int,
+            })
         };
         let ret = self.tys.subst(fd.ret, &args);
         let m = self.mir.fns.push(MFn {
@@ -352,10 +356,16 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                 let (ls, rs) = (self.src(lhs), self.src(rhs));
                 let t = self.temp(self.lw.tys.bool);
                 self.assign(Place::local(t), Rvalue::Binary(op, Operand::local(a), Operand::local(b), lt));
-                if !matches!(self.ast.exprs[lhs].kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)) {
+                if !matches!(
+                    self.ast.exprs[lhs].kind,
+                    ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
+                ) {
                     values.push((Symbol::intern(&ls), Operand::local(a), lt));
                 }
-                if !matches!(self.ast.exprs[rhs].kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)) {
+                if !matches!(
+                    self.ast.exprs[rhs].kind,
+                    ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
+                ) {
                     values.push((Symbol::intern(&rs), Operand::local(b), lt));
                 }
                 Operand::local(t)
@@ -439,7 +449,11 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                         let tt = self.ty(target);
                         let v = self.expr(value);
                         let rv = if matches!(self.lw.tys.kind(tt), TyKind::Str) {
-                            Rvalue::Call(Callee::Intrinsic(Intrinsic::new(Op::StrConcat, vec![])), vec![Arg::Value(Operand::Copy(p.clone())), Arg::Value(v)], tt)
+                            Rvalue::Call(
+                                Callee::Intrinsic(Intrinsic::new(Op::StrConcat, vec![])),
+                                vec![Arg::Value(Operand::Copy(p.clone())), Arg::Value(v)],
+                                tt,
+                            )
                         } else {
                             Rvalue::Binary(op, Operand::Copy(p.clone()), v, tt)
                         };
@@ -462,7 +476,11 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
             }
             StmtKind::Break | StmtKind::Continue => {
                 let Some(fr) = self.loops.last() else { return };
-                let (target, depth) = if matches!(st.kind, StmtKind::Break) { (fr.brk, fr.scope_depth) } else { (fr.cont, fr.scope_depth) };
+                let (target, depth) = if matches!(st.kind, StmtKind::Break) {
+                    (fr.brk, fr.scope_depth)
+                } else {
+                    (fr.cont, fr.scope_depth)
+                };
                 self.drop_scopes_to(depth);
                 self.terminate_and_continue(Terminator::Goto(target));
             }
@@ -534,7 +552,9 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
             }
             ForHead::In { pat, iter } => {
                 // Ranges iterate an integer; collections iterate a snapshot by index.
-                let (elem_kind, idx, limit, coll) = if let ExprKind::Range { lo: Some(lo), hi: Some(hi) } = self.ast.exprs[iter].kind {
+                let (elem_kind, idx, limit, coll) = if let ExprKind::Range { lo: Some(lo), hi: Some(hi) } =
+                    self.ast.exprs[iter].kind
+                {
                     let t = self.ty(lo);
                     let i = self.temp(t);
                     self.expr_into(lo, Place::local(i));
@@ -568,7 +588,11 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                     let n = self.temp(int);
                     self.assign(
                         Place::local(n),
-                        Rvalue::Call(Callee::Intrinsic(Intrinsic::new(Op::ListLen, vec![elem])), vec![Arg::Value(Operand::local(coll))], int),
+                        Rvalue::Call(
+                            Callee::Intrinsic(Intrinsic::new(Op::ListLen, vec![elem])),
+                            vec![Arg::Value(Operand::local(coll))],
+                            int,
+                        ),
                     );
                     let i = self.temp(int);
                     self.assign(Place::local(i), Rvalue::Use(Operand::int(0)));
@@ -578,7 +602,10 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                 self.cur = head_bb;
                 let it = elem_kind.unwrap_or(int);
                 let c = self.temp(self.lw.tys.bool);
-                self.assign(Place::local(c), Rvalue::Binary(ast::BinOp::Lt, Operand::local(idx), Operand::local(limit), it));
+                self.assign(
+                    Place::local(c),
+                    Rvalue::Binary(ast::BinOp::Lt, Operand::local(idx), Operand::local(limit), it),
+                );
                 self.terminate(Terminator::If(Operand::local(c), body_bb, exit_bb));
                 self.cur = body_bb;
                 match coll {
@@ -591,7 +618,13 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                 let _ = after_bind;
                 let body_start = next;
                 self.cur = latch_bb;
-                let one = Operand::Const(Const::Int(1, match self.lw.tys.kind(it) { TyKind::Int(k, _) => *k, _ => IntTy::I64 }));
+                let one = Operand::Const(Const::Int(
+                    1,
+                    match self.lw.tys.kind(it) {
+                        TyKind::Int(k, _) => *k,
+                        _ => IntTy::I64,
+                    },
+                ));
                 self.assign(Place::local(idx), Rvalue::Binary(ast::BinOp::Add, Operand::local(idx), one, it));
                 self.goto(head_bb);
                 // The body proper starts after the binding.
@@ -631,7 +664,10 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
             ExprKind::TupleField { base, .. } => self.is_place_expr(base),
             ExprKind::Index { base, index } => {
                 !matches!(self.ast.exprs[index].kind, ExprKind::Range { .. })
-                    && matches!(self.lw.tys.kind(self.tables.expr_ty[base.0 as usize]), TyKind::List(_) | TyKind::Param(..))
+                    && matches!(
+                        self.lw.tys.kind(self.tables.expr_ty[base.0 as usize]),
+                        TyKind::List(_) | TyKind::Param(..)
+                    )
                     && self.is_place_expr(base)
             }
             ExprKind::Paren(x) => self.is_place_expr(x),
@@ -766,7 +802,11 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
         self.cur_span = ex.span;
         let t = self.ty(e);
         match ex.kind {
-            ExprKind::Name(_) | ExprKind::Field { .. } | ExprKind::TupleField { .. } | ExprKind::Index { .. } | ExprKind::TypeArgs { .. }
+            ExprKind::Name(_)
+            | ExprKind::Field { .. }
+            | ExprKind::TupleField { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::TypeArgs { .. }
                 if !self.is_place_expr(e) =>
             {
                 self.value_expr_into(e, dest);
@@ -781,11 +821,13 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
             }
             ExprKind::Paren(x) => self.expr_into(x, dest),
             ExprKind::Tuple(list) => {
-                let ops: Vec<Operand> = self.ast.expr_lists.get(list).to_vec().into_iter().map(|x| self.expr(x)).collect();
+                let ops: Vec<Operand> =
+                    self.ast.expr_lists.get(list).to_vec().into_iter().map(|x| self.expr(x)).collect();
                 self.assign(dest, Rvalue::Aggregate(AggKind::Tuple, t, ops));
             }
             ExprKind::List(list) => {
-                let ops: Vec<Operand> = self.ast.expr_lists.get(list).to_vec().into_iter().map(|x| self.expr(x)).collect();
+                let ops: Vec<Operand> =
+                    self.ast.expr_lists.get(list).to_vec().into_iter().map(|x| self.expr(x)).collect();
                 self.assign(dest, Rvalue::Aggregate(AggKind::List, t, ops));
             }
             ExprKind::Call { callee, args } => self.lower_call(e, callee, args, dest),
@@ -867,12 +909,16 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
         let TyKind::Fn(ps, ret, _) = self.lw.tys.kind(fn_ty).clone() else { unreachable!() };
         let mut locals: IndexVec<Local, LocalDecl> = IndexVec::new();
         locals.push(LocalDecl { ty: ret, name: None });
-        let params: Vec<(Local, Mode)> = ps.iter().map(|&p| (locals.push(LocalDecl { ty: p, name: None }), Mode::Value)).collect();
+        let params: Vec<(Local, Mode)> =
+            ps.iter().map(|&p| (locals.push(LocalDecl { ty: p, name: None }), Mode::Value)).collect();
         let ops: Vec<Operand> = params.iter().map(|(l, _)| Operand::local(*l)).collect();
         let span = self.cur_span;
         let mut blocks = IndexVec::new();
         blocks.push(Block {
-            stmts: vec![(Stmt::Assign(Place::local(Local(0)), Rvalue::Aggregate(AggKind::Variant(adt, v), ret, ops)), span)],
+            stmts: vec![(
+                Stmt::Assign(Place::local(Local(0)), Rvalue::Aggregate(AggKind::Variant(adt, v), ret, ops)),
+                span,
+            )],
             term: Terminator::Return,
             term_span: span,
         });
@@ -906,23 +952,45 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                 Some(h) => self.expr(h),
                 None => {
                     let n = self.temp(int);
-                    let (op, tys) = if is_str { (Op::StrLen, vec![]) } else {
-                        let el = match self.lw.tys.kind(bt) { TyKind::List(e) => *e, _ => bt };
+                    let (op, tys) = if is_str {
+                        (Op::StrLen, vec![])
+                    } else {
+                        let el = match self.lw.tys.kind(bt) {
+                            TyKind::List(e) => *e,
+                            _ => bt,
+                        };
                         (Op::ListLen, vec![el])
                     };
-                    self.assign(Place::local(n), Rvalue::Call(Callee::Intrinsic(Intrinsic::new(op, tys)), vec![Arg::Value(b.clone())], int));
+                    self.assign(
+                        Place::local(n),
+                        Rvalue::Call(Callee::Intrinsic(Intrinsic::new(op, tys)), vec![Arg::Value(b.clone())], int),
+                    );
                     Operand::local(n)
                 }
             };
             let op = if is_str { Op::StrSlice } else { Op::ListSlice };
-            self.assign(dest, Rvalue::Call(Callee::Intrinsic(Intrinsic::new(op, vec![t])), vec![Arg::Value(b), Arg::Value(lo_op), Arg::Value(hi_op)], t));
+            self.assign(
+                dest,
+                Rvalue::Call(
+                    Callee::Intrinsic(Intrinsic::new(op, vec![t])),
+                    vec![Arg::Value(b), Arg::Value(lo_op), Arg::Value(hi_op)],
+                    t,
+                ),
+            );
             return;
         }
         match self.lw.tys.kind(bt).clone() {
             TyKind::Str => {
                 let b = self.expr(base);
                 let i = self.expr(index);
-                self.assign(dest, Rvalue::Call(Callee::Intrinsic(Intrinsic::new(Op::StrByte, vec![])), vec![Arg::Value(b), Arg::Value(i)], t));
+                self.assign(
+                    dest,
+                    Rvalue::Call(
+                        Callee::Intrinsic(Intrinsic::new(Op::StrByte, vec![])),
+                        vec![Arg::Value(b), Arg::Value(i)],
+                        t,
+                    ),
+                );
             }
             _ => {
                 let b = self.place(base);
@@ -954,7 +1022,14 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
             Add if matches!(self.lw.tys.kind(t), TyKind::Str) => {
                 let a = self.expr(lhs);
                 let b = self.expr(rhs);
-                self.assign(dest, Rvalue::Call(Callee::Intrinsic(Intrinsic::new(Op::StrConcat, vec![])), vec![Arg::Value(a), Arg::Value(b)], t));
+                self.assign(
+                    dest,
+                    Rvalue::Call(
+                        Callee::Intrinsic(Intrinsic::new(Op::StrConcat, vec![])),
+                        vec![Arg::Value(a), Arg::Value(b)],
+                        t,
+                    ),
+                );
             }
             _ => {
                 let lt = self.ty(lhs);
@@ -981,7 +1056,10 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
         let is_result = Some(adt) == self.lw.defs.result;
         if is_result {
             let e = Place::local(tmp).variant_field(1, 0);
-            self.assign(Place::local(Local(0)), Rvalue::Aggregate(AggKind::Variant(adt, 1), ret, vec![Operand::Copy(e)]));
+            self.assign(
+                Place::local(Local(0)),
+                Rvalue::Aggregate(AggKind::Variant(adt, 1), ret, vec![Operand::Copy(e)]),
+            );
         } else {
             self.assign(Place::local(Local(0)), Rvalue::Aggregate(AggKind::Variant(adt, 1), ret, vec![]));
         }
@@ -1201,7 +1279,13 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
         let c = self.temp(self.lw.tys.bool);
         let ok = self.eval_pred_names(pred, names, Place::local(c));
         if ok {
-            self.push(Stmt::Check { cond: Operand::local(c), kind, msg: Symbol::intern(&text), values: Vec::new(), span });
+            self.push(Stmt::Check {
+                cond: Operand::local(c),
+                kind,
+                msg: Symbol::intern(&text),
+                values: Vec::new(),
+                span,
+            });
         }
     }
 
@@ -1236,7 +1320,9 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                 let t = self.ty(lhs);
                 let a = self.temp(t);
                 let b = self.temp(t);
-                if !self.eval_pred_names(lhs, names, Place::local(a)) || !self.eval_pred_names(rhs, names, Place::local(b)) {
+                if !self.eval_pred_names(lhs, names, Place::local(a))
+                    || !self.eval_pred_names(rhs, names, Place::local(b))
+                {
                     return false;
                 }
                 if matches!(op, ast::BinOp::Add) && matches!(self.lw.tys.kind(t), TyKind::Str) {
@@ -1300,9 +1386,23 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn lower_quant(&mut self, e: ExprId, forall: bool, var: ast::Name, lo: ExprId, hi: ExprId, body: ExprId, dest: Place) {
+    fn lower_quant(
+        &mut self,
+        e: ExprId,
+        forall: bool,
+        var: ast::Name,
+        lo: ExprId,
+        hi: ExprId,
+        body: ExprId,
+        dest: Place,
+    ) {
         let it = self.ty(lo);
-        let id = self.body.locals.iter_enumerated().find(|(_, d)| d.span == var.span && d.kind == LocalKind::Quant).map(|(i, _)| i);
+        let id = self
+            .body
+            .locals
+            .iter_enumerated()
+            .find(|(_, d)| d.span == var.span && d.kind == LocalKind::Quant)
+            .map(|(i, _)| i);
         let i = match id {
             Some(id) => self.sema_local(id),
             None => self.temp(it),
@@ -1332,7 +1432,13 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
         self.assign(dest, Rvalue::Use(Operand::bool(!forall)));
         self.goto(exit);
         self.cur = latch;
-        let one = Operand::Const(Const::Int(1, match self.lw.tys.kind(it) { TyKind::Int(k, _) => *k, _ => IntTy::I64 }));
+        let one = Operand::Const(Const::Int(
+            1,
+            match self.lw.tys.kind(it) {
+                TyKind::Int(k, _) => *k,
+                _ => IntTy::I64,
+            },
+        ));
         self.assign(Place::local(i), Rvalue::Binary(ast::BinOp::Add, Operand::local(i), one, it));
         self.goto(head);
         self.cur = exit;
@@ -1358,6 +1464,16 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                 self.assign(dest, Rvalue::Aggregate(AggKind::Variant(adt, v), ret, ops));
             }
             Res::Fn(f) | Res::Method(f) => {
+                // assert(cond) becomes a check that reports operand values; the condition is
+                // evaluated exactly once, by the check.
+                let fdef = &self.lw.defs.fns[f];
+                if fdef.name == sym::ASSERT && !fdef.has_body && self.lw.pkgs[fdef.pkg].path.as_str() == "<prelude>" {
+                    if let Some(&c) = arg_ids.first() {
+                        self.check(c, CheckKind::Assert);
+                    }
+                    self.assign(dest, Rvalue::Use(Operand::unit()));
+                    return;
+                }
                 let inst = self.inst_of(callee);
                 let fd = &self.lw.defs.fns[f];
                 let mut call_args: Vec<Arg> = Vec::new();
@@ -1372,16 +1488,6 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                 }
                 let modes: Vec<Mode> = self.lw.defs.fns[f].params.iter().map(|p| p.mode).collect();
                 self.push_args(&arg_ids, &modes, &mut call_args);
-                // assert(cond) becomes a check.
-                if self.lw.defs.fns[f].pkg == self.lw.pkgs.indices().next().unwrap_or(PkgId(0)) && self.lw.defs.fns[f].name == sym::ASSERT && !self.lw.defs.fns[f].has_body {
-                    if let Some(&c) = arg_ids.first() {
-                        // Re-lower the condition with value reporting.
-                        let _ = call_args;
-                        self.check(c, CheckKind::Assert);
-                    }
-                    self.assign(dest, Rvalue::Use(Operand::unit()));
-                    return;
-                }
                 let m = self.lw.instance(f, inst);
                 let callee_op = match self.lw.mir.fns[m].intrinsic.clone() {
                     Some(i) => Callee::Intrinsic(i),
@@ -1432,7 +1538,10 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                     let m = self.lw.instance(f, a);
                     self.assign(dest, Rvalue::Call(Callee::Fn(m), vec![Arg::Value(o)], ret));
                 } else {
-                    self.assign(dest, Rvalue::Call(Callee::Intrinsic(Intrinsic::new(Op::Show, vec![rt])), vec![Arg::Value(o)], ret));
+                    self.assign(
+                        dest,
+                        Rvalue::Call(Callee::Intrinsic(Intrinsic::new(Op::Show, vec![rt])), vec![Arg::Value(o)], ret),
+                    );
                 }
             }
             Res::Field(i) => {
@@ -1486,7 +1595,9 @@ pub fn visit_children(ast: &Ast, e: ExprId, out: &mut Vec<ExprId>) {
     match ast.exprs[e].kind {
         ExprKind::Paren(x) | ExprKind::Try(x) | ExprKind::MutArg(x) => out.push(x),
         ExprKind::Unary { expr, .. } | ExprKind::Cast { expr, .. } => out.push(expr),
-        ExprKind::Field { base, .. } | ExprKind::TupleField { base, .. } | ExprKind::TypeArgs { base, .. } => out.push(base),
+        ExprKind::Field { base, .. } | ExprKind::TupleField { base, .. } | ExprKind::TypeArgs { base, .. } => {
+            out.push(base)
+        }
         ExprKind::Binary { lhs, rhs, .. } => {
             out.push(lhs);
             out.push(rhs);

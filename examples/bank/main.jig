@@ -1,0 +1,120 @@
+// A small ledger. `transfer` carries the contract from the PRD; the tests and the runtime
+// checks hold the implementation to it.
+import "std/io"
+
+type Cents = Int where self >= 0
+
+struct Account {
+  name: Str
+  balance: Cents
+}
+
+enum TxError {
+  UnknownAccount(name: Str)
+  InsufficientFunds(name: Str, needed: Int, available: Int)
+  InvalidAmount(amount: Int)
+}
+
+fn TxError.str(self) -> Str {
+  return match self {
+    UnknownAccount(n) => "unknown account `" + n + "`"
+    InsufficientFunds(n, need, have) => n + " needs " + need.str() + " but has " + have.str()
+    InvalidAmount(a) => "invalid amount " + a.str()
+  }
+}
+
+struct Ledger {
+  accounts: List<Account>
+}
+
+fn Ledger.new() -> Ledger {
+  return Ledger { accounts: [] }
+}
+
+fn Ledger.open(&mut self, name: Str, deposit: Cents) {
+  self.accounts.push(Account { name: name, balance: deposit })
+}
+
+fn Ledger.find(self, name: Str) -> Result<Int, TxError> {
+  for i in 0..self.accounts.len() {
+    if self.accounts[i].name == name {
+      return Ok(i)
+    }
+  }
+  return Err(TxError.UnknownAccount(name))
+}
+
+fn Ledger.total(self) -> Int {
+  return self.accounts.fold(0, fn(sum, a) { sum + a.balance })
+}
+
+fn transfer(from: &mut Account, to: &mut Account, amt: Cents)
+  requires amt > 0, from.balance >= amt
+  ensures from.balance + to.balance == old(from.balance + to.balance)
+{
+  from.balance -= amt
+  to.balance += amt
+}
+
+fn Ledger.pay(&mut self, from: Str, to: Str, amount: Int) -> Result<(), TxError> {
+  if amount <= 0 {
+    return Err(TxError.InvalidAmount(amount))
+  }
+  let i = self.find(from)?
+  let j = self.find(to)?
+  let available = self.accounts[i].balance
+  if available < amount {
+    return Err(TxError.InsufficientFunds(from, amount, available))
+  }
+  var a = self.accounts[i]
+  var b = self.accounts[j]
+  transfer(&mut a, &mut b, amount)
+  self.accounts[i] = a
+  self.accounts[j] = b
+  return Ok(())
+}
+
+fn main() effects {io} {
+  var ledger = Ledger.new()
+  ledger.open("ann", 100)
+  ledger.open("bob", 20)
+  let payments = [("ann", "bob", 30), ("bob", "ann", 500), ("cat", "ann", 5), ("ann", "bob", 0)]
+  for (from, to, amount) in payments {
+    match ledger.pay(from, to, amount) {
+      Ok(_) => io.println("paid " + amount.str() + " from " + from + " to " + to)
+      Err(e) => io.println("refused: " + e.str())
+    }
+  }
+  for a in ledger.accounts {
+    io.println(a.name + ": " + a.balance.str())
+  }
+  io.println("total: " + ledger.total().str())
+}
+
+test "a payment moves money and keeps the total" {
+  var l = Ledger.new()
+  l.open("a", 50)
+  l.open("b", 0)
+  assert(l.pay("a", "b", 20).is_ok())
+  assert(l.accounts[0].balance == 30)
+  assert(l.accounts[1].balance == 20)
+  assert(l.total() == 50)
+}
+
+test "overdrafts are refused" {
+  var l = Ledger.new()
+  l.open("a", 10)
+  l.open("b", 0)
+  let r = l.pay("a", "b", 11)
+  assert(r.is_err())
+  assert(l.total() == 10)
+}
+
+test "unknown accounts are refused" {
+  var l = Ledger.new()
+  l.open("a", 10)
+  match l.pay("a", "zed", 1) {
+    Err(e) => assert(e.str() == "unknown account `zed`")
+    Ok(_) => assert(false)
+  }
+}

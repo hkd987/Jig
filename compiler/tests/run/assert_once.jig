@@ -1,0 +1,13 @@
+import "std/io"
+
+fn bump(n: &mut Int) -> Bool {
+  n += 1
+  return true
+}
+
+fn main() effects {io} {
+  var calls = 0
+  assert(bump(&mut calls))
+  assert(bump(&mut calls) == true)
+  io.println(calls.str())
+}

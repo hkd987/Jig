@@ -343,8 +343,7 @@ impl Parser<'_> {
             Some(c) if *c == b'-' || c.is_ascii_digit() => {
                 let start = self.i;
                 self.i += 1;
-                while self.i < self.s.len()
-                    && matches!(self.s[self.i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
+                while self.i < self.s.len() && matches!(self.s[self.i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
                 {
                     self.i += 1;
                 }

@@ -85,9 +85,13 @@ fn ty_pat(tys: &TyCtx, defs: &Defs, t: Ty) -> Pat {
         TyKind::List(x) => Pat::Con("List".into(), vec![ty_pat(tys, defs, *x)]),
         TyKind::Set(x) => Pat::Con("Set".into(), vec![ty_pat(tys, defs, *x)]),
         TyKind::Map(k, v) => Pat::Con("Map".into(), vec![ty_pat(tys, defs, *k), ty_pat(tys, defs, *v)]),
-        TyKind::Adt(a, args) => Pat::Con(defs.adts[*a].name.to_string(), args.iter().map(|&x| ty_pat(tys, defs, x)).collect()),
+        TyKind::Adt(a, args) => {
+            Pat::Con(defs.adts[*a].name.to_string(), args.iter().map(|&x| ty_pat(tys, defs, x)).collect())
+        }
         TyKind::Tuple(ts) => Pat::Tuple(ts.iter().map(|&x| ty_pat(tys, defs, x)).collect()),
-        TyKind::Fn(ps, r, _) => Pat::Fn(ps.iter().map(|&x| ty_pat(tys, defs, x)).collect(), Box::new(ty_pat(tys, defs, *r))),
+        TyKind::Fn(ps, r, _) => {
+            Pat::Fn(ps.iter().map(|&x| ty_pat(tys, defs, x)).collect(), Box::new(ty_pat(tys, defs, *r)))
+        }
         TyKind::Infer(_) | TyKind::Error => Pat::Tuple(vec![]),
     }
 }
@@ -106,7 +110,9 @@ fn unify(q: &Pat, c: &Pat, env: &mut FxHashMap<Symbol, Pat>) -> bool {
                 }
             }
         }
-        (Pat::Con(a, xs), Pat::Con(b, ys)) => a == b && xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| unify(x, y, env)),
+        (Pat::Con(a, xs), Pat::Con(b, ys)) => {
+            a == b && xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| unify(x, y, env))
+        }
         (Pat::Tuple(xs), Pat::Tuple(ys)) => xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| unify(x, y, env)),
         (Pat::Fn(xs, r1), Pat::Fn(ys, r2)) => {
             xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| unify(x, y, env)) && unify(r1, r2, env)
@@ -135,7 +141,8 @@ fn show_sig(prog: &Program, f: &FnDef) -> String {
 }
 
 pub fn search(prog: &Program, query: &str, limit: usize) -> Result<Vec<Hit>, String> {
-    let (qparams, qret) = parse_query(query).ok_or_else(|| format!("cannot parse the query `{query}`; write e.g. `List<T>, Int -> Option<T>`"))?;
+    let (qparams, qret) = parse_query(query)
+        .ok_or_else(|| format!("cannot parse the query `{query}`; write e.g. `List<T>, Int -> Option<T>`"))?;
     let mut hits = Vec::new();
     for (_, f) in prog.defs.fns.iter_enumerated() {
         if f.iface.is_some() || (!f.is_pub && prog.pkgs[f.pkg].is_std) {

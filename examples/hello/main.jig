@@ -1,0 +1,5 @@
+import "std/io"
+
+fn main() effects {io} {
+  io.println("hello, world")
+}

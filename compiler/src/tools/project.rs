@@ -102,20 +102,29 @@ fn loaded_dirs(prog: &Program) -> BTreeSet<PathBuf> {
     prog.pkgs.iter().filter_map(|p| p.dir.clone()).collect()
 }
 
+/// One analysis: its root package, the package directories it loaded, and its findings
+/// (each with the directory of the package it is in).
+type Analysis = (PathBuf, BTreeSet<PathBuf>, Vec<(ProjectDiag, Option<PathBuf>)>);
+
 /// Check the project containing `start` (or just the package at `start` if there is no
 /// `jig.mod`).
 pub fn check_project(start: &Path) -> ProjectReport {
     let start = std::fs::canonicalize(start).unwrap_or_else(|_| start.to_path_buf());
-    let start_dir = if start.is_file() { start.parent().map(|p| p.to_path_buf()).unwrap_or_default() } else { start.clone() };
+    let start_dir =
+        if start.is_file() { start.parent().map(|p| p.to_path_buf()).unwrap_or_default() } else { start.clone() };
     let Some(root) = find_project_root(&Sources::Disk, &start_dir) else {
         let prog = crate::sema::analyze(&Sources::Disk, &start_dir);
         let mut v = Vec::new();
         collect(&prog, &mut v);
-        return ProjectReport { diags: v.into_iter().map(|x| x.0).collect(), packages: vec![start_dir.clone()], programs: vec![start_dir] };
+        return ProjectReport {
+            diags: v.into_iter().map(|x| x.0).collect(),
+            packages: vec![start_dir.clone()],
+            programs: vec![start_dir],
+        };
     };
     let dirs = package_dirs(&root);
     let programs: Vec<PathBuf> = dirs.iter().filter(|d| has_main(d)).cloned().collect();
-    let mut analyses: Vec<(PathBuf, BTreeSet<PathBuf>, Vec<(ProjectDiag, Option<PathBuf>)>)> = Vec::new();
+    let mut analyses: Vec<Analysis> = Vec::new();
     let mut covered: BTreeSet<PathBuf> = BTreeSet::new();
     for p in &programs {
         let prog = crate::sema::analyze(&Sources::Disk, p);
@@ -150,9 +159,10 @@ pub fn check_project(start: &Path) -> ProjectReport {
             if dead && pkg_dir.as_ref() != Some(root_dir) {
                 // Only if every analysis that loaded this package reports it.
                 let dir = pkg_dir.clone().unwrap_or_default();
-                let agree = analyses.iter().filter(|(_, loaded, _)| loaded.contains(&dir)).all(|(_, _, ds)| {
-                    ds.iter().any(|(o, _)| o.file == d.file && o.line == d.line && o.code == d.code)
-                });
+                let agree = analyses
+                    .iter()
+                    .filter(|(_, loaded, _)| loaded.contains(&dir))
+                    .all(|(_, _, ds)| ds.iter().any(|(o, _)| o.file == d.file && o.line == d.line && o.code == d.code));
                 if !agree {
                     continue;
                 }

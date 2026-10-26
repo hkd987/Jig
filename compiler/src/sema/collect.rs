@@ -62,15 +62,8 @@ pub fn collect(prog: &mut Program) {
     let Program { pkgs, defs, tys, diags, prelude, root, .. } = prog;
     // Declarations mutate package scopes; do them first with mutable access.
     declare_all(pkgs, defs, tys, diags, *prelude);
-    let mut c = Collector {
-        pkgs,
-        defs,
-        tys,
-        diags,
-        prelude: *prelude,
-        units: FxHashSet::default(),
-        alias_state: Vec::new(),
-    };
+    let mut c =
+        Collector { pkgs, defs, tys, diags, prelude: *prelude, units: FxHashSet::default(), alias_state: Vec::new() };
     c.collect_units();
     c.resolve_aliases();
     c.resolve_adts();
@@ -150,11 +143,14 @@ fn declare_all(
                     let is_enum = matches!(item.kind, ItemKind::Enum { .. });
                     for g in ast.generics.get(generics) {
                         if !g.bounds.is_empty() {
-                            diags.push(Diagnostic::error(
-                                codes::E0312,
-                                g.name.span,
-                                "type parameters of structs and enums cannot have bounds",
-                            ).note("put the bound on the functions and methods that need it"));
+                            diags.push(
+                                Diagnostic::error(
+                                    codes::E0312,
+                                    g.name.span,
+                                    "type parameters of structs and enums cannot have bounds",
+                                )
+                                .note("put the bound on the functions and methods that need it"),
+                            );
                         }
                     }
                     let aid = defs.adts.push(AdtDef {
@@ -170,8 +166,7 @@ fn declare_all(
                         is_pub: item.is_pub,
                         recursive: false,
                     });
-                    let shown_pkg = if pkgs[pid].is_std || pid == prelude { sym::EMPTY } else { sym::EMPTY };
-                    tys.adt_names.push((shown_pkg, item.name.sym));
+                    tys.adt_names.push((sym::EMPTY, item.name.sym));
                     debug_assert_eq!(tys.adt_names.len(), defs.adts.len());
                     if is_prelude && item.name.sym == sym::OPTION {
                         defs.option = Some(aid);
@@ -419,7 +414,10 @@ impl Collector<'_> {
                                     self.err(
                                         codes::E0201,
                                         f.name.span,
-                                        format!("cannot find unit `{}`; declare it with `unit {}`", f.name.sym, f.name.sym),
+                                        format!(
+                                            "cannot find unit `{}`; declare it with `unit {}`",
+                                            f.name.sym, f.name.sym
+                                        ),
                                     );
                                 }
                                 out.push((f.name.sym, f.exp));
@@ -454,7 +452,11 @@ impl Collector<'_> {
             self.err(
                 codes::E0313,
                 span,
-                format!("`{name}` takes {want} type argument{}, found {}", if want == 1 { "" } else { "s" }, args.len()),
+                format!(
+                    "`{name}` takes {want} type argument{}, found {}",
+                    if want == 1 { "" } else { "s" },
+                    args.len()
+                ),
             );
             return self.tys.error;
         }
@@ -479,7 +481,12 @@ impl Collector<'_> {
                     self.err(
                         codes::E0313,
                         span,
-                        format!("`{}` takes {n} type argument{}, found {}", name.sym, if n == 1 { "" } else { "s" }, args.len()),
+                        format!(
+                            "`{}` takes {n} type argument{}, found {}",
+                            name.sym,
+                            if n == 1 { "" } else { "s" },
+                            args.len()
+                        ),
                     );
                     return self.tys.error;
                 }
@@ -489,7 +496,11 @@ impl Collector<'_> {
                 self.ensure_alias(al);
                 let n = self.defs.aliases[al].generics.len();
                 if args.len() != n {
-                    self.err(codes::E0313, span, format!("`{}` takes {n} type arguments, found {}", name.sym, args.len()));
+                    self.err(
+                        codes::E0313,
+                        span,
+                        format!("`{}` takes {n} type arguments, found {}", name.sym, args.len()),
+                    );
                     return self.tys.error;
                 }
                 let t = self.defs.aliases[al].ty;
@@ -690,7 +701,11 @@ impl Collector<'_> {
                     let a = &self.defs.adts[aid];
                     let span = self.pkgs[a.pkg].ast.items[a.item].name.span;
                     let name = a.name;
-                    self.err(codes::E0319, span, format!("struct `{name}` contains itself and would have infinite size"));
+                    self.err(
+                        codes::E0319,
+                        span,
+                        format!("struct `{name}` contains itself and would have infinite size"),
+                    );
                 }
             }
             let _ = via_enum_only;
@@ -776,7 +791,14 @@ impl Collector<'_> {
                         self.err(
                             codes::E0313,
                             r.ty.span,
-                            format!("`{}` takes {want} type parameter{}; write `fn {}{}.{}`", r.ty.sym, if want == 1 { "" } else { "s" }, r.ty.sym, generic_hint(want), item.name.sym),
+                            format!(
+                                "`{}` takes {want} type parameter{}; write `fn {}{}.{}`",
+                                r.ty.sym,
+                                if want == 1 { "" } else { "s" },
+                                r.ty.sym,
+                                generic_hint(want),
+                                item.name.sym
+                            ),
                         );
                         return;
                     }
@@ -795,13 +817,21 @@ impl Collector<'_> {
                         }
                     }
                     Some(_) => {
-                        self.err(codes::E0328, r.ty.span, format!("cannot declare methods on the built-in type `{}`", r.ty.sym));
+                        self.err(
+                            codes::E0328,
+                            r.ty.span,
+                            format!("cannot declare methods on the built-in type `{}`", r.ty.sym),
+                        );
                         return;
                     }
                     None => {
                         let in_other = self.pkgs.iter().any(|p| p.scope.contains_key(&r.ty.sym));
                         if in_other {
-                            self.err(codes::E0328, r.ty.span, format!("methods on `{}` must be declared in its own package", r.ty.sym));
+                            self.err(
+                                codes::E0328,
+                                r.ty.span,
+                                format!("methods on `{}` must be declared in its own package", r.ty.sym),
+                            );
                         } else {
                             self.err(codes::E0201, r.ty.span, format!("cannot find type `{}`", r.ty.sym));
                         }
@@ -814,8 +844,12 @@ impl Collector<'_> {
             if let Some(&prev) = self.defs.methods.get(&(key, item.name.sym)) {
                 let prev_span = self.defs.fns[prev].name_span;
                 self.diags.push(
-                    Diagnostic::error(codes::E0202, item.name.span, format!("method `{}` is defined more than once", item.name.sym))
-                        .label(prev_span, "first defined here"),
+                    Diagnostic::error(
+                        codes::E0202,
+                        item.name.span,
+                        format!("method `{}` is defined more than once", item.name.sym),
+                    )
+                    .label(prev_span, "first defined here"),
                 );
             } else {
                 self.defs.methods.insert((key, item.name.sym), fid);
@@ -823,7 +857,11 @@ impl Collector<'_> {
             // A field and a method may not share a name.
             if let TyKey::Adt(a) = key {
                 if self.defs.adts[a].fields().iter().any(|fd| fd.name == item.name.sym) {
-                    self.err(codes::E0202, item.name.span, format!("`{}` already has a field named `{}`", r.ty.sym, item.name.sym));
+                    self.err(
+                        codes::E0202,
+                        item.name.span,
+                        format!("`{}` already has a field named `{}`", r.ty.sym, item.name.sym),
+                    );
                 }
             }
         } else if f.self_param.is_some() {
@@ -1001,7 +1039,9 @@ impl Collector<'_> {
                 match r {
                     Some(ConstVal::Int(i)) => self.check_int_range(ex.span, ty, i),
                     Some(v) => Some(v),
-                    None => bad(self, "invalid constant expression (overflow, division by zero, or unsupported operator)"),
+                    None => {
+                        bad(self, "invalid constant expression (overflow, division by zero, or unsupported operator)")
+                    }
                 }
             }
             ExprKind::Name(n) => {

@@ -39,7 +39,7 @@ structured diagnostics and a working agent plugin.
 **Gate:** an agent writes a 1,000-line program using only the plugin reference.
 
 ### 1.1 Foundations
-- [ ] Cargo workspace, `jig` binary, CI skeleton (build, unit tests, fmt, clippy).
+- [x] Cargo workspace, `jig` binary, CI skeleton (build, unit tests, fmt, clippy).
 - [x] Utilities: FxHash, string interner, typed index arenas, minimal JSON reader/writer
       (no serde, keeps compile times down).
 - [x] Diagnostics: code registry (`E0xxx`), spans, labels, notes, fixes; JSON and human
@@ -79,9 +79,9 @@ structured diagnostics and a working agent plugin.
 - [x] Std library: `io`, `fs`, `os`, `time`, `rand`, `math`, collections.
 
 ### 1.6 Performance from day one
-- [ ] Benchmark corpus (examples + generated 100k-line project).
-- [ ] Instruction-count benchmarks (Valgrind) in CI; >2% regression blocks merge without
-      a `perf-signoff` label.
+- [x] Benchmark corpus (examples + generated 100k-line project).
+- [x] Instruction-count benchmarks (Valgrind) in CI; >2% regression blocks merge without
+      a `perf-signoff` label (or a `[perf-signoff]` tag on a direct push to `main`).
 - [ ] Incremental check: per-package results cached by content hash.
 
 ### 1.7 Gate

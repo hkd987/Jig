@@ -29,7 +29,11 @@ pub fn post_edit() -> i32 {
     }
     let path = {
         let p = PathBuf::from(file);
-        if p.is_absolute() { p } else { cwd_of(&input).join(p) }
+        if p.is_absolute() {
+            p
+        } else {
+            cwd_of(&input).join(p)
+        }
     };
     let report = super::project::check_project(&path);
     let errors: Vec<_> = report.diags.iter().filter(|d| d.is_error).collect();
@@ -102,7 +106,10 @@ pub fn pre_commit() -> i32 {
     let report = super::project::check_project(&cwd);
     let errors: Vec<_> = report.diags.iter().filter(|d| d.is_error).collect();
     if !errors.is_empty() {
-        let mut r = format!("jig check failed with {} error(s); commits are blocked until the project checks cleanly:\n", errors.len());
+        let mut r = format!(
+            "jig check failed with {} error(s); commits are blocked until the project checks cleanly:\n",
+            errors.len()
+        );
         for d in errors.iter().take(MAX_SHOWN) {
             r.push_str(&d.text);
         }
@@ -110,7 +117,9 @@ pub fn pre_commit() -> i32 {
     }
     // Tests.
     let mut failed = Vec::new();
-    for p in &report.programs.iter().chain(report.packages.iter()).cloned().collect::<std::collections::BTreeSet<PathBuf>>() {
+    for p in
+        &report.programs.iter().chain(report.packages.iter()).cloned().collect::<std::collections::BTreeSet<PathBuf>>()
+    {
         let mut prog = crate::sema::analyze(&crate::sema::load::Sources::Disk, p);
         if prog.diags.has_errors() {
             continue;
@@ -144,7 +153,10 @@ pub fn pre_commit() -> i32 {
         }
     }
     if !unformatted.is_empty() {
-        return deny(&format!("these files are not formatted; run `jig fmt` and commit again:\n{}", unformatted.join("\n")));
+        return deny(&format!(
+            "these files are not formatted; run `jig fmt` and commit again:\n{}",
+            unformatted.join("\n")
+        ));
     }
     0
 }

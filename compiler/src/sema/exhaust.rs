@@ -296,7 +296,11 @@ impl Cx<'_> {
                             TyKind::Adt(a, _) => self.defs.adts[*a].variants()[*vi as usize].name.to_string(),
                             _ => "?".into(),
                         };
-                        if sub.is_empty() { name } else { format!("{name}({})", sub.join(", ")) }
+                        if sub.is_empty() {
+                            name
+                        } else {
+                            format!("{name}({})", sub.join(", "))
+                        }
                     }
                     Ctor::Tuple => format!("({})", sub.join(", ")),
                     Ctor::Bool(b) => b.to_string(),

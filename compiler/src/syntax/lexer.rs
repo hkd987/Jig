@@ -98,8 +98,7 @@ impl Lexer<'_> {
     }
 
     fn newline(&mut self, at: usize) {
-        if self.newlines_significant() && self.last_ends_statement() && !self.continues_on_next_line(at + 1)
-        {
+        if self.newlines_significant() && self.last_ends_statement() && !self.continues_on_next_line(at + 1) {
             let p = self.pos(at);
             self.tokens.push(Token { kind: TokenKind::Semi, lo: p, hi: p });
         }
@@ -181,8 +180,7 @@ impl Lexer<'_> {
         let mut is_float = false;
         if self.s[self.i] == b'0' && matches!(self.peek(1), b'x' | b'b' | b'o') {
             self.i += 2;
-            while self.i < self.s.len() && (self.s[self.i].is_ascii_alphanumeric() || self.s[self.i] == b'_')
-            {
+            while self.i < self.s.len() && (self.s[self.i].is_ascii_alphanumeric() || self.s[self.i] == b'_') {
                 self.i += 1;
             }
         } else {
@@ -207,8 +205,7 @@ impl Lexer<'_> {
             }
             // A trailing identifier character makes the literal invalid (`12abc`).
             if self.i < self.s.len() && (self.s[self.i].is_ascii_alphabetic() || self.s[self.i] == b'_') {
-                while self.i < self.s.len() && (self.s[self.i].is_ascii_alphanumeric() || self.s[self.i] == b'_')
-                {
+                while self.i < self.s.len() && (self.s[self.i].is_ascii_alphanumeric() || self.s[self.i] == b'_') {
                     self.i += 1;
                 }
                 self.err(codes::E0104, start, self.i, "invalid number literal");
@@ -378,13 +375,11 @@ impl Lexer<'_> {
             }
             Semi => {
                 let span = Span::new(self.pos(start), self.pos(self.i));
-                self.diags.push(
-                    Diagnostic::error(codes::E0107, span, "semicolons are not used in Jig").fix(
-                        "remove the `;` and put the next statement on its own line",
-                        span,
-                        "",
-                    ),
-                );
+                self.diags.push(Diagnostic::error(codes::E0107, span, "semicolons are not used in Jig").fix(
+                    "remove the `;` and put the next statement on its own line",
+                    span,
+                    "",
+                ));
             }
             _ => {}
         }
@@ -480,18 +475,12 @@ mod tests {
 
     #[test]
     fn inserts_semicolons_at_line_ends() {
-        assert_eq!(
-            kinds("let x = 1\nlet y = x\n"),
-            vec![Let, Ident, Eq, Int, Semi, Let, Ident, Eq, Ident, Semi, Eof]
-        );
+        assert_eq!(kinds("let x = 1\nlet y = x\n"), vec![Let, Ident, Eq, Int, Semi, Let, Ident, Eq, Ident, Semi, Eof]);
     }
 
     #[test]
     fn no_semicolons_inside_parens() {
-        assert_eq!(
-            kinds("f(\n  a,\n  b\n)\n"),
-            vec![Ident, LParen, Ident, Comma, Ident, RParen, Semi, Eof]
-        );
+        assert_eq!(kinds("f(\n  a,\n  b\n)\n"), vec![Ident, LParen, Ident, Comma, Ident, RParen, Semi, Eof]);
     }
 
     #[test]
@@ -504,10 +493,7 @@ mod tests {
 
     #[test]
     fn leading_dot_continues() {
-        assert_eq!(
-            kinds("xs\n  .len()\n"),
-            vec![Ident, Dot, Ident, LParen, RParen, Semi, Eof]
-        );
+        assert_eq!(kinds("xs\n  .len()\n"), vec![Ident, Dot, Ident, LParen, RParen, Semi, Eof]);
         assert_eq!(kinds("a\n  && b\n"), vec![Ident, AmpAmp, Ident, Semi, Eof]);
     }
 

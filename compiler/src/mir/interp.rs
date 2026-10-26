@@ -121,6 +121,9 @@ impl OMap {
     pub fn len(&self) -> usize {
         self.keys.len()
     }
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
 }
 
 pub fn val_eq(a: &Value, b: &Value) -> bool {
@@ -210,7 +213,10 @@ impl Effects {
         }
     }
     pub fn real(args: Vec<String>) -> Effects {
-        let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(1);
         let mut e = Effects::fake(seed);
         e.fake = false;
         e.args = args;
@@ -265,7 +271,14 @@ impl<'l, 'a> Interp<'l, 'a> {
         let mut bt = Vec::new();
         for (f, s) in self.stack.iter().rev().take(32) {
             let name = self.lw.mir.fns[*f].name.clone();
-            let loc = self.lw.sm.line_col(s.lo).map(|(fid, lc)| format!("{}:{}:{}", crate::diag::display_path(&self.lw.sm.file(fid).path), lc.line, lc.col)).unwrap_or_default();
+            let loc = self
+                .lw
+                .sm
+                .line_col(s.lo)
+                .map(|(fid, lc)| {
+                    format!("{}:{}:{}", crate::diag::display_path(&self.lw.sm.file(fid).path), lc.line, lc.col)
+                })
+                .unwrap_or_default();
             bt.push(format!("{name} at {loc}"));
         }
         Trap::Panic { msg: msg.into(), span, backtrace: bt }
@@ -384,7 +397,10 @@ impl<'l, 'a> Interp<'l, 'a> {
                 (PlaceElem::Index(op), Value::List(xs)) => {
                     let i = self.index_of(op, locals, span)?;
                     if i < 0 || i as usize >= xs.len() {
-                        return Err(self.panic(format!("index out of bounds: the index is {i} but the length is {}", xs.len()), span));
+                        return Err(self.panic(
+                            format!("index out of bounds: the index is {i} but the length is {}", xs.len()),
+                            span,
+                        ));
                     }
                     &xs[i as usize]
                 }
@@ -413,11 +429,15 @@ impl<'l, 'a> Interp<'l, 'a> {
                     k += 1;
                     let len = xs.len();
                     if i < 0 || i as usize >= len {
-                        return Err(self.panic(format!("index out of bounds: the index is {i} but the length is {len}"), span));
+                        return Err(
+                            self.panic(format!("index out of bounds: the index is {i} but the length is {len}"), span)
+                        );
                     }
                     &mut Rc::make_mut(xs)[i as usize]
                 }
-                (e, v) => return Err(self.panic(format!("internal error: cannot write through {e:?} into {v:?}"), span)),
+                (e, v) => {
+                    return Err(self.panic(format!("internal error: cannot write through {e:?} into {v:?}"), span))
+                }
             };
         }
         *slot = val;
@@ -592,14 +612,20 @@ impl<'l, 'a> Interp<'l, 'a> {
                         if b == 0 {
                             return Err(self.panic(format!("division by zero: {expr}"), span));
                         }
-                        if op == Div { a / b } else { a % b }
+                        if op == Div {
+                            a / b
+                        } else {
+                            a % b
+                        }
                     }
                     BitAnd => a & b,
                     BitOr => a | b,
                     BitXor => a ^ b,
                     Shl | Shr => {
                         if b < 0 || b >= k.bits() as i128 {
-                            return Err(self.panic(format!("shift amount {b} is out of range for `{}`", k.name()), span));
+                            return Err(
+                                self.panic(format!("shift amount {b} is out of range for `{}`", k.name()), span)
+                            );
                         }
                         if op == Shl {
                             // Shifts wrap within the type's bits (no overflow check).
@@ -649,7 +675,9 @@ impl<'l, 'a> Interp<'l, 'a> {
                 let v: i128 = match x {
                     Value::Float(f) => {
                         if f.is_nan() || f.trunc() < k.min() as f64 || f.trunc() > k.max() as f64 {
-                            return Err(self.panic(format!("cannot convert {f:?} to `{}`: out of range", k.name()), span));
+                            return Err(
+                                self.panic(format!("cannot convert {f:?} to `{}`: out of range", k.name()), span)
+                            );
                         }
                         f.trunc() as i128
                     }
@@ -679,11 +707,19 @@ impl<'l, 'a> Interp<'l, 'a> {
         let kind = self.lw.tys.kind(ty).clone();
         Ok(match (v, kind) {
             (Value::Str(s), _) => {
-                if nested { format!("{:?}", &**s) } else { s.to_string() }
+                if nested {
+                    format!("{:?}", &**s)
+                } else {
+                    s.to_string()
+                }
             }
             (Value::Char(c), _) => {
                 let ch = char::from_u32(*c).unwrap_or('?');
-                if nested { format!("{ch:?}") } else { ch.to_string() }
+                if nested {
+                    format!("{ch:?}")
+                } else {
+                    ch.to_string()
+                }
             }
             (Value::Int(i), _) => i.to_string(),
             (Value::UInt(u), _) => u.to_string(),
@@ -742,7 +778,11 @@ impl<'l, 'a> Interp<'l, 'a> {
                             let ft = self.lw.tys.subst(fty, &args);
                             parts.push(format!("{fname}: {}", self.show(x, ft, true)?));
                         }
-                        if parts.is_empty() { format!("{name} {{}}") } else { format!("{name} {{ {} }}", parts.join(", ")) }
+                        if parts.is_empty() {
+                            format!("{name} {{}}")
+                        } else {
+                            format!("{name} {{ {} }}", parts.join(", "))
+                        }
                     }
                     (AdtKind::Enum { variants }, Value::Variant(t, xs)) => {
                         let var = &variants[*t as usize];
@@ -969,10 +1009,13 @@ impl<'l, 'a> Interp<'l, 'a> {
             }
             FromChars => {
                 let xs = list(&a[0]).unwrap_or_default();
-                let s: String = xs.iter().filter_map(|v| match v {
-                    Value::Char(c) => char::from_u32(*c),
-                    _ => None,
-                }).collect();
+                let s: String = xs
+                    .iter()
+                    .filter_map(|v| match v {
+                        Value::Char(c) => char::from_u32(*c),
+                        _ => None,
+                    })
+                    .collect();
                 ret(Value::Str(Rc::from(s.as_str())))
             }
             FromBytes => {
@@ -995,7 +1038,8 @@ impl<'l, 'a> Interp<'l, 'a> {
                 let s = self.str_arg(&a[0], span)?;
                 let i = int(&a[1]);
                 if i < 0 || i as usize >= s.len() {
-                    return Err(self.panic(format!("index out of bounds: the index is {i} but the length is {}", s.len()), span));
+                    return Err(self
+                        .panic(format!("index out of bounds: the index is {i} but the length is {}", s.len()), span));
                 }
                 ret(Value::Int(s.as_bytes()[i as usize] as i64))
             }
@@ -1003,7 +1047,8 @@ impl<'l, 'a> Interp<'l, 'a> {
                 let s = self.str_arg(&a[0], span)?;
                 let (lo, hi) = (int(&a[1]), int(&a[2]));
                 if lo < 0 || hi < lo || hi as usize > s.len() {
-                    return Err(self.panic(format!("slice {lo}..{hi} is out of bounds for a string of length {}", s.len()), span));
+                    return Err(self
+                        .panic(format!("slice {lo}..{hi} is out of bounds for a string of length {}", s.len()), span));
                 }
                 match s.get(lo as usize..hi as usize) {
                     Some(t) => ret(Value::Str(Rc::from(t))),
@@ -1014,7 +1059,8 @@ impl<'l, 'a> Interp<'l, 'a> {
                 let xs = list(&a[0]).unwrap_or_default();
                 let (lo, hi) = (int(&a[1]), int(&a[2]));
                 if lo < 0 || hi < lo || hi as usize > xs.len() {
-                    return Err(self.panic(format!("slice {lo}..{hi} is out of bounds for a list of length {}", xs.len()), span));
+                    return Err(self
+                        .panic(format!("slice {lo}..{hi} is out of bounds for a list of length {}", xs.len()), span));
                 }
                 ret(Value::List(Rc::new(xs[lo as usize..hi as usize].to_vec())))
             }
@@ -1110,7 +1156,7 @@ impl<'l, 'a> Interp<'l, 'a> {
             MapNew => ret(Value::Map(Rc::new(OMap::default()))),
             SetNew => ret(Value::Set(Rc::new(OMap::default()))),
             MapLen | SetLen => ret(Value::Int(omap(&a[0]).map(|m| m.len()).unwrap_or(0) as i64)),
-            MapIsEmpty | SetIsEmpty => ret(Value::Bool(omap(&a[0]).is_none_or(|m| m.len() == 0))),
+            MapIsEmpty | SetIsEmpty => ret(Value::Bool(omap(&a[0]).is_none_or(|m| m.is_empty()))),
             MapGet => {
                 let m = omap(&a[0]).unwrap_or_default();
                 ret(match m.get(&a[1]) {
@@ -1150,8 +1196,12 @@ impl<'l, 'a> Interp<'l, 'a> {
             Values => ret(Value::List(Rc::new(omap(&a[0]).map(|m| m.vals.clone()).unwrap_or_default()))),
             Entries => {
                 let m = omap(&a[0]).unwrap_or_default();
-                let es: Vec<Value> =
-                    m.keys.iter().zip(m.vals.iter()).map(|(k, v)| Value::Tuple(Rc::new(vec![k.clone(), v.clone()]))).collect();
+                let es: Vec<Value> = m
+                    .keys
+                    .iter()
+                    .zip(m.vals.iter())
+                    .map(|(k, v)| Value::Tuple(Rc::new(vec![k.clone(), v.clone()])))
+                    .collect();
                 ret(Value::List(Rc::new(es)))
             }
             Show => {
@@ -1246,16 +1296,26 @@ impl<'l, 'a> Interp<'l, 'a> {
                 let p = self.str_arg(&a[0], span)?;
                 if self.fx.fake {
                     let prefix = format!("{}/", p.trim_end_matches('/'));
-                    let mut names: Vec<String> = self.fx.files.keys().filter_map(|k| k.strip_prefix(&prefix).map(|r| r.split('/').next().unwrap_or(r).to_string())).collect();
+                    let mut names: Vec<String> = self
+                        .fx
+                        .files
+                        .keys()
+                        .filter_map(|k| k.strip_prefix(&prefix).map(|r| r.split('/').next().unwrap_or(r).to_string()))
+                        .collect();
                     names.sort();
                     names.dedup();
-                    return ret(Self::ok(Value::List(Rc::new(names.into_iter().map(|n| Value::Str(Rc::from(n.as_str()))).collect()))));
+                    return ret(Self::ok(Value::List(Rc::new(
+                        names.into_iter().map(|n| Value::Str(Rc::from(n.as_str()))).collect(),
+                    ))));
                 }
                 ret(match std::fs::read_dir(&*p) {
                     Ok(rd) => {
-                        let mut names: Vec<String> = rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect();
+                        let mut names: Vec<String> =
+                            rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect();
                         names.sort();
-                        Self::ok(Value::List(Rc::new(names.into_iter().map(|n| Value::Str(Rc::from(n.as_str()))).collect())))
+                        Self::ok(Value::List(Rc::new(
+                            names.into_iter().map(|n| Value::Str(Rc::from(n.as_str()))).collect(),
+                        )))
                     }
                     Err(e) => Self::err(format!("{p}: {e}")),
                 })
@@ -1395,7 +1455,11 @@ pub fn fmt_float(f: f64) -> String {
     if f.is_nan() {
         "NaN".into()
     } else if f.is_infinite() {
-        if f > 0.0 { "inf".into() } else { "-inf".into() }
+        if f > 0.0 {
+            "inf".into()
+        } else {
+            "-inf".into()
+        }
     } else {
         format!("{f:?}")
     }

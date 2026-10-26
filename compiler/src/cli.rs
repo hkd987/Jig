@@ -88,7 +88,11 @@ fn cmd_check(args: &[String]) -> i32 {
         }
     }
     let _ = &o.rest;
-    if errors == 0 { 0 } else { 1 }
+    if errors == 0 {
+        0
+    } else {
+        1
+    }
 }
 
 fn split_dashdash(args: &[String]) -> (Vec<String>, Vec<String>) {
@@ -119,8 +123,8 @@ fn cmd_run(args: &[String]) -> i32 {
     argv.extend(prog_args);
     crate::runner::with_big_stack(move || match crate::runner::run_main(&mut prog, argv) {
         Ok(code) => code,
-        Err(d) => {
-            eprintln!("error: {}", d.message);
+        Err(msg) => {
+            eprintln!("error: {msg}");
             1
         }
     })
@@ -151,22 +155,30 @@ fn cmd_test(args: &[String]) -> i32 {
         }
     }
     if !json {
-        eprintln!(
-            "{} passed, {failed} failed ({} ms)",
-            results.len() - failed,
-            start.elapsed().as_millis()
-        );
+        eprintln!("{} passed, {failed} failed ({} ms)", results.len() - failed, start.elapsed().as_millis());
     } else {
-        println!("{}", crate::util::json::Json::obj().with("kind", "summary").with("passed", results.len() - failed).with("failed", failed).to_string_compact());
+        println!(
+            "{}",
+            crate::util::json::Json::obj()
+                .with("kind", "summary")
+                .with("passed", results.len() - failed)
+                .with("failed", failed)
+                .to_string_compact()
+        );
     }
-    if failed == 0 { 0 } else { 1 }
+    if failed == 0 {
+        0
+    } else {
+        1
+    }
 }
 
 fn cmd_fmt(args: &[String]) -> i32 {
     let check = args.iter().any(|a| a == "--check");
     let mut files: Vec<PathBuf> = Vec::new();
     let targets: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
-    let roots: Vec<PathBuf> = if targets.is_empty() { vec![PathBuf::from(".")] } else { targets.iter().map(PathBuf::from).collect() };
+    let roots: Vec<PathBuf> =
+        if targets.is_empty() { vec![PathBuf::from(".")] } else { targets.iter().map(PathBuf::from).collect() };
     for r in roots {
         collect_jig_files(&r, &mut files);
     }
@@ -203,7 +215,11 @@ fn cmd_fmt(args: &[String]) -> i32 {
     if !check && changed > 0 {
         eprintln!("formatted {changed} file{}", if changed == 1 { "" } else { "s" });
     }
-    if failed > 0 { 1 } else { 0 }
+    if failed > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 /// `.jig` files under a path (a file, or a directory searched recursively, skipping hidden
