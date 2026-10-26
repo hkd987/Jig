@@ -1,0 +1,419 @@
+// Loading packages, ported from the bootstrap compiler's `sema/load.rs`: find the project
+// root, read each package's files, parse them, follow imports wave by wave, and report
+// import cycles. The standard library is read from a directory.
+
+import "std/fs"
+import "std/strings"
+import "syntax"
+
+/// The standard packages: import path and file name.
+fn std_packages() -> List<(Str, Str)> {
+  return [
+    ("std/io", "io.jig"),
+    ("std/fs", "fs.jig"),
+    ("std/os", "os.jig"),
+    ("std/time", "time.jig"),
+    ("std/rand", "rand.jig"),
+    ("std/math", "math.jig"),
+    ("std/task", "task.jig"),
+    ("std/sim", "sim.jig"),
+    ("std/net", "net.jig"),
+    ("std/lists", "lists.jig"),
+    ("std/strings", "strings.jig"),
+  ]
+}
+
+fn join_path(a: Str, b: Str) -> Str {
+  if a.ends_with("/") {
+    return a + b
+  }
+  return a + "/" + b
+}
+
+fn parent_dir(d: Str) -> Option<Str> {
+  if d == "/" || d.is_empty() {
+    return None
+  }
+  var i = d.len() - 1
+  for i > 0 && d[i] != '/' {
+    i -= 1
+  }
+  if d[i] != '/' {
+    return None
+  }
+  return Some(if i == 0 { "/" } else { d[0..i] })
+}
+
+fn find_project_root(start: Str) -> Option<Str> effects {fs} {
+  var cur = Some(start)
+  for {
+    match cur {
+      Some(d) => {
+        if fs.exists(join_path(d, "jig.mod")) {
+          return Some(d)
+        }
+        cur = parent_dir(d)
+      }
+      None => {
+        return None
+      }
+    }
+  }
+}
+
+/// The lines of a `jig.mod` this port understands: `module` and `link` (modules are not
+/// supported yet), and the errors of the others.
+struct ModFile {
+  links: List<Str>
+  errors: List<(Int, Str)>
+}
+
+fn is_mod_name(s: Str) -> Bool {
+  if s.is_empty() {
+    return false
+  }
+  for c in s.chars() {
+    if !(c.is_alnum() && (c as Int) < 128) && c != '_' && c != '-' && c != '.' {
+      return false
+    }
+  }
+  return true
+}
+
+fn is_module_path(s: Str) -> Bool {
+  if s.is_empty() {
+    return false
+  }
+  for seg in s.split("/") {
+    if !is_mod_name(seg) || seg == "." || seg == ".." {
+      return false
+    }
+  }
+  return true
+}
+
+fn parse_mod(text: Str) -> ModFile {
+  var m = ModFile { links: [], errors: [] }
+  let lines = text.lines()
+  for i in 0..lines.len() {
+    let line = lines[i].split("//")[0].trim()
+    let w = strings.words(line)
+    var ok = false
+    if w.is_empty() {
+      ok = true
+    } else if w.len() == 2 && w[0] == "module" {
+      ok = true
+    } else if w.len() == 2 && w[0] == "link" && is_mod_name(w[1]) {
+      m.links.push(w[1])
+      ok = true
+    } else if w.len() == 3 && w[0] == "require" && is_module_path(w[1]) && is_mod_name(w[2]) {
+      ok = true
+    } else if w.len() == 4 && w[0] == "replace" && w[2] == "=>" && is_module_path(w[1]) {
+      ok = true
+    }
+    if !ok {
+      let msg = "`" +
+        line +
+        "`: expected `module NAME`, `link NAME`, `require PATH VERSION` or `replace PATH => DIR`"
+      m.errors.push((i + 1, msg))
+    }
+  }
+  return m
+}
+
+struct Loader {
+  std_dir: Str
+  pkgs: List<Package>
+  by_path: Map<Str, Int>
+  /// Packages found but not parsed yet.
+  queue: List<Int>
+  /// Each package's imports in source order: (target, import path span).
+  edges: List<List<(Int, syntax.Span)>>
+  diags: List<syntax.Diag>
+  project_root: Option<Str>
+  next_base: Int
+}
+
+/// What loading produced: the packages, parsed, and the diagnostics.
+struct Loaded {
+  pkgs: List<Package>
+  diags: List<syntax.Diag>
+  root: Int
+  project_root: Option<Str>
+}
+
+fn diag(code: Str, span: syntax.Span, msg: Str) -> syntax.Diag {
+  return syntax.Diag { code: code, lo: span.lo, hi: span.hi, msg: msg }
+}
+
+fn dummy_span() -> syntax.Span {
+  return syntax.Span { lo: 0, hi: 0 }
+}
+
+/// Load the package in `dir` (an absolute path) and everything it imports.
+fn load_program(dir: Str, std_dir: Str) -> Loaded effects {fs} {
+  let project_root = find_project_root(dir)
+  var ld = Loader {
+    std_dir: std_dir
+    pkgs: []
+    by_path: Map.new()
+    queue: []
+    edges: []
+    diags: []
+    project_root: project_root
+    next_base: 1
+  }
+  match project_root {
+    Some(r) => match fs.read(join_path(r, "jig.mod")) {
+      Ok(text) => {
+        let m = parse_mod(text)
+        for (line, e) in m.errors {
+          ld.diags.push(diag("E0211", dummy_span(), "jig.mod line " + line.str() + ": " + e))
+        }
+      }
+      Err(_) => {}
+    }
+    None => {}
+  }
+  let prelude = ld.add_std("<prelude>", "prelude.jig")
+  var root_path = "main"
+  match project_root {
+    Some(r) => {
+      if dir.starts_with(r) && dir.len() > r.len() {
+        var rel = dir[r.len()..dir.len()]
+        if rel.starts_with("/") {
+          rel = rel[1..rel.len()]
+        }
+        if !rel.is_empty() {
+          root_path = rel
+        }
+      }
+    }
+    None => {}
+  }
+  let root = ld.add_dir_package(root_path, dir, None)
+  for {
+    let wave = ld.queue
+    if wave.is_empty() {
+      break
+    }
+    ld.queue = []
+    for p in wave {
+      ld.parse_package(p)
+    }
+    for p in wave {
+      ld.resolve_imports(p)
+    }
+  }
+  ld.report_cycles([prelude, root.unwrap_or(-1)])
+  return Loaded {
+    pkgs: ld.pkgs
+    diags: ld.diags
+    root: root.unwrap_or(prelude)
+    project_root: project_root
+  }
+}
+
+fn Loader.new_package(&mut self, path: Str, is_std: Bool) -> Int {
+  let id = self.pkgs.len()
+  self.pkgs.push(Package { path: path, files: [], is_std: is_std, scope: Map.new(), imports: [] })
+  self.by_path.insert(path, id)
+  self.edges.push([])
+  return id
+}
+
+/// Register a file of package `p`; it is parsed with the next wave.
+fn Loader.add_file(&mut self, p: Int, path: Str, text: Str) {
+  let base = self.next_base
+  self.next_base = base + text.len() + 1
+  let empty = syntax.Ast { items: [], exprs: [], stmts: [], types: [], pats: [], top: [] }
+  self.pkgs[p].files.push(SrcFile { path: path, base: base, text: text, ast: empty })
+}
+
+/// A standard package (the prelude is `<prelude>`).
+fn Loader.add_std(&mut self, path: Str, file: Str) -> Int effects {fs} {
+  let p = self.new_package(path, true)
+  let text = match fs.read(join_path(self.std_dir, file)) {
+    Ok(t) => t
+    Err(e) => {
+      self.diags.push(diag("E0902", dummy_span(), "cannot read the standard library: " + e))
+      ""
+    }
+  }
+  self.add_file(p, "<std>/" + file, text)
+  self.queue.push(p)
+  return p
+}
+
+fn Loader.add_dir_package(
+  &mut self,
+  path: Str,
+  dir: Str,
+  import_span: Option<syntax.Span>,
+) -> Option<Int>
+  effects {fs}
+{
+  let span = import_span.unwrap_or(dummy_span())
+  let names = match fs.list(dir) {
+    Ok(ns) => ns
+    Err(_) => {
+      self.diags.push(
+        diag("E0203", span, "cannot find package `" + path + "` (no directory " + dir + ")"),
+      )
+      return None
+    }
+  }
+  var any_jig = false
+  for n in names {
+    if n.ends_with(".jig") {
+      any_jig = true
+    }
+  }
+  if !any_jig {
+    self.diags.push(diag("E0203", span, "package `" + path + "` has no .jig files in " + dir))
+    return None
+  }
+  let p = self.new_package(path, false)
+  for n in names {
+    if !n.ends_with(".jig") {
+      continue
+    }
+    let f = join_path(dir, n)
+    match fs.read(f) {
+      Ok(text) => self.add_file(p, f, text)
+      Err(_) => self.diags.push(diag("E0902", dummy_span(), "cannot read " + f))
+    }
+  }
+  self.queue.push(p)
+  return Some(p)
+}
+
+fn Loader.parse_package(&mut self, p: Int) {
+  for i in 0..self.pkgs[p].files.len() {
+    let f = self.pkgs[p].files[i]
+    let parsed = syntax.parse(f.text, f.base)
+    self.pkgs[p].files[i].ast = parsed.ast
+    for d in parsed.errors {
+      self.diags.push(d)
+    }
+  }
+}
+
+fn Loader.resolve_imports(&mut self, p: Int) effects {fs} {
+  var per_file: List<Map<Str, (Int, Int)>> = []
+  for fi in 0..self.pkgs[p].files.len() {
+    let ast = self.pkgs[p].files[fi].ast
+    var m: Map<Str, (Int, Int)> = Map.new()
+    for item_id in ast.top {
+      let item = ast.items[item_id]
+      match item.kind {
+        Import(path, path_span) => {
+          match self.import_pkg(path, path_span) {
+            Some(target) => {
+              if target == p {
+                self.diags.push(diag("E0204", path_span, "a package cannot import itself"))
+              } else {
+                self.edges[p].push((target, path_span))
+                if m.contains(item.name.text) {
+                  self.diags.push(
+                    diag("E0209", item.span, "`" + item.name.text + "` is imported twice"),
+                  )
+                } else {
+                  m.insert(item.name.text, (target, item_id))
+                }
+              }
+            }
+            None => {}
+          }
+        }
+        _ => {}
+      }
+    }
+    per_file.push(m)
+  }
+  self.pkgs[p].imports = per_file
+}
+
+/// Import cycles, found by walking imports depth first from `roots`.
+fn Loader.report_cycles(&mut self, roots: List<Int>) {
+  var done = [false].repeat(self.pkgs.len())
+  for root in roots {
+    if root < 0 || done[root] {
+      continue
+    }
+    var stack: List<Int> = [root]
+    var work: List<(Int, Int)> = [(root, 0)]
+    for !work.is_empty() {
+      let (p, next) = work[work.len() - 1]
+      if next >= self.edges[p].len() {
+        done[p] = true
+        let _ = stack.pop()
+        let _ = work.pop()
+        continue
+      }
+      work[work.len() - 1] = (p, next + 1)
+      let (target, span) = self.edges[p][next]
+      if done[target] {
+        continue
+      }
+      if stack.contains(target) {
+        var chain: List<Str> = []
+        var on = false
+        for q in stack {
+          if q == target {
+            on = true
+          }
+          if on {
+            chain.push(self.pkgs[q].path)
+          }
+        }
+        chain.push(self.pkgs[target].path)
+        self.diags.push(diag("E0204", span, "import cycle: " + chain.join(" -> ")))
+        continue
+      }
+      stack.push(target)
+      work.push((target, 0))
+    }
+  }
+}
+
+/// The package an import names, loading it if needed.
+fn Loader.import_pkg(&mut self, path: Str, span: syntax.Span) -> Option<Int> effects {fs} {
+  for (p, file) in std_packages() {
+    if p == path {
+      match self.by_path.get(p) {
+        Some(id) => {
+          return Some(id)
+        }
+        None => {
+          return Some(self.add_std(p, file))
+        }
+      }
+    }
+  }
+  if path.starts_with("std/") || path == "std" {
+    self.diags.push(diag("E0203", span, "no standard library package `" + path + "`"))
+    return None
+  }
+  for seg in path.split("/") {
+    if seg.is_empty() || seg == "." || seg == ".." {
+      self.diags.push(diag("E0203", span, "invalid import path `" + path + "`"))
+      return None
+    }
+  }
+  let root = match self.project_root {
+    Some(r) => r
+    None => {
+      let msg = "cannot import `" + path + "`: no project root (a directory with `jig.mod`)"
+      self.diags.push(diag("E0210", span, msg))
+      return None
+    }
+  }
+  match self.by_path.get(path) {
+    Some(id) => {
+      return Some(id)
+    }
+    None => {}
+  }
+  return self.add_dir_package(path, join_path(root, path), Some(span))
+}

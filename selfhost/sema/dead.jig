@@ -1,0 +1,433 @@
+// Dead code as an error, ported from the bootstrap compiler's `sema/dead.rs`: whole-program
+// reachability from the entrypoints. Roots are `main`, or the `pub` API of the root package
+// of a library. Tests do not justify code.
+
+import "syntax"
+
+fn Sema.check_dead_code(&mut self) {
+  // Follow-on noise is worse than useless while other errors exist.
+  if !self.diags.is_empty() {
+    return
+  }
+  let library = self.defs.main.is_none()
+  var roots: List<Int> = []
+  match self.defs.main {
+    Some(m) => roots.push(m)
+    None => {
+      for fid in 0..self.defs.fns.len() {
+        let fd = self.defs.fns[fid]
+        if fd.pkg == self.root && fd.is_pub && fd.iface.is_none() {
+          roots.push(fid)
+        }
+      }
+    }
+  }
+  // Reachability over functions, including methods reached through generic bounds.
+  var reachable: Set<Int> = Set.new()
+  var dyn_names: Set<Str> = Set.new()
+  var stack = roots
+  var cross_pkg: Set<Int> = Set.new()
+  var fields_read: Set<(Int, Int)> = Set.new()
+  var variants_built: Set<(Int, Int)> = Set.new()
+  var consts_used: Set<Int> = Set.new()
+  var consts_cross: Set<Int> = Set.new()
+  var derived: List<Int> = []
+  for {
+    for !stack.is_empty() {
+      let f = stack.pop().unwrap_or(0)
+      if reachable.contains(f) {
+        continue
+      }
+      reachable.insert(f)
+      let body = match self.bodies[f] {
+        Some(b) => b
+        None => {
+          continue
+        }
+      }
+      let fd = self.defs.fns[f]
+      for r in body.refs {
+        if self.defs.fns[r].pkg != fd.pkg {
+          cross_pkg.insert(r)
+        }
+        stack.push(r)
+      }
+      for n in body.dyn_methods {
+        dyn_names.insert(n)
+      }
+      for x in body.fields_read {
+        fields_read.insert(x)
+      }
+      for x in body.variants_built {
+        variants_built.insert(x)
+      }
+      for c in body.consts_used {
+        consts_used.insert(c)
+        if self.defs.consts[c].pkg != fd.pkg {
+          consts_cross.insert(c)
+        }
+      }
+      for e in body.derived_exprs {
+        derived.push(self.tables[fd.pkg][fd.file].expr_ty[e])
+      }
+    }
+    // Methods named by bound-dispatched calls are reachable on every type.
+    var more = false
+    for (k, f) in self.defs.methods {
+      if dyn_names.contains(k.1) && !reachable.contains(f) {
+        stack.push(f)
+        more = true
+      }
+    }
+    if !more {
+      break
+    }
+  }
+  // Derived equality, ordering, hashing and display read every field, transitively.
+  var seen_tys: Set<Int> = Set.new()
+  for !derived.is_empty() {
+    let t = derived.pop().unwrap_or(0)
+    if seen_tys.contains(t) {
+      continue
+    }
+    seen_tys.insert(t)
+    match self.tys.kinds[t] {
+      Adt(a, args) => {
+        let ad = self.defs.adts[a]
+        for i in 0..ad.fields.len() {
+          fields_read.insert((a, i))
+          derived.push(self.tys.subst(ad.fields[i].ty, args))
+        }
+        for v in ad.variants {
+          for f in v.fields {
+            derived.push(self.tys.subst(f.ty, args))
+          }
+        }
+      }
+      Tuple(ts) => derived.extend(ts)
+      List(x) | Set(x) => derived.push(x)
+      Map(k, v) => {
+        derived.push(k)
+        derived.push(v)
+      }
+      _ => {}
+    }
+  }
+  // The test simulation is not part of the program: nothing `main` reaches may use it.
+  var seen: Set<Int> = Set.new()
+  var work = roots
+  for !work.is_empty() {
+    let f = work.pop().unwrap_or(0)
+    if seen.contains(f) {
+      continue
+    }
+    seen.insert(f)
+    let body = match self.bodies[f] {
+      Some(b) => b
+      None => {
+        continue
+      }
+    }
+    let fd = self.defs.fns[f]
+    for r in body.refs {
+      if self.pkgs[self.defs.fns[r].pkg].path == "std/sim" && !self.pkgs[fd.pkg].is_std {
+        self.err(
+          "E0607",
+          fd.name_span,
+          "`" + fd.name + "` uses `sim." + self.defs.fns[r].name + "`, but `main` reaches it",
+        )
+      }
+      work.push(r)
+    }
+  }
+  var test_refs: Set<Int> = Set.new()
+  for b in self.test_bodies {
+    match b {
+      Some(body) => {
+        for r in body.refs {
+          test_refs.insert(r)
+        }
+      }
+      None => {}
+    }
+  }
+  // Test helpers: functions in `*_test.jig` files, reached from tests.
+  var test_reachable: Set<Int> = Set.new()
+  var twork = test_refs.items()
+  for !twork.is_empty() {
+    let f = twork.pop().unwrap_or(0)
+    if test_reachable.contains(f) {
+      continue
+    }
+    test_reachable.insert(f)
+    match self.bodies[f] {
+      Some(b) => twork.extend(b.refs)
+      None => {}
+    }
+  }
+  // Unreachable functions.
+  for fid in 0..self.defs.fns.len() {
+    let fd = self.defs.fns[fid]
+    if self.pkgs[fd.pkg].is_std ||
+      fd.iface.is_some() ||
+      (!fd.has_body && !fd.ffi) ||
+      reachable.contains(fid) {
+      continue
+    }
+    match fd.step_attr {
+      Some(st) => {
+        self.err("E0605", st.span, "no scenario uses the step \"" + st.pattern + "\"")
+        continue
+      }
+      None => {}
+    }
+    if test_reachable.contains(fid) &&
+      self.pkgs[fd.pkg].files[fd.file].path.ends_with("_test.jig") {
+      continue
+    }
+    self.err(
+      "E0601",
+      fd.name_span,
+      "`" + self.fn_display_name(fid) + "` is never reached from an entrypoint",
+    )
+  }
+  // Unused exports: `pub` functions of non-root packages used only inside their package.
+  for fid in 0..self.defs.fns.len() {
+    let fd = self.defs.fns[fid]
+    if self.pkgs[fd.pkg].is_std ||
+      fd.pkg == self.root ||
+      !fd.is_pub ||
+      fd.iface.is_some() ||
+      !reachable.contains(fid) {
+      continue
+    }
+    if cross_pkg.contains(fid) || dyn_names.contains(fd.name) {
+      continue
+    }
+    self.err(
+      "E0603",
+      fd.name_span,
+      "`" + self.fn_display_name(fid) + "` is exported but no other package uses it",
+    )
+  }
+  // Unused exports of types, interfaces and constants.
+  var adts_cross: Set<Int> = Set.new()
+  var ifaces_cross: Set<Int> = Set.new()
+  self.cross_package_types(&mut adts_cross, &mut ifaces_cross)
+  for aid in 0..self.defs.adts.len() {
+    let ad = self.defs.adts[aid]
+    if self.exported(ad.pkg, ad.is_pub) && !adts_cross.contains(aid) {
+      let what = if ad.is_enum { "enum" } else { "struct" }
+      self.err(
+        "E0603",
+        self.item_name_span(ad.pkg, ad.file, ad.item),
+        what + " `" + ad.name + "` is exported but no other package uses it",
+      )
+    }
+  }
+  for iid in 0..self.defs.ifaces.len() {
+    let d = self.defs.ifaces[iid]
+    if self.exported(d.pkg, d.is_pub) && !ifaces_cross.contains(iid) {
+      self.err(
+        "E0603",
+        self.item_name_span(d.pkg, d.file, d.item),
+        "interface `" + d.name + "` is exported but no other package uses it",
+      )
+    }
+  }
+  for cid in 0..self.defs.consts.len() {
+    let cd = self.defs.consts[cid]
+    if self.exported(cd.pkg, cd.is_pub) &&
+      consts_used.contains(cid) &&
+      !consts_cross.contains(cid) {
+      self.err(
+        "E0603",
+        self.item_name_span(cd.pkg, cd.file, cd.item),
+        "constant `" + cd.name + "` is exported but no other package uses it",
+      )
+    }
+  }
+  // Fields and variants.
+  for aid in 0..self.defs.adts.len() {
+    let ad = self.defs.adts[aid]
+    if self.pkgs[ad.pkg].is_std {
+      continue
+    }
+    let api = library && ad.pkg == self.root && ad.is_pub
+    for i in 0..ad.fields.len() {
+      let f = ad.fields[i]
+      if fields_read.contains((aid, i)) ||
+        (api && f.is_pub) ||
+        self.struct_invariant_mentions(ad, f.name) {
+        continue
+      }
+      self.err("E0602", f.span, "field `" + f.name + "` of `" + ad.name + "` is never read")
+    }
+    for i in 0..ad.variants.len() {
+      if variants_built.contains((aid, i)) || api {
+        continue
+      }
+      let v = ad.variants[i]
+      self.err(
+        "E0604",
+        v.span,
+        "variant `" + v.name + "` of `" + ad.name + "` is never constructed",
+      )
+    }
+  }
+  // Constants.
+  for cid in 0..self.defs.consts.len() {
+    let cd = self.defs.consts[cid]
+    if self.pkgs[cd.pkg].is_std ||
+      consts_used.contains(cid) ||
+      (library && cd.pkg == self.root && cd.is_pub) {
+      continue
+    }
+    self.err(
+      "E0606",
+      self.item_name_span(cd.pkg, cd.file, cd.item),
+      "constant `" + cd.name + "` is never used",
+    )
+  }
+  self.sort_diags()
+}
+
+fn Sema.exported(self, pkg: Int, is_pub: Bool) -> Bool {
+  return !self.pkgs[pkg].is_std && pkg != self.root && is_pub
+}
+
+fn Sema.item_name_span(self, pkg: Int, file: Int, item: Int) -> syntax.Span {
+  return self.pkgs[pkg].files[file].ast.items[item].name.span
+}
+
+/// ADTs and interfaces that a package other than their own mentions: in any expression or
+/// pattern type, a signature, a field, an alias or a generic bound.
+fn Sema.cross_package_types(self, adts: &mut Set<Int>, ifaces: &mut Set<Int>) {
+  for pid in 0..self.pkgs.len() {
+    if self.pkgs[pid].is_std {
+      continue
+    }
+    var work: List<Int> = []
+    for tab in self.tables[pid] {
+      work.extend(tab.expr_ty)
+      work.extend(tab.pat_ty)
+    }
+    for fd in self.defs.fns {
+      if fd.pkg != pid {
+        continue
+      }
+      for p in fd.params {
+        work.push(p.ty)
+      }
+      work.push(fd.ret)
+      for g in fd.generics {
+        for b in g.bounds {
+          match b {
+            Iface(i) => if self.defs.ifaces[i].pkg != pid { ifaces.insert(i) }
+            _ => {}
+          }
+        }
+      }
+    }
+    for ad in self.defs.adts {
+      if ad.pkg != pid {
+        continue
+      }
+      for f in ad.fields {
+        work.push(f.ty)
+      }
+      for v in ad.variants {
+        for f in v.fields {
+          work.push(f.ty)
+        }
+      }
+    }
+    for a in self.defs.aliases {
+      if a.pkg == pid {
+        work.push(a.ty)
+      }
+    }
+    var seen: Set<Int> = Set.new()
+    for !work.is_empty() {
+      let t = work.pop().unwrap_or(0)
+      if seen.contains(t) {
+        continue
+      }
+      seen.insert(t)
+      match self.tys.kinds[t] {
+        Adt(a, args) => {
+          if self.defs.adts[a].pkg != pid {
+            adts.insert(a)
+          }
+          work.extend(args)
+        }
+        Tuple(ts) => work.extend(ts)
+        List(x) | Set(x) => work.push(x)
+        Map(k, v) => {
+          work.push(k)
+          work.push(v)
+        }
+        Fn(ps, r, _) => {
+          work.extend(ps)
+          work.push(r)
+        }
+        _ => {}
+      }
+    }
+  }
+}
+
+/// Does a struct's invariant or a field refinement name `field`? (That counts as a read.)
+fn Sema.struct_invariant_mentions(self, ad: AdtDef, field: Str) -> Bool {
+  let ast = self.pkgs[ad.pkg].files[ad.file].ast
+  var stack: List<Int> = []
+  match ast.items[ad.item].kind {
+    Struct(_, fields, invariants) => {
+      stack.extend(invariants)
+      for f in fields {
+        match f.refine {
+          Some(r) => stack.push(r)
+          None => {}
+        }
+      }
+    }
+    _ => {
+      return false
+    }
+  }
+  var steps = 0
+  for !stack.is_empty() {
+    let e = stack.pop().unwrap_or(0)
+    steps += 1
+    if steps > 10000 {
+      return true
+    }
+    match ast.exprs[e].kind {
+      Name(n) => if n == field {
+        return true
+      }
+      Field(base, _) | TupleField(base, _, _) => stack.push(base)
+      Paren(x) | Try(x) | Unary(_, x) | Cast(x, _) => stack.push(x)
+      Binary(_, lhs, rhs) => {
+        stack.push(lhs)
+        stack.push(rhs)
+      }
+      Call(callee, args) => {
+        stack.push(callee)
+        stack.extend(args)
+      }
+      Index(base, index) => {
+        stack.push(base)
+        stack.push(index)
+      }
+      Quant(_, _, lo, hi, body) => {
+        stack.push(lo)
+        stack.push(hi)
+        stack.push(body)
+      }
+      Tuple(xs) | List(xs) => stack.extend(xs)
+      _ => {}
+    }
+  }
+  return false
+}

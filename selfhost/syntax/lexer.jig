@@ -12,11 +12,11 @@ struct Comment {
 }
 
 /// An error: its diagnostic code, span and message.
-struct Diag {
-  code: Str
-  lo: Int
-  hi: Int
-  msg: Str
+pub struct Diag {
+  pub code: Str
+  pub lo: Int
+  pub hi: Int
+  pub msg: Str
 }
 
 struct Lexed {

@@ -1,0 +1,498 @@
+// Semantic types, ported from the bootstrap compiler's `sema/ty.rs`: hash-consed kinds
+// addressed by index (a type is an `Int`), units of measure and effect sets.
+
+enum IntTy {
+  I64
+  I32
+  U8
+  U32
+  U64
+}
+
+fn IntTy.name(self) -> Str {
+  return match self {
+    I64 => "Int"
+    I32 => "I32"
+    U8 => "U8"
+    U32 => "U32"
+    U64 => "U64"
+  }
+}
+
+fn IntTy.signed(self) -> Bool {
+  return self == IntTy.I64 || self == IntTy.I32
+}
+
+fn IntTy.min_text(self) -> Str {
+  return match self {
+    I64 => "-9223372036854775808"
+    I32 => "-2147483648"
+    _ => "0"
+  }
+}
+
+fn IntTy.max_text(self) -> Str {
+  return match self {
+    I64 => "9223372036854775807"
+    I32 => "2147483647"
+    U8 => "255"
+    U32 => "4294967295"
+    U64 => "18446744073709551615"
+  }
+}
+
+/// Does the literal `v` (negated if `neg`) fit in the type?
+fn IntTy.fits(self, v: U64, neg: Bool) -> Bool {
+  if neg {
+    return match self {
+      I64 => v <= 9223372036854775808
+      I32 => v <= 2147483648
+      _ => v == 0
+    }
+  }
+  return match self {
+    I64 => v <= 9223372036854775807
+    I32 => v <= 2147483647
+    U8 => v <= 255
+    U32 => v <= 4294967295
+    U64 => true
+  }
+}
+
+/// The largest value of a type, if it fits in an `Int`.
+fn IntTy.max_int(self) -> Int {
+  return match self {
+    I64 | U64 => 9223372036854775807
+    I32 => 2147483647
+    U8 => 255
+    U32 => 4294967295
+  }
+}
+
+fn IntTy.min_int(self) -> Int {
+  return match self {
+    I64 => -9223372036854775807 - 1
+    I32 => -2147483648
+    _ => 0
+  }
+}
+
+// ---- effects: a bit set over the eight effects ----
+
+fn effect_names() -> List<Str> {
+  return ["io", "fs", "net", "clock", "rand", "env", "spawn", "ffi"]
+}
+
+/// The bit of the effect called `s`, or 0.
+fn effect_bit(s: Str) -> Int {
+  let names = effect_names()
+  for i in 0..names.len() {
+    if names[i] == s {
+      return 1 << i
+    }
+  }
+  return 0
+}
+
+fn effects_contain(set: Int, o: Int) -> Bool {
+  return set & o == o
+}
+
+fn effects_minus(set: Int, o: Int) -> Int {
+  return set & ~o
+}
+
+fn effect_list(set: Int) -> List<Str> {
+  let names = effect_names()
+  var out: List<Str> = []
+  for i in 0..8 {
+    if set & (1 << i) != 0 {
+      out.push(names[i])
+    }
+  }
+  return out
+}
+
+fn effects_render(set: Int) -> Str {
+  return "{" + effect_list(set).join(", ") + "}"
+}
+
+enum TyKind {
+  Int(k: IntTy, u: Int)
+  Float(u: Int)
+  Bool
+  Char
+  Str
+  Never
+  Error
+  Tuple(elems: List<Int>)
+  Adt(adt: Int, args: List<Int>)
+  List(elem: Int)
+  Map(key: Int, value: Int)
+  Set(elem: Int)
+  Fn(params: List<Int>, ret: Int, eff: Int)
+  /// Generic parameter `index` of the item being checked (named for display).
+  Param(index: Int, name: Str)
+  /// An inference variable (only while a body is checked).
+  Infer(v: Int)
+}
+
+/// One base unit with its exponent; a unit is a list of them sorted by name.
+struct Factor {
+  name: Str
+  exp: Int
+}
+
+struct TyCtx {
+  kinds: List<TyKind>
+  map: Map<TyKind, Int>
+  units: List<List<Factor>>
+  unit_map: Map<List<Factor>, Int>
+  /// ADT names, for display.
+  adt_names: List<Str>
+  int: Int
+  u8: Int
+  float: Int
+  bool: Int
+  char: Int
+  str: Int
+  unit_ty: Int
+  never: Int
+  error: Int
+}
+
+fn new_tys() -> TyCtx {
+  var t = TyCtx {
+    kinds: []
+    map: Map.new()
+    units: []
+    unit_map: Map.new()
+    adt_names: []
+    int: 0
+    u8: 0
+    float: 0
+    bool: 0
+    char: 0
+    str: 0
+    unit_ty: 0
+    never: 0
+    error: 0
+  }
+  let _ = t.unit_id([])
+  t.int = t.intern(TyKind.Int(IntTy.I64, 0))
+  let _ = t.intern(TyKind.Int(IntTy.I32, 0))
+  t.u8 = t.intern(TyKind.Int(IntTy.U8, 0))
+  let _ = t.intern(TyKind.Int(IntTy.U32, 0))
+  let _ = t.intern(TyKind.Int(IntTy.U64, 0))
+  t.float = t.intern(TyKind.Float(0))
+  t.bool = t.intern(TyKind.Bool)
+  t.char = t.intern(TyKind.Char)
+  t.str = t.intern(TyKind.Str)
+  t.unit_ty = t.intern(TyKind.Tuple([]))
+  t.never = t.intern(TyKind.Never)
+  t.error = t.intern(TyKind.Error)
+  return t
+}
+
+fn TyCtx.intern(&mut self, k: TyKind) -> Int {
+  match self.map.get(k) {
+    Some(t) => {
+      return t
+    }
+    None => {}
+  }
+  let t = self.kinds.len()
+  self.kinds.push(k)
+  self.map.insert(k, t)
+  return t
+}
+
+fn TyCtx.int_ty(&mut self, k: IntTy, u: Int) -> Int {
+  return self.intern(TyKind.Int(k, u))
+}
+
+fn TyCtx.float_ty(&mut self, u: Int) -> Int {
+  return self.intern(TyKind.Float(u))
+}
+
+fn TyCtx.tuple(&mut self, ts: List<Int>) -> Int {
+  return self.intern(TyKind.Tuple(ts))
+}
+
+fn TyCtx.list(&mut self, t: Int) -> Int {
+  return self.intern(TyKind.List(t))
+}
+
+fn TyCtx.map_ty(&mut self, k: Int, v: Int) -> Int {
+  return self.intern(TyKind.Map(k, v))
+}
+
+fn TyCtx.set(&mut self, t: Int) -> Int {
+  return self.intern(TyKind.Set(t))
+}
+
+fn TyCtx.adt(&mut self, a: Int, args: List<Int>) -> Int {
+  return self.intern(TyKind.Adt(a, args))
+}
+
+fn TyCtx.func(&mut self, params: List<Int>, ret: Int, eff: Int) -> Int {
+  return self.intern(TyKind.Fn(params, ret, eff))
+}
+
+fn TyCtx.param(&mut self, i: Int, name: Str) -> Int {
+  return self.intern(TyKind.Param(i, name))
+}
+
+fn TyCtx.infer(&mut self, v: Int) -> Int {
+  return self.intern(TyKind.Infer(v))
+}
+
+// ---- units ----
+
+/// The unit with these factors: equal names combined, zero exponents dropped, sorted.
+fn TyCtx.unit_id(&mut self, factors: List<Factor>) -> Int {
+  var v: List<Factor> = []
+  for f in factors {
+    var found = false
+    for i in 0..v.len() {
+      if v[i].name == f.name {
+        v[i].exp += f.exp
+        found = true
+        break
+      }
+    }
+    if !found {
+      v.push(f)
+    }
+  }
+  var kept: List<Factor> = []
+  for f in v {
+    if f.exp != 0 {
+      kept.push(f)
+    }
+  }
+  kept.sort_by(fn(a, b) { a.name < b.name })
+  match self.unit_map.get(kept) {
+    Some(u) => {
+      return u
+    }
+    None => {}
+  }
+  let u = self.units.len()
+  self.units.push(kept)
+  self.unit_map.insert(kept, u)
+  return u
+}
+
+fn TyCtx.unit_mul(&mut self, a: Int, b: Int, sign: Int) -> Int {
+  var f = self.units[a]
+  for x in self.units[b] {
+    f.push(Factor { name: x.name, exp: x.exp * sign })
+  }
+  return self.unit_id(f)
+}
+
+fn TyCtx.unit_str(self, u: Int) -> Str {
+  let f = self.units[u]
+  if f.is_empty() {
+    return ""
+  }
+  var num: List<Str> = []
+  var den: List<Str> = []
+  for x in f {
+    if x.exp > 0 {
+      num.push(if x.exp == 1 { x.name } else { x.name + "^" + x.exp.str() })
+    } else if x.exp < 0 {
+      den.push(if x.exp == -1 { x.name } else { x.name + "^" + (-x.exp).str() })
+    }
+  }
+  var out = if num.is_empty() { "1" } else { num.join("*") }
+  for d in den {
+    out = out + "/" + d
+  }
+  return out
+}
+
+/// The same numeric type with another unit.
+fn TyCtx.with_unit(&mut self, t: Int, u: Int) -> Int {
+  return match self.kinds[t] {
+    Int(k, _) => self.intern(TyKind.Int(k, u))
+    Float(_) => self.intern(TyKind.Float(u))
+    _ => t
+  }
+}
+
+/// The unit of a numeric type (-1 for other types).
+fn TyCtx.unit_of(self, t: Int) -> Int {
+  return match self.kinds[t] {
+    Int(_, u) => u
+    Float(u) => u
+    _ => -1
+  }
+}
+
+// ---- queries ----
+
+fn TyCtx.is_numeric(self, t: Int) -> Bool {
+  return match self.kinds[t] {
+    Int(_, _) | Float(_) => true
+    _ => false
+  }
+}
+
+fn TyCtx.is_int(self, t: Int) -> Bool {
+  return match self.kinds[t] {
+    Int(_, _) => true
+    _ => false
+  }
+}
+
+fn TyCtx.is_float(self, t: Int) -> Bool {
+  return match self.kinds[t] {
+    Float(_) => true
+    _ => false
+  }
+}
+
+fn TyCtx.is_infer(self, t: Int) -> Bool {
+  return match self.kinds[t] {
+    Infer(_) => true
+    _ => false
+  }
+}
+
+/// Replace `Param(i)` with `args[i]`.
+fn TyCtx.subst(&mut self, t: Int, args: List<Int>) -> Int {
+  if args.is_empty() {
+    return t
+  }
+  return match self.kinds[t] {
+    Param(i, _) => if i < args.len() { args[i] } else { t }
+    Tuple(ts) => {
+      let xs = self.subst_all(ts, args)
+      self.tuple(xs)
+    }
+    Adt(a, ts) => {
+      let xs = self.subst_all(ts, args)
+      self.adt(a, xs)
+    }
+    List(x) => {
+      let y = self.subst(x, args)
+      self.list(y)
+    }
+    Set(x) => {
+      let y = self.subst(x, args)
+      self.set(y)
+    }
+    Map(k, v) => {
+      let k2 = self.subst(k, args)
+      let v2 = self.subst(v, args)
+      self.map_ty(k2, v2)
+    }
+    Fn(ps, r, e) => {
+      let ps2 = self.subst_all(ps, args)
+      let r2 = self.subst(r, args)
+      self.func(ps2, r2, e)
+    }
+    _ => t
+  }
+}
+
+fn TyCtx.subst_all(&mut self, ts: List<Int>, args: List<Int>) -> List<Int> {
+  var out: List<Int> = []
+  for x in ts {
+    out.push(self.subst(x, args))
+  }
+  return out
+}
+
+/// Does the type mention an inference variable or a generic parameter?
+fn TyCtx.has_vars(self, t: Int) -> Bool {
+  return match self.kinds[t] {
+    Infer(_) | Param(_, _) => true
+    Tuple(ts) | Adt(_, ts) => self.any_vars(ts)
+    List(x) | Set(x) => self.has_vars(x)
+    Map(k, v) => self.has_vars(k) || self.has_vars(v)
+    Fn(ps, r, _) => self.any_vars(ps) || self.has_vars(r)
+    _ => false
+  }
+}
+
+fn TyCtx.any_vars(self, ts: List<Int>) -> Bool {
+  for x in ts {
+    if self.has_vars(x) {
+      return true
+    }
+  }
+  return false
+}
+
+fn TyCtx.has_infer(self, t: Int) -> Bool {
+  return match self.kinds[t] {
+    Infer(_) => true
+    Tuple(ts) | Adt(_, ts) => self.any_infer(ts)
+    List(x) | Set(x) => self.has_infer(x)
+    Map(k, v) => self.has_infer(k) || self.has_infer(v)
+    Fn(ps, r, _) => self.any_infer(ps) || self.has_infer(r)
+    _ => false
+  }
+}
+
+fn TyCtx.any_infer(self, ts: List<Int>) -> Bool {
+  for x in ts {
+    if self.has_infer(x) {
+      return true
+    }
+  }
+  return false
+}
+
+fn TyCtx.display(self, t: Int) -> Str {
+  return match self.kinds[t] {
+    Int(k, u) => if u != 0 { k.name() + "<" + self.unit_str(u) + ">" } else { k.name() }
+    Float(u) => if u != 0 { "Float<" + self.unit_str(u) + ">" } else { "Float" }
+    Bool => "Bool"
+    Char => "Char"
+    Str => "Str"
+    Never => "Never"
+    Error => "{unknown}"
+    Tuple(ts) => {
+      var out = "(" + self.display_list(ts)
+      if ts.len() == 1 {
+        out = out + ","
+      }
+      out + ")"
+    }
+    Adt(a, ts) => self.adt_names[a] + self.display_args(ts)
+    List(x) => "List<" + self.display(x) + ">"
+    Set(x) => "Set<" + self.display(x) + ">"
+    Map(k, v) => "Map<" + self.display(k) + ", " + self.display(v) + ">"
+    Fn(ps, r, e) => {
+      var out = "fn(" + self.display_list(ps) + ")"
+      if r != self.unit_ty {
+        out = out + " -> " + self.display(r)
+      }
+      if e != 0 {
+        out = out + " effects " + effects_render(e)
+      }
+      out
+    }
+    Param(_, name) => name
+    Infer(_) => "_"
+  }
+}
+
+fn TyCtx.display_list(self, ts: List<Int>) -> Str {
+  var parts: List<Str> = []
+  for x in ts {
+    parts.push(self.display(x))
+  }
+  return parts.join(", ")
+}
+
+fn TyCtx.display_args(self, ts: List<Int>) -> Str {
+  if ts.is_empty() {
+    return ""
+  }
+  return "<" + self.display_list(ts) + ">"
+}

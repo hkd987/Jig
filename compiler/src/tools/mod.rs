@@ -2,6 +2,7 @@
 
 pub mod debug;
 pub mod debug_ast;
+pub mod debug_check;
 pub mod hooks;
 pub mod mcp;
 pub mod project;

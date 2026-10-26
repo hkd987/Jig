@@ -1,0 +1,359 @@
+// The program model, ported from the bootstrap compiler's `sema/defs.rs`: packages, item
+// definitions, and the tables the checker fills in. Packages keep one AST per file, so an
+// item is named by (package, file, index), and per-file tables are indexed by AST node.
+
+import "syntax"
+
+enum Def {
+  Fn(id: Int)
+  Adt(id: Int)
+  Iface(id: Int)
+  Const(id: Int)
+  Alias(id: Int)
+  Unit
+}
+
+enum BuiltinTy {
+  Int(k: IntTy)
+  Float
+  Bool
+  Char
+  Str
+  List
+  Map
+  Set
+  Never
+}
+
+fn builtin_type(s: Str) -> Option<BuiltinTy> {
+  return match s {
+    "Int" => Some(BuiltinTy.Int(IntTy.I64))
+    "I32" => Some(BuiltinTy.Int(IntTy.I32))
+    "U8" => Some(BuiltinTy.Int(IntTy.U8))
+    "U32" => Some(BuiltinTy.Int(IntTy.U32))
+    "U64" => Some(BuiltinTy.Int(IntTy.U64))
+    "Float" => Some(BuiltinTy.Float)
+    "Bool" => Some(BuiltinTy.Bool)
+    "Char" => Some(BuiltinTy.Char)
+    "Str" => Some(BuiltinTy.Str)
+    "List" => Some(BuiltinTy.List)
+    "Map" => Some(BuiltinTy.Map)
+    "Set" => Some(BuiltinTy.Set)
+    "Never" => Some(BuiltinTy.Never)
+    _ => None
+  }
+}
+
+/// How many type arguments a built-in type takes.
+fn builtin_arity(b: BuiltinTy) -> Int {
+  return match b {
+    List | Set => 1
+    Map => 2
+    _ => 0
+  }
+}
+
+/// The receiver's type constructor, for method lookup.
+enum TyKey {
+  Adt(id: Int)
+  Int(k: IntTy)
+  Float
+  Bool
+  Char
+  Str
+  List
+  Map
+  Set
+}
+
+fn ty_key(tys: TyCtx, t: Int) -> Option<TyKey> {
+  return match tys.kinds[t] {
+    Adt(a, _) => Some(TyKey.Adt(a))
+    Int(k, _) => Some(TyKey.Int(k))
+    Float(_) => Some(TyKey.Float)
+    Bool => Some(TyKey.Bool)
+    Char => Some(TyKey.Char)
+    Str => Some(TyKey.Str)
+    List(_) => Some(TyKey.List)
+    Map(_, _) => Some(TyKey.Map)
+    Set(_) => Some(TyKey.Set)
+    _ => None
+  }
+}
+
+enum Bound {
+  Iface(id: Int)
+  Eq
+  Ord
+  Hash
+  Show
+}
+
+fn builtin_bound(s: Str) -> Option<Bound> {
+  return match s {
+    "Eq" => Some(Bound.Eq)
+    "Ord" => Some(Bound.Ord)
+    "Hash" => Some(Bound.Hash)
+    "Show" => Some(Bound.Show)
+    _ => None
+  }
+}
+
+struct GenericDef {
+  name: Str
+  bounds: List<Bound>
+  span: syntax.Span
+}
+
+enum Mode {
+  Value
+  MutRef
+}
+
+struct ParamDef {
+  name: Str
+  ty: Int
+  mode: Mode
+  span: syntax.Span
+}
+
+struct FnDef {
+  pkg: Int
+  file: Int
+  item: Int
+  name: Str
+  /// For methods and associated functions: the receiver's type constructor.
+  recv: Option<TyKey>
+  /// For methods taking `self` or `&mut self`.
+  self_mode: Option<Mode>
+  /// The receiver type, in terms of the receiver's generic parameters.
+  self_ty: Option<Int>
+  /// Receiver generics first, then the function's own.
+  generics: List<GenericDef>
+  n_recv_generics: Int
+  params: List<ParamDef>
+  ret: Int
+  eff: Int
+  is_pub: Bool
+  has_body: Bool
+  /// A C function: bodiless, outside the standard library, with the `ffi` effect.
+  ffi: Bool
+  /// For interface method signatures.
+  iface: Option<Int>
+  step_attr: Option<syntax.Step>
+  name_span: syntax.Span
+}
+
+struct FieldDef {
+  name: Str
+  ty: Int
+  is_pub: Bool
+  span: syntax.Span
+}
+
+struct VariantDef {
+  name: Str
+  fields: List<FieldDef>
+  span: syntax.Span
+}
+
+struct AdtDef {
+  pkg: Int
+  file: Int
+  item: Int
+  name: Str
+  generics: List<GenericDef>
+  is_enum: Bool
+  /// A struct's fields.
+  fields: List<FieldDef>
+  /// An enum's variants.
+  variants: List<VariantDef>
+  is_pub: Bool
+}
+
+struct IfaceDef {
+  pkg: Int
+  file: Int
+  item: Int
+  name: Str
+  /// Method signatures; their `self_ty` is `Param(0, Self)`.
+  methods: List<Int>
+  is_pub: Bool
+}
+
+enum ConstVal {
+  Int(v: Int)
+  /// A `U64` literal above the largest `Int`.
+  Big(v: U64)
+  Float(v: Float)
+  Bool(v: Bool)
+  Str(v: Str)
+  Char(v: Int)
+}
+
+struct ConstDef {
+  pkg: Int
+  file: Int
+  item: Int
+  name: Str
+  ty: Int
+  value: Option<ConstVal>
+  is_pub: Bool
+}
+
+struct AliasDef {
+  pkg: Int
+  file: Int
+  item: Int
+  name: Str
+  generics: List<GenericDef>
+  ty: Int
+  /// The refinement predicate (`self` names the value) of a refinement alias.
+  refine: Option<Int>
+  is_pub: Bool
+}
+
+struct TestDef {
+  pkg: Int
+  file: Int
+  item: Int
+  params: List<ParamDef>
+}
+
+struct Defs {
+  fns: List<FnDef>
+  adts: List<AdtDef>
+  ifaces: List<IfaceDef>
+  consts: List<ConstDef>
+  aliases: List<AliasDef>
+  tests: List<TestDef>
+  /// Methods by receiver type constructor and name.
+  methods: Map<(TyKey, Str), Int>
+  option: Int
+  result: Int
+  main: Option<Int>
+  /// Imports used by signatures, fields and aliases: (package, file, import name).
+  sig_imports_used: Set<(Int, Int, Str)>
+}
+
+fn Defs.method(self, k: TyKey, name: Str) -> Option<Int> {
+  return self.methods.get((k, name))
+}
+
+/// What a name, field or call in a body refers to.
+enum Res {
+  Unresolved
+  Local(id: Int)
+  Fn(id: Int)
+  /// `recv.method` used as a callee.
+  Method(id: Int)
+  /// A method reached through a generic bound.
+  IfaceMethod(iface: Int, index: Int)
+  Variant(adt: Int, index: Int)
+  Field(index: Int)
+  Const(id: Int)
+  Pkg(id: Int)
+  Type(ty: Int)
+  /// `old(e)` in an ensures clause.
+  Old
+  /// `result` in an ensures clause.
+  ResultVal
+  /// A built-in bound method (`x.str()`) on a generic parameter.
+  BoundMethod(b: Bound)
+}
+
+enum LocalKind {
+  Let
+  Var
+  Param
+  MutParam
+  SelfValue
+  SelfMut
+  /// Bound by a pattern in `match`, `for`, or `let (a, b)`.
+  Pattern
+  /// A quantifier variable in a contract.
+  Quant
+}
+
+struct LocalDef {
+  name: Str
+  ty: Int
+  kind: LocalKind
+  span: syntax.Span
+  used: Bool
+  mutated: Bool
+  /// Closure nesting depth where it was declared (0: the function body).
+  depth: Int
+}
+
+fn LocalDef.is_mutable(self) -> Bool {
+  return self.kind == LocalKind.Var ||
+    self.kind == LocalKind.MutParam ||
+    self.kind == LocalKind.SelfMut
+}
+
+/// What checking one function or test produced.
+struct Body {
+  locals: List<LocalDef>
+  /// Effects the body performs.
+  used_effects: Int
+  /// Every function the body references, for reachability.
+  refs: List<Int>
+  variants_built: List<(Int, Int)>
+  fields_read: List<(Int, Int)>
+  consts_used: List<Int>
+  /// Method names called through generic bounds.
+  dyn_methods: List<Str>
+  /// Expressions whose type is compared, hashed or shown with derived behavior.
+  derived_exprs: List<Int>
+}
+
+fn new_body() -> Body {
+  return Body {
+    locals: []
+    used_effects: 0
+    refs: []
+    variants_built: []
+    fields_read: []
+    consts_used: []
+    dyn_methods: []
+    derived_exprs: []
+  }
+}
+
+/// One file's tables, indexed by AST node.
+struct Tables {
+  expr_ty: List<Int>
+  expr_res: List<Res>
+  pat_ty: List<Int>
+  /// For variant patterns: (adt, variant index).
+  pat_variant: Map<Int, (Int, Int)>
+}
+
+fn new_tables(n_exprs: Int, n_pats: Int, error: Int) -> Tables {
+  return Tables {
+    expr_ty: [error].repeat(n_exprs)
+    expr_res: [Res.Unresolved].repeat(n_exprs)
+    pat_ty: [error].repeat(n_pats)
+    pat_variant: Map.new()
+  }
+}
+
+struct SrcFile {
+  /// The file's path as diagnostics name it.
+  path: Str
+  /// Global offset of the file's first byte.
+  base: Int
+  text: Str
+  ast: syntax.Ast
+}
+
+struct Package {
+  path: Str
+  files: List<SrcFile>
+  is_std: Bool
+  /// Package-level names.
+  scope: Map<Str, Def>
+  /// Per file: imported packages by name, with the import's item index.
+  imports: List<Map<Str, (Int, Int)>>
+}

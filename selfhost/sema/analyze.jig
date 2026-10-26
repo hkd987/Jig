@@ -1,0 +1,166 @@
+// The checker's driver, ported from the bootstrap compiler's `sema/mod.rs`, and the dump
+// compared with `jig debug check DIR`: every diagnostic, then the type of every expression
+// and pattern of the project's own packages.
+
+import "syntax"
+
+/// A package that failed to parse reports only its syntax errors: recovery drops code, and
+/// what follows is noise that buries the one real mistake.
+fn Sema.quiet_after_syntax_errors(&mut self) {
+  var bad: Set<(Int, Int)> = Set.new()
+  for d in self.diags {
+    // Errors whose recovery skips source text.
+    if d.code == "E0101" || d.code == "E0102" || d.code == "E0105" || d.code == "E0108" {
+      match self.file_of(d.lo) {
+        Some(pf) => bad.insert(pf)
+        None => {}
+      }
+    }
+  }
+  if bad.is_empty() {
+    return
+  }
+  var quiet: Set<Int> = Set.new()
+  for (p, _) in bad.items() {
+    quiet.insert(p)
+  }
+  var kept: List<syntax.Diag> = []
+  for d in self.diags {
+    let keep = d.code.starts_with("E01") ||
+      match self.file_of(d.lo) {
+        Some((p, _)) => !quiet.contains(p)
+        None => true
+      }
+    if keep {
+      kept.push(d)
+    }
+  }
+  self.diags = kept
+}
+
+/// The (package, file) holding global offset `pos`.
+fn Sema.file_of(self, pos: Int) -> Option<(Int, Int)> {
+  for p in 0..self.pkgs.len() {
+    let files = self.pkgs[p].files
+    for f in 0..files.len() {
+      if files[f].base <= pos && pos <= files[f].base + files[f].text.len() {
+        return Some((p, f))
+      }
+    }
+  }
+  return None
+}
+
+/// Sort by position (then code), keeping the order of equal keys, and drop exact duplicates.
+fn Sema.sort_diags(&mut self) {
+  var keyed: List<(syntax.Diag, Int)> = []
+  for i in 0..self.diags.len() {
+    keyed.push((self.diags[i], i))
+  }
+  keyed.sort_by(fn(a, b) {
+    a.0.lo < b.0.lo ||
+      (a.0.lo == b.0.lo && (a.0.code < b.0.code || (a.0.code == b.0.code && a.1 < b.1)))
+  })
+  var out: List<syntax.Diag> = []
+  for (d, _) in keyed {
+    let n = out.len()
+    if n > 0 && out[n - 1] == d {
+      continue
+    }
+    out.push(d)
+  }
+  self.diags = out
+}
+
+/// Check the package in `dir` (an absolute path) with the standard library in `std_dir`.
+fn analyze(dir: Str, std_dir: Str) -> (Sema, Str) effects {fs} {
+  let ld = load_program(dir, std_dir)
+  let root = ld.project_root.unwrap_or(dir)
+  var s = new_sema(ld)
+  s.collect()
+  s.check_bodies()
+  s.quiet_after_syntax_errors()
+  s.sort_diags()
+  s.check_dead_code()
+  return (s, root)
+}
+
+/// A file's name in the dump: relative to the project root.
+fn dump_name(path: Str, root: Str) -> Str {
+  let prefix = join_path(root, "")
+  return if path.starts_with(prefix) { path[prefix.len()..path.len()] } else { path }
+}
+
+fn Sema.place(self, root: Str, lo: Int, hi: Int) -> Str {
+  if lo == 0 && hi == 0 {
+    return "- 0 0"
+  }
+  return match self.file_of(lo) {
+    Some((p, f)) => {
+      let file = self.pkgs[p].files[f]
+      let rel_hi = if hi > file.base { hi - file.base } else { 0 }
+      dump_name(file.path, root) + " " + (lo - file.base).str() + " " + rel_hi.str()
+    }
+    None => "- 0 0"
+  }
+}
+
+/// `jigc check DIR STD`: the same lines as `jig debug check DIR`.
+pub fn check_dump(dir: Str, std_dir: Str) -> Str effects {fs} {
+  let (s, root) = analyze(dir, std_dir)
+  var out: List<Str> = []
+  for d in s.diags {
+    out.push("error " + d.code + " " + s.place(root, d.lo, d.hi) + " " + d.msg + "\n")
+  }
+  // Types render once each.
+  var shown = [""].repeat(s.tys.kinds.len())
+  for p in 0..s.pkgs.len() {
+    if s.pkgs[p].is_std {
+      continue
+    }
+    let files = s.pkgs[p].files
+    for f in 0..files.len() {
+      let name = dump_name(files[f].path, root)
+      let base = files[f].base
+      let ast = files[f].ast
+      let tab = s.tables[p][f]
+      for i in 0..ast.exprs.len() {
+        let sp = ast.exprs[i].span
+        let t = tab.expr_ty[i]
+        if shown[t].is_empty() {
+          shown[t] = s.tys.display(t)
+        }
+        out.push(
+          "expr " +
+            name +
+            " " +
+            (sp.lo - base).str() +
+            " " +
+            (sp.hi - base).str() +
+            " " +
+            shown[t] +
+            "\n",
+        )
+      }
+      for i in 0..ast.pats.len() {
+        let sp = ast.pats[i].span
+        let t = tab.pat_ty[i]
+        if shown[t].is_empty() {
+          shown[t] = s.tys.display(t)
+        }
+        out.push(
+          "pat " +
+            name +
+            " " +
+            (sp.lo - base).str() +
+            " " +
+            (sp.hi - base).str() +
+            " " +
+            shown[t] +
+            "\n",
+        )
+      }
+    }
+  }
+  return out.join("")
+}

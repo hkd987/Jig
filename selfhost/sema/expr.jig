@@ -1,0 +1,1152 @@
+// Expression checking, ported from the bootstrap compiler's `sema/check/expr.rs`.
+
+import "syntax"
+
+fn Sema.check_expr(&mut self, e: Int, expected: Option<Int>) -> Int {
+  let t = self.check_expr_inner(e, expected)
+  let _ = self.record(e, t)
+  match expected {
+    Some(exp) => {
+      if !self.coerce(t, exp) {
+        self.mismatch(self.expr_span(e), exp, t)
+        return exp
+      }
+    }
+    None => {}
+  }
+  return t
+}
+
+/// Check without reporting a mismatch against `expected` (the caller reports).
+fn Sema.check_expr_no_report(&mut self, e: Int, expected: Option<Int>) -> Int {
+  let t = self.check_expr_inner(e, expected)
+  return self.record(e, t)
+}
+
+/// Check an expression in statement position: its value is discarded.
+fn Sema.check_expr_stmt(&mut self, e: Int) {
+  let ex = self.ast.exprs[e]
+  match ex.kind {
+    If(cond, then, els) => {
+      let t = self.check_if(e, cond, then, els, None, false)
+      let _ = self.record(e, t)
+    }
+    Match(scrut, arms) => {
+      let t = self.check_match(e, scrut, arms, None, false)
+      let _ = self.record(e, t)
+    }
+    Block(_) => {
+      self.check_block_stmts(e)
+      let t = if self.diverges { self.tys.never } else { self.tys.unit_ty }
+      let _ = self.record(e, t)
+    }
+    _ => {
+      let t = self.check_expr(e, None)
+      let r = self.resolve(t)
+      if r == self.tys.unit_ty || r == self.tys.never || r == self.tys.error {
+        if r == self.tys.never {
+          self.diverges = true
+        }
+        return
+      }
+      let ts = self.show(r)
+      let msg = match ex.kind {
+        Call(_, _) => "unused result of type `" + ts + "`"
+        _ => "unused value of type `" + ts + "`"
+      }
+      self.err("E0507", ex.span, msg)
+    }
+  }
+}
+
+fn Sema.check_expr_inner(&mut self, e: Int, expected: Option<Int>) -> Int {
+  let ex = self.ast.exprs[e]
+  match ex.kind {
+    Int(v) => {
+      return self.check_int_lit(e, v, false, expected)
+    }
+    Float => {
+      match expected {
+        Some(exp) => {
+          let r = self.resolve(exp)
+          match self.tys.kinds[r] {
+            Float(_) => {
+              return r
+            }
+            Int(_, _) => {
+              self.err(
+                "E0301",
+                ex.span,
+                "mismatched types: expected `" + self.show(r) + "`, found a float literal",
+              )
+              return r
+            }
+            _ => {}
+          }
+        }
+        None => {}
+      }
+      return self.new_var(VarKind.FloatLit)
+    }
+    Bool(_) => {
+      return self.tys.bool
+    }
+    Str(_) => {
+      return self.tys.str
+    }
+    Char(c) => {
+      match expected {
+        Some(exp) => {
+          let r = self.resolve(exp)
+          match self.tys.kinds[r] {
+            Int(k, _) => {
+              if k == IntTy.U8 {
+                if c >= 128 {
+                  self.err("E0104", ex.span, "only ASCII characters fit in a `U8` literal")
+                }
+                return r
+              }
+            }
+            _ => {}
+          }
+        }
+        None => {}
+      }
+      return self.tys.char
+    }
+    Name(n) => {
+      return self.check_name(e, n, expected)
+    }
+    Paren(inner) => {
+      return self.check_expr(inner, expected)
+    }
+    Tuple(elems) => {
+      var exp_elems: List<Int> = []
+      match expected {
+        Some(t) => match self.kind_of(t) {
+          Tuple(ts) => if ts.len() == elems.len() {
+            exp_elems = ts
+          }
+          _ => {}
+        }
+        None => {}
+      }
+      var tys: List<Int> = []
+      for i in 0..elems.len() {
+        let et = if exp_elems.is_empty() { None } else { Some(exp_elems[i]) }
+        tys.push(self.check_expr(elems[i], et))
+      }
+      return self.tys.tuple(tys)
+    }
+    List(elems) => {
+      var elem_ty = -1
+      match expected {
+        Some(t) => match self.kind_of(t) {
+          List(x) => elem_ty = x
+          _ => {}
+        }
+        None => {}
+      }
+      if elem_ty < 0 {
+        elem_ty = self.fresh()
+      }
+      for el in elems {
+        let _ = self.check_expr(el, Some(elem_ty))
+      }
+      return self.tys.list(elem_ty)
+    }
+    Field(base, name) => {
+      return self.check_field(e, base, name, expected)
+    }
+    TupleField(base, index, index_span) => {
+      let bt = self.check_expr(base, None)
+      match self.kind_of(bt) {
+        Tuple(ts) => {
+          if index < ts.len() {
+            return ts[index]
+          }
+          let msg = "tuple has no field `" +
+            index.str() +
+            "` (it has " +
+            ts.len().str() +
+            " fields)"
+          self.err("E0206", index_span, msg)
+          return self.tys.error
+        }
+        Error => {
+          return self.tys.error
+        }
+        Infer(_) => {
+          self.err("E0305", ex.span, "type annotations needed: the tuple's type is not known here")
+          return self.tys.error
+        }
+        _ => {
+          self.err("E0206", index_span, "`" + self.show(bt) + "` is not a tuple")
+          return self.tys.error
+        }
+      }
+    }
+    Call(callee, args) => {
+      return self.check_call(e, callee, args, expected)
+    }
+    MutArg(inner) => {
+      self.err("E0314", ex.span, "`&mut` is only allowed in call arguments")
+      return self.check_expr(inner, expected)
+    }
+    Index(base, index) => {
+      return self.check_index(e, base, index)
+    }
+    Range(_, _) => {
+      self.err("E0306", ex.span, "a range is only allowed in `for`, slices and quantifiers")
+      return self.tys.error
+    }
+    Unary(op, inner) => {
+      return self.check_unary(e, op, inner, expected)
+    }
+    Binary(op, lhs, rhs) => {
+      return self.check_binary(e, op, lhs, rhs, expected)
+    }
+    Cast(inner, ty) => {
+      return self.check_cast(inner, ty, ex.span)
+    }
+    Try(inner) => {
+      return self.check_try(inner, ex.span)
+    }
+    If(cond, then, els) => {
+      return self.check_if(e, cond, then, els, expected, true)
+    }
+    Match(scrut, arms) => {
+      return self.check_match(e, scrut, arms, expected, true)
+    }
+    Block(_) => {
+      return self.check_block_value(e, expected)
+    }
+    StructLit(ty, fields) => {
+      return self.check_struct_lit(e, ty, fields, expected)
+    }
+    Closure(params, ret, body) => {
+      return self.check_closure(e, params, ret, body, expected)
+    }
+    TypeArgs(base, args) => {
+      return self.check_type_args_value(e, base, args)
+    }
+    Quant(_, binder, lo, hi, body) => {
+      let lt = self.check_expr(lo, None)
+      let ht = self.check_expr(hi, Some(lt))
+      let it = self.resolve(ht)
+      let ok = match self.tys.kinds[it] {
+        Int(_, _) | Infer(_) | Error => true
+        _ => false
+      }
+      if !ok {
+        self.err(
+          "E0306",
+          ex.span,
+          "quantifier ranges must be integers, found `" + self.show(it) + "`",
+        )
+      }
+      self.push_scope()
+      let id = self.declare_local(binder.text, lt, LocalKind.Quant, binder.span)
+      self.body.locals[id].used = true
+      self.check_bool(body)
+      self.pop_scope()
+      return self.tys.bool
+    }
+  }
+}
+
+fn Sema.check_int_lit(&mut self, e: Int, v: U64, neg: Bool, expected: Option<Int>) -> Int {
+  self.int_lits.push(IntLit { expr: e, v: v, neg: neg })
+  match expected {
+    Some(exp) => {
+      let r = self.resolve(exp)
+      match self.tys.kinds[r] {
+        Int(_, _) => {
+          return r
+        }
+        Float(_) => {
+          self.err(
+            "E0301",
+            self.expr_span(e),
+            "mismatched types: expected `" + self.show(r) + "`, found an integer literal",
+          )
+          return r
+        }
+        _ => {}
+      }
+    }
+    None => {}
+  }
+  return self.new_var(VarKind.IntLit)
+}
+
+// ---------- names ----------
+
+fn Sema.lookup_def(self, name: Str) -> Option<Def> {
+  return self.lookup_name(self.pkg, name)
+}
+
+fn Sema.prelude_variant(self, name: Str) -> Option<(Int, Int)> {
+  return match name {
+    "Some" => Some((self.defs.option, 0))
+    "None" => Some((self.defs.option, 1))
+    "Ok" => Some((self.defs.result, 0))
+    "Err" => Some((self.defs.result, 1))
+    _ => None
+  }
+}
+
+fn Sema.check_name(&mut self, e: Int, name: Str, expected: Option<Int>) -> Int {
+  let span = self.expr_span(e)
+  match self.lookup_local(name) {
+    Some(id) => {
+      self.use_local(id)
+      self.set_res(e, Res.Local(id))
+      return self.body.locals[id].ty
+    }
+    None => {}
+  }
+  if name == "result" && self.ctx == Ctx.Ensures {
+    self.set_res(e, Res.ResultVal)
+    if self.ret_ty == self.tys.unit_ty {
+      self.err("E0320", span, "`result` is not available: this function returns nothing")
+      return self.tys.error
+    }
+    return self.ret_ty
+  }
+  match self.lookup_def(name) {
+    Some(def) => {
+      return self.value_of_def(e, def, name, span, None)
+    }
+    None => {}
+  }
+  match self.prelude_variant(name) {
+    Some((adt, v)) => {
+      return self.variant_value(e, adt, v, None, expected)
+    }
+    None => {}
+  }
+  if self.imported(name).is_some() {
+    self.use_import(name)
+    self.err("E0326", span, "package `" + name + "` is not a value; use `" + name + ".<item>`")
+    return self.tys.error
+  }
+  self.err("E0201", span, "cannot find `" + name + "` in this scope")
+  return self.tys.error
+}
+
+/// The value a package-level definition denotes when used as an expression.
+fn Sema.value_of_def(
+  &mut self,
+  e: Int,
+  def: Def,
+  name: Str,
+  span: syntax.Span,
+  explicit: Option<List<Int>>,
+) -> Int {
+  match def {
+    Fn(f) => {
+      return self.fn_value(e, f, explicit, span)
+    }
+    Const(c) => {
+      self.set_res(e, Res.Const(c))
+      if !self.body.consts_used.contains(c) {
+        self.body.consts_used.push(c)
+      }
+      return self.defs.consts[c].ty
+    }
+    Adt(_) | Alias(_) => {
+      self.err("E0326", span, "`" + name + "` is a type, not a value")
+      return self.tys.error
+    }
+    Iface(_) | Unit => {
+      self.err("E0326", span, "`" + name + "` is not a value")
+      return self.tys.error
+    }
+  }
+}
+
+/// A function item used as a value: instantiate its generics.
+fn Sema.fn_value(&mut self, e: Int, f: Int, explicit: Option<List<Int>>, span: syntax.Span) -> Int {
+  let fd = self.defs.fns[f]
+  for p in fd.params {
+    if p.mode == Mode.MutRef {
+      self.err(
+        "E0314",
+        span,
+        "`" + fd.name + "` takes `&mut` parameters and cannot be used as a function value",
+      )
+      break
+    }
+  }
+  let inst = self.instantiate(f, [], explicit, span)
+  var ptys: List<Int> = []
+  for p in fd.params {
+    ptys.push(self.tys.subst(p.ty, inst))
+  }
+  let ret = self.tys.subst(fd.ret, inst)
+  self.set_res(e, Res.Fn(f))
+  self.add_ref(f)
+  return self.tys.func(ptys, ret, fd.eff)
+}
+
+/// Type arguments for a use of a function: receiver arguments first, then explicit or fresh.
+fn Sema.instantiate(
+  &mut self,
+  f: Int,
+  recv: List<Int>,
+  explicit: Option<List<Int>>,
+  span: syntax.Span,
+) -> List<Int> {
+  let fd = self.defs.fns[f]
+  let n = fd.generics.len()
+  let n_recv = fd.n_recv_generics
+  var inst: List<Int> = []
+  for i in 0..n_recv {
+    inst.push(if i < recv.len() { recv[i] } else { self.fresh() })
+  }
+  let own = n - n_recv
+  match explicit {
+    Some(ex) => {
+      if ex.len() != own {
+        let msg = "`" +
+          fd.name +
+          "` takes " +
+          own.str() +
+          " type argument" +
+          plural(own) +
+          ", found " +
+          ex.len().str()
+        self.err("E0313", span, msg)
+        inst.extend(self.fresh_list(own))
+      } else {
+        inst.extend(ex)
+      }
+    }
+    None => inst.extend(self.fresh_list(own))
+  }
+  for i in 0..n {
+    for b in fd.generics[i].bounds {
+      self.require_bound(span, inst[i], b)
+    }
+  }
+  return inst
+}
+
+fn Sema.variant_field_tys(self, adt: Int, v: Int) -> List<Int> {
+  var out: List<Int> = []
+  for f in self.defs.adts[adt].variants[v].fields {
+    out.push(f.ty)
+  }
+  return out
+}
+
+/// A variant used as a value: nullary variants are values, others constructor functions.
+fn Sema.variant_value(
+  &mut self,
+  e: Int,
+  adt: Int,
+  v: Int,
+  targs: Option<List<Int>>,
+  expected: Option<Int>,
+) -> Int {
+  let n = self.defs.adts[adt].generics.len()
+  let args = match targs {
+    Some(a) => a
+    None => self.fresh_list(n)
+  }
+  let ty = self.tys.adt(adt, args)
+  match expected {
+    Some(exp) => {
+      let _ = self.unify(ty, exp)
+    }
+    None => {}
+  }
+  self.set_res(e, Res.Variant(adt, v))
+  let fts = self.variant_field_tys(adt, v)
+  self.note_variant_built(adt, v)
+  if fts.is_empty() {
+    return ty
+  }
+  let ps = self.tys.subst_all(fts, args)
+  return self.tys.func(ps, ty, 0)
+}
+
+fn Sema.note_variant_built(&mut self, adt: Int, v: Int) {
+  if !self.body.variants_built.contains((adt, v)) {
+    self.body.variants_built.push((adt, v))
+  }
+}
+
+fn Sema.note_field_read(&mut self, adt: Int, i: Int) {
+  if !self.body.fields_read.contains((adt, i)) {
+    self.body.fields_read.push((adt, i))
+  }
+}
+
+fn Sema.check_type_args_value(&mut self, e: Int, base: Int, args: List<Int>) -> Int {
+  var targs: List<Int> = []
+  for a in args {
+    targs.push(self.resolve_type_expr(a))
+  }
+  let span = self.expr_span(e)
+  match self.ast.exprs[base].kind {
+    Name(n) => {
+      if self.lookup_local(n).is_none() {
+        match self.lookup_def(n) {
+          Some(Fn(f)) => {
+            let t = self.fn_value(e, f, Some(targs), span)
+            let _ = self.record(base, t)
+            return t
+          }
+          _ => {}
+        }
+      }
+    }
+    _ => {}
+  }
+  self.err("E0326", span, "explicit type arguments here must follow a generic function or type")
+  return self.tys.error
+}
+
+// ---------- operators ----------
+
+fn Sema.is_lit_var(self, t: Int) -> Bool {
+  return match self.tys.kinds[t] {
+    Infer(v) => self.var_kind[v] != VarKind.General
+    _ => false
+  }
+}
+
+/// An integer without a unit, an integer literal or an error.
+fn Sema.is_plain_int(self, r: Int) -> Bool {
+  return match self.tys.kinds[r] {
+    Int(_, u) => u == 0
+    Error => true
+    Infer(v) => self.var_kind[v] == VarKind.IntLit
+    _ => false
+  }
+}
+
+fn Sema.check_unary(&mut self, e: Int, op: syntax.UnOp, inner: Int, expected: Option<Int>) -> Int {
+  let span = self.expr_span(e)
+  match op {
+    Neg => {
+      match self.ast.exprs[inner].kind {
+        Int(v) => {
+          let t = self.check_int_lit(inner, v, true, expected)
+          let _ = self.record(inner, t)
+          match self.tys.kinds[self.resolve(t)] {
+            Int(k, _) => if !k.signed() {
+              self.err("E0306", span, "cannot negate an unsigned `" + k.name() + "`")
+            }
+            _ => {}
+          }
+          return t
+        }
+        _ => {}
+      }
+      let exp = match expected {
+        Some(x) => if self.tys.is_numeric(self.resolve(x)) { Some(x) } else { None }
+        None => None
+      }
+      let t = self.check_expr(inner, exp)
+      let r = self.resolve(t)
+      match self.tys.kinds[r] {
+        Int(k, _) => {
+          if !k.signed() {
+            self.err("E0306", span, "cannot negate an unsigned `" + k.name() + "`")
+          }
+          return t
+        }
+        Float(_) | Error => {
+          return t
+        }
+        _ => {
+          if self.is_lit_var(r) {
+            return t
+          }
+          self.err("E0306", span, "cannot negate a value of type `" + self.show(t) + "`")
+          return self.tys.error
+        }
+      }
+    }
+    Not => {
+      self.check_bool(inner)
+      return self.tys.bool
+    }
+    BitNot => {
+      let t = self.check_expr(inner, expected)
+      if self.is_plain_int(self.resolve(t)) {
+        return t
+      }
+      self.err("E0306", span, "`~` needs an integer without a unit, found `" + self.show(t) + "`")
+      return self.tys.error
+    }
+  }
+}
+
+fn is_comparison(op: syntax.BinOp) -> Bool {
+  return match op {
+    Eq | Ne | Lt | Le | Gt | Ge => true
+    _ => false
+  }
+}
+
+fn Sema.check_binary(
+  &mut self,
+  e: Int,
+  op: syntax.BinOp,
+  lhs: Int,
+  rhs: Int,
+  expected: Option<Int>,
+) -> Int {
+  let span = self.expr_span(e)
+  match op {
+    And | Or => {
+      self.check_bool(lhs)
+      self.check_bool(rhs)
+      return self.tys.bool
+    }
+    Shl | Shr => {
+      let lt = self.check_expr(lhs, expected)
+      let rt = self.check_expr(rhs, None)
+      for (t, side) in [(lt, lhs), (rt, rhs)] {
+        if !self.is_plain_int(self.resolve(t)) {
+          self.err(
+            "E0306",
+            self.expr_span(side),
+            "shifts need integers without units, found `" + self.show(t) + "`",
+          )
+        }
+      }
+      return lt
+    }
+    BitAnd | BitOr | BitXor => {
+      let lt = self.check_expr(lhs, expected)
+      let rt = self.check_expr_no_report(rhs, Some(lt))
+      if !self.unify(lt, rt) {
+        self.operand_mismatch(span, op, lt, rt)
+        return self.tys.error
+      }
+      if !self.is_plain_int(self.resolve(lt)) {
+        self.err(
+          "E0306",
+          span,
+          "`" + op.text() + "` needs integers without units, found `" + self.show(lt) + "`",
+        )
+      }
+      return lt
+    }
+    _ => {}
+  }
+  if is_comparison(op) {
+    self.lint_self_compare(e, lhs, rhs)
+    let lt = self.check_expr(lhs, None)
+    let rt = self.check_expr_no_report(rhs, Some(lt))
+    if !self.unify(lt, rt) {
+      self.operand_mismatch(span, op, lt, rt)
+      return self.tys.bool
+    }
+    let r = self.resolve(lt)
+    self.body.derived_exprs.push(lhs)
+    if op == syntax.BinOp.Eq || op == syntax.BinOp.Ne {
+      self.require_bound(span, lt, Bound.Eq)
+    } else if !self.tys.is_float(r) {
+      self.require_bound(span, lt, Bound.Ord)
+    }
+    return self.tys.bool
+  }
+  return self.check_arith(e, op, lhs, rhs, expected)
+}
+
+fn Sema.operand_mismatch(&mut self, span: syntax.Span, op: syntax.BinOp, lt: Int, rt: Int) {
+  let a = self.show(lt)
+  let b = self.show(rt)
+  let same_kind = match (self.tys.kinds[self.resolve(lt)], self.tys.kinds[self.resolve(rt)]) {
+    (Float(_), Float(_)) => true
+    (Int(x, _), Int(y, _)) => x == y
+    _ => false
+  }
+  if same_kind {
+    self.err("E0317", span, "mismatched units: `" + a + "` " + op.text() + " `" + b + "`")
+  } else {
+    self.err("E0306", span, "`" + op.text() + "` cannot combine `" + a + "` and `" + b + "`")
+  }
+}
+
+/// A number or a numeric literal's variable.
+fn Sema.numeric_kind(self, k: TyKind) -> Bool {
+  return match k {
+    Int(_, _) | Float(_) => true
+    Infer(v) => self.var_kind[v] != VarKind.General
+    _ => false
+  }
+}
+
+fn Sema.check_arith(
+  &mut self,
+  e: Int,
+  op: syntax.BinOp,
+  lhs: Int,
+  rhs: Int,
+  expected: Option<Int>,
+) -> Int {
+  let span = self.expr_span(e)
+  let additive = op == syntax.BinOp.Add || op == syntax.BinOp.Sub || op == syntax.BinOp.Rem
+  let lt = self.check_expr(lhs, if additive { expected } else { None })
+  let rt = if additive {
+    self.check_expr_no_report(rhs, Some(lt))
+  } else {
+    self.check_expr(rhs, None)
+  }
+  let ka = self.tys.kinds[self.resolve(lt)]
+  let kb = self.tys.kinds[self.resolve(rt)]
+  if ka == TyKind.Error || kb == TyKind.Error {
+    return self.tys.error
+  }
+  // String concatenation.
+  if op == syntax.BinOp.Add && (ka == TyKind.Str || kb == TyKind.Str) {
+    if !(ka == TyKind.Str && kb == TyKind.Str) {
+      self.err("E0306", span, "`+` cannot join `" + self.show(lt) + "` and `" + self.show(rt) + "`")
+    }
+    return self.tys.str
+  }
+  if !self.numeric_kind(ka) || !self.numeric_kind(kb) {
+    // Generic variables might be numbers later; force the issue now.
+    let a_infer = match ka {
+      Infer(_) => true
+      _ => false
+    }
+    if a_infer && self.unify(lt, rt) && self.numeric_kind(kb) {
+      return rt
+    }
+    let bad = if self.numeric_kind(ka) { self.show(rt) } else { self.show(lt) }
+    self.err("E0306", span, "`" + op.text() + "` needs numbers, found `" + bad + "`")
+    return self.tys.error
+  }
+  if additive {
+    if !self.unify(lt, rt) {
+      self.operand_mismatch(span, op, lt, rt)
+      return self.tys.error
+    }
+    return lt
+  }
+  // `*` and `/`: units combine. A literal operand is dimensionless.
+  let ra = self.default_lit_to(lt, rt)
+  let rb = self.default_lit_to(rt, lt)
+  let sign = if op == syntax.BinOp.Mul { 1 } else { -1 }
+  match (self.tys.kinds[ra], self.tys.kinds[rb]) {
+    (Int(x, u), Int(y, w)) => {
+      if x == y {
+        let un = self.tys.unit_mul(u, w, sign)
+        return self.tys.int_ty(x, un)
+      }
+    }
+    (Float(u), Float(w)) => {
+      let un = self.tys.unit_mul(u, w, sign)
+      return self.tys.float_ty(un)
+    }
+    (Infer(_), Infer(_)) => {
+      if !self.unify(ra, rb) {
+        self.operand_mismatch(span, op, lt, rt)
+      }
+      return ra
+    }
+    _ => {}
+  }
+  self.operand_mismatch(span, op, lt, rt)
+  return self.tys.error
+}
+
+/// If `t` is an unresolved variable and `other` a concrete number, bind `t` to the
+/// dimensionless version of `other`'s type.
+fn Sema.default_lit_to(&mut self, t: Int, other: Int) -> Int {
+  let r = self.resolve(t)
+  if self.tys.is_infer(r) {
+    let o = self.resolve(other)
+    if self.tys.is_numeric(o) {
+      let plain = self.tys.with_unit(o, 0)
+      if self.unify(r, plain) {
+        return plain
+      }
+    }
+  }
+  return r
+}
+
+fn Sema.lint_self_compare(&mut self, e: Int, lhs: Int, rhs: Int) {
+  match (self.ast.exprs[lhs].kind, self.ast.exprs[rhs].kind) {
+    (Name(a), Name(b)) => if a == b {
+      self.err("E0508", self.expr_span(e), "`" + a + "` is compared with itself")
+    }
+    _ => {}
+  }
+}
+
+fn Sema.check_cast(&mut self, inner: Int, ty: Int, span: syntax.Span) -> Int {
+  let target = self.resolve_type_expr(ty)
+  let src = self.check_expr(inner, None)
+  let rs = self.resolve(src)
+  let ok = match (self.tys.kinds[rs], self.tys.kinds[target]) {
+    (Error, _) | (_, Error) => true
+    (Int(_, _) | Float(_), Int(_, _) | Float(_)) => true
+    (Infer(v), Int(_, _) | Float(_)) => self.var_kind[v] != VarKind.General
+    (Char, Int(_, _)) | (Int(_, _), Char) => true
+    (Infer(v), Char) => self.var_kind[v] == VarKind.IntLit
+    _ => false
+  }
+  if !ok {
+    self.err("E0310", span, "cannot cast `" + self.show(src) + "` to `" + self.show(target) + "`")
+  }
+  return target
+}
+
+fn Sema.check_try(&mut self, inner: Int, span: syntax.Span) -> Int {
+  if self.ctx != Ctx.Code {
+    self.err("E0321", span, "`?` cannot be used in a contract")
+  }
+  let t = self.check_expr(inner, None)
+  let r = self.resolve(t)
+  let nc = self.closures.len()
+  let ret = if nc > 0 { self.closures[nc - 1].ret } else { self.ret_ty }
+  match self.tys.kinds[r] {
+    Adt(a, args) => {
+      if a == self.defs.result {
+        let err_ty = args[1]
+        let v = self.fresh()
+        let want = self.tys.adt(a, [v, err_ty])
+        if !self.unify(ret, want) {
+          let rs = self.show(ret)
+          let es = self.show(err_ty)
+          let msg = "`?` on `Result<_, " +
+            es +
+            ">` needs the function to return `Result<_, " +
+            es +
+            ">`, but it returns `" +
+            rs +
+            "`"
+          self.err("E0309", span, msg)
+        }
+        return args[0]
+      }
+      if a == self.defs.option {
+        let v = self.fresh()
+        let want = self.tys.adt(a, [v])
+        if !self.unify(ret, want) {
+          let msg = "`?` on an `Option` needs the function to return an `Option`, but it returns `" +
+            self.show(ret) +
+            "`"
+          self.err("E0309", span, msg)
+        }
+        return args[0]
+      }
+    }
+    Error => {
+      return self.tys.error
+    }
+    _ => {}
+  }
+  self.err("E0309", span, "`?` needs a `Result` or `Option`, found `" + self.show(t) + "`")
+  return self.tys.error
+}
+
+fn Sema.check_index(&mut self, e: Int, base: Int, index: Int) -> Int {
+  let span = self.expr_span(e)
+  let bt = self.check_expr(base, None)
+  let r = self.resolve(bt)
+  var is_range = false
+  match self.ast.exprs[index].kind {
+    Range(lo, hi) => {
+      is_range = true
+      let int = self.tys.int
+      match lo {
+        Some(l) => {
+          let _ = self.check_expr(l, Some(int))
+        }
+        None => {}
+      }
+      match hi {
+        Some(h) => {
+          let _ = self.check_expr(h, Some(int))
+        }
+        None => {}
+      }
+      let _ = self.record(index, int)
+    }
+    _ => {}
+  }
+  match self.tys.kinds[r] {
+    List(elem) => {
+      if is_range {
+        return bt
+      }
+      let _ = self.check_expr(index, Some(self.tys.int))
+      return elem
+    }
+    Str => {
+      if is_range {
+        return self.tys.str
+      }
+      let _ = self.check_expr(index, Some(self.tys.int))
+      return self.tys.u8
+    }
+    Map(_, _) => {
+      self.err("E0311", span, "maps cannot be indexed")
+      return self.tys.error
+    }
+    Error => {
+      return self.tys.error
+    }
+    Infer(_) => {
+      self.err("E0305", span, "type annotations needed: the indexed value's type is not known here")
+      return self.tys.error
+    }
+    _ => {
+      self.err("E0311", span, "`" + self.show(bt) + "` cannot be indexed")
+      return self.tys.error
+    }
+  }
+}
+
+// ---------- control flow ----------
+
+fn Sema.check_if(
+  &mut self,
+  e: Int,
+  cond: Int,
+  then: Int,
+  els: Option<Int>,
+  expected: Option<Int>,
+  as_value: Bool,
+) -> Int {
+  let span = self.expr_span(e)
+  self.check_bool(cond)
+  match self.ast.exprs[cond].kind {
+    Bool(v) => self.err("E0509", self.expr_span(cond), "condition is always `" + v.str() + "`")
+    _ => {}
+  }
+  self.diverges = false
+  var t1 = self.tys.unit_ty
+  if as_value {
+    t1 = self.check_block_value(then, expected)
+  } else {
+    self.check_block_stmts(then)
+  }
+  let _ = self.record(then, t1)
+  let d1 = self.diverges
+  var t2 = self.tys.unit_ty
+  var d2 = false
+  match els {
+    Some(el) => {
+      self.diverges = false
+      if as_value {
+        t2 = self.check_expr(el, expected)
+      } else {
+        match self.ast.exprs[el].kind {
+          If(c2, th2, el2) => {
+            let t = self.check_if(el, c2, th2, el2, None, false)
+            t2 = self.record(el, t)
+          }
+          _ => {
+            self.check_block_stmts(el)
+            t2 = self.record(el, self.tys.unit_ty)
+          }
+        }
+      }
+      d2 = self.diverges
+    }
+    None => {
+      let rt = self.resolve(t1)
+      if as_value && rt != self.tys.unit_ty && rt != self.tys.never && rt != self.tys.error {
+        self.err("E0301", span, "`if` without `else` has no value on the false path")
+        self.diverges = false
+        return self.tys.error
+      }
+    }
+  }
+  self.diverges = d1 && d2
+  if !as_value {
+    return if self.diverges { self.tys.never } else { self.tys.unit_ty }
+  }
+  let sp = match els {
+    Some(x) => self.expr_span(x)
+    None => span
+  }
+  let t = self.join(t1, t2, sp)
+  return if self.diverges { self.tys.never } else { t }
+}
+
+// ---------- struct literals ----------
+
+fn Sema.check_struct_lit(
+  &mut self,
+  e: Int,
+  ty: Int,
+  inits: List<syntax.FieldInit>,
+  expected: Option<Int>,
+) -> Int {
+  let span = self.expr_span(e)
+  let t = self.resolve_type_expr_infer(ty)
+  match expected {
+    Some(exp) => {
+      let _ = self.unify(t, exp)
+    }
+    None => {}
+  }
+  let r = self.resolve(t)
+  var adt = -1
+  var args: List<Int> = []
+  match self.tys.kinds[r] {
+    Adt(a, xs) => if !self.defs.adts[a].is_enum {
+      adt = a
+      args = xs
+    }
+    Error => {
+      for f in inits {
+        let _ = self.check_expr(f.value, None)
+      }
+      return self.tys.error
+    }
+    _ => {}
+  }
+  if adt < 0 {
+    self.err("E0324", span, "`" + self.show(t) + "` is not a struct")
+    return self.tys.error
+  }
+  let ad = self.defs.adts[adt]
+  let foreign = ad.pkg != self.pkg
+  var seen: List<Str> = []
+  for init in inits {
+    var found = -1
+    for i in 0..ad.fields.len() {
+      if ad.fields[i].name == init.name.text {
+        found = i
+        break
+      }
+    }
+    if found >= 0 {
+      if seen.contains(init.name.text) {
+        self.err("E0322", init.name.span, "field `" + init.name.text + "` is given twice")
+      }
+      seen.push(init.name.text)
+      if foreign && !ad.fields[found].is_pub {
+        self.err(
+          "E0206",
+          init.name.span,
+          "field `" + init.name.text + "` of `" + ad.name + "` is private",
+        )
+      }
+      let ft = self.tys.subst(ad.fields[found].ty, args)
+      let _ = self.check_expr(init.value, Some(ft))
+    } else {
+      self.err("E0206", init.name.span, "`" + ad.name + "` has no field `" + init.name.text + "`")
+      let _ = self.check_expr(init.value, None)
+    }
+  }
+  var missing: List<Str> = []
+  for f in ad.fields {
+    if !seen.contains(f.name) {
+      missing.push("`" + f.name + "`")
+    }
+  }
+  if !missing.is_empty() {
+    self.err(
+      "E0304",
+      span,
+      "missing field" + plural(missing.len()) + " " + missing.join(", ") + " in `" + ad.name + "`",
+    )
+  }
+  return r
+}
+
+// ---------- closures ----------
+
+fn Sema.check_closure(
+  &mut self,
+  e: Int,
+  ps: List<syntax.Param>,
+  ret: Option<Int>,
+  body: Int,
+  expected: Option<Int>,
+) -> Int {
+  let span = self.expr_span(e)
+  var has_exp = false
+  var eps: List<Int> = []
+  var exp_ret = 0
+  var exp_eff = 0
+  match expected {
+    Some(t) => match self.kind_of(t) {
+      Fn(xs, r, eff) => {
+        has_exp = true
+        eps = xs
+        exp_ret = r
+        exp_eff = eff
+      }
+      _ => {}
+    }
+    None => {}
+  }
+  if has_exp && eps.len() != ps.len() {
+    let msg = "this closure takes " +
+      ps.len().str() +
+      " parameter" +
+      plural(ps.len()) +
+      ", but " +
+      eps.len().str() +
+      (if eps.len() == 1 { " is" } else { " are" }) +
+      " expected"
+    self.err("E0302", span, msg)
+  }
+  var ptys: List<Int> = []
+  for i in 0..ps.len() {
+    let p = ps[i]
+    if p.mut_ref {
+      self.err("E0314", p.span, "closure parameters cannot be `&mut`")
+    }
+    let t = match p.ty {
+      Some(te) => {
+        let t = self.resolve_type_expr(te)
+        if has_exp && i < eps.len() {
+          if !self.unify(t, eps[i]) {
+            self.mismatch(p.span, eps[i], t)
+          }
+        }
+        t
+      }
+      None => if has_exp && i < eps.len() { eps[i] } else { self.fresh() }
+    }
+    ptys.push(t)
+  }
+  let ret_ty = match ret {
+    Some(te) => self.resolve_type_expr(te)
+    None => if has_exp { exp_ret } else { self.fresh() }
+  }
+  let allowed = if has_exp { Some(exp_eff) } else { None }
+  self.closures.push(
+    ClosureFrame {
+      ret: ret_ty
+      allowed: allowed
+      used: 0
+      captures: []
+      saved_loop_depth: self.loop_depth
+    },
+  )
+  self.loop_depth = 0
+  let saved_div = self.diverges
+  self.diverges = false
+  self.push_scope()
+  for i in 0..ps.len() {
+    let _ = self.declare_local(ps[i].name.text, ptys[i], LocalKind.Param, ps[i].name.span)
+  }
+  let vt = self.check_block_value(body, Some(ret_ty))
+  let _ = self.record(body, vt)
+  self.pop_scope()
+  self.diverges = saved_div
+  let frame = self.closures
+    .pop()
+    .unwrap_or(ClosureFrame { ret: 0, allowed: None, used: 0, captures: [], saved_loop_depth: 0 })
+  self.loop_depth = frame.saved_loop_depth
+  let eff = allowed.unwrap_or(frame.used)
+  return self.tys.func(ptys, ret_ty, eff)
+}

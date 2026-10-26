@@ -1,0 +1,1203 @@
+// Calls, method resolution, field access, type paths, places and `&mut` rules, ported from
+// the bootstrap compiler's `sema/check/call.rs`.
+
+import "syntax"
+
+/// A projection step in a place path, for `&mut` aliasing checks.
+enum Proj {
+  Field(name: Str)
+  Tuple(index: Int)
+  Index
+}
+
+// ---------- type expressions inside bodies ----------
+
+/// Resolve a type annotation written inside a body.
+fn Sema.resolve_type_expr(&mut self, te: Int) -> Int {
+  return self.resolve_type_expr_mode(te, false)
+}
+
+/// Like `resolve_type_expr`, but missing type arguments of a generic type become inference
+/// variables (for struct literals).
+fn Sema.resolve_type_expr_infer(&mut self, te: Int) -> Int {
+  return self.resolve_type_expr_mode(te, true)
+}
+
+fn Sema.resolve_type_exprs(&mut self, ids: List<Int>) -> List<Int> {
+  var out: List<Int> = []
+  for x in ids {
+    out.push(self.resolve_type_expr(x))
+  }
+  return out
+}
+
+fn Sema.resolve_type_expr_mode(&mut self, te: Int, infer_args: Bool) -> Int {
+  let t = self.ast.types[te]
+  match t.kind {
+    Tuple(elems) => {
+      let ts = self.resolve_type_exprs(elems)
+      return self.tys.tuple(ts)
+    }
+    Fn(params, ret, effect_names) => {
+      let ps = self.resolve_type_exprs(params)
+      let r = match ret {
+        Some(x) => self.resolve_type_expr(x)
+        None => self.tys.unit_ty
+      }
+      var eff = 0
+      match effect_names {
+        Some(names) => {
+          for n in names {
+            let b = effect_bit(n.text)
+            if b != 0 {
+              eff = eff | b
+            } else {
+              self.err("E0402", n.span, "unknown effect `" + n.text + "`")
+            }
+          }
+        }
+        None => {}
+      }
+      return self.tys.func(ps, r, eff)
+    }
+    Refined(base, _) => {
+      return self.resolve_type_expr_mode(base, infer_args)
+    }
+    Named(pkg, name, arg_ids, units) => {
+      var targs = self.resolve_type_exprs(arg_ids)
+      var def = Def.Unit
+      match pkg {
+        Some(p) => {
+          let target = match self.imported(p.text) {
+            Some(x) => x
+            None => {
+              self.err("E0201", p.span, "cannot find package `" + p.text + "`")
+              return self.tys.error
+            }
+          }
+          self.use_import(p.text)
+          match self.pkgs[target].scope.get(name.text) {
+            Some(d) => {
+              if !self.def_is_pub(d) {
+                self.err(
+                  "E0205",
+                  name.span,
+                  "`" + name.text + "` is private to package `" + self.pkgs[target].path + "`",
+                )
+              }
+              def = d
+            }
+            None => {
+              self.err(
+                "E0201",
+                name.span,
+                "package `" + self.pkgs[target].path + "` has no type `" + name.text + "`",
+              )
+              return self.tys.error
+            }
+          }
+        }
+        None => {
+          var gi = self.generics.len() - 1
+          for gi >= 0 {
+            if self.generics[gi].name == name.text {
+              return self.tys.param(gi, name.text)
+            }
+            gi -= 1
+          }
+          match builtin_type(name.text) {
+            Some(b) => {
+              var unit_id = 0
+              match units {
+                Some(fs) => {
+                  var out: List<Factor> = []
+                  for x in fs {
+                    if !self.units.contains(x.name.text) {
+                      let msg = "cannot find unit `" +
+                        x.name.text +
+                        "`; declare it with `unit " +
+                        x.name.text +
+                        "`"
+                      self.err("E0201", x.name.span, msg)
+                    }
+                    out.push(Factor { name: x.name.text, exp: x.exp })
+                  }
+                  unit_id = self.tys.unit_id(out)
+                }
+                None => {}
+              }
+              let want = builtin_arity(b)
+              if targs.is_empty() && want > 0 && infer_args {
+                targs = self.fresh_list(want)
+              }
+              if targs.len() != want {
+                self.err(
+                  "E0313",
+                  t.span,
+                  "`" + name.text + "` takes " + want.str() + " type argument" + plural(want),
+                )
+                return self.tys.error
+              }
+              return match b {
+                Int(k) => self.tys.int_ty(k, unit_id)
+                Float => self.tys.float_ty(unit_id)
+                Bool => self.tys.bool
+                Char => self.tys.char
+                Str => self.tys.str
+                Never => self.tys.never
+                List => self.tys.list(targs[0])
+                Set => self.tys.set(targs[0])
+                Map => self.tys.map_ty(targs[0], targs[1])
+              }
+            }
+            None => {}
+          }
+          match self.lookup_def(name.text) {
+            Some(d) => def = d
+            None => {
+              self.err("E0201", name.span, "cannot find type `" + name.text + "`")
+              return self.tys.error
+            }
+          }
+        }
+      }
+      match def {
+        Adt(a) => {
+          let n = self.defs.adts[a].generics.len()
+          if targs.is_empty() && n > 0 && infer_args {
+            targs = self.fresh_list(n)
+          }
+          if targs.len() != n {
+            let msg = "`" +
+              name.text +
+              "` takes " +
+              n.str() +
+              " type argument" +
+              plural(n) +
+              ", found " +
+              targs.len().str()
+            self.err("E0313", t.span, msg)
+            return self.tys.error
+          }
+          return self.tys.adt(a, targs)
+        }
+        Alias(al) => {
+          let n = self.defs.aliases[al].generics.len()
+          if targs.is_empty() && n > 0 && infer_args {
+            targs = self.fresh_list(n)
+          }
+          if targs.len() != n {
+            self.err("E0313", t.span, "`" + name.text + "` takes " + n.str() + " type arguments")
+            return self.tys.error
+          }
+          return self.tys.subst(self.defs.aliases[al].ty, targs)
+        }
+        Iface(_) => {
+          self.err(
+            "E0325",
+            name.span,
+            "interface `" + name.text + "` is not a type; use it as a bound",
+          )
+          return self.tys.error
+        }
+        _ => {
+          self.err("E0325", name.span, "`" + name.text + "` is not a type")
+          return self.tys.error
+        }
+      }
+    }
+  }
+}
+
+/// The type of a type definition named in an expression, with fresh type arguments.
+fn Sema.type_of_def(&mut self, def: Def) -> Option<Int> {
+  return match def {
+    Adt(a) => {
+      let args = self.fresh_list(self.defs.adts[a].generics.len())
+      Some(self.tys.adt(a, args))
+    }
+    Alias(al) => {
+      let args = self.fresh_list(self.defs.aliases[al].generics.len())
+      Some(self.tys.subst(self.defs.aliases[al].ty, args))
+    }
+    _ => None
+  }
+}
+
+/// If `e` names a type (`Shape`, `geom.Shape`, `List<Int>`), return it. Never reports, except
+/// for privacy and wrong type argument counts.
+fn Sema.try_type_path(&mut self, e: Int) -> Option<Int> {
+  match self.ast.exprs[e].kind {
+    Name(n) => {
+      if self.lookup_local(n).is_some() {
+        return None
+      }
+      var gi = self.generics.len() - 1
+      for gi >= 0 {
+        if self.generics[gi].name == n {
+          return Some(self.tys.param(gi, n))
+        }
+        gi -= 1
+      }
+      match builtin_type(n) {
+        Some(b) => {
+          let t = match b {
+            Int(k) => self.tys.int_ty(k, 0)
+            Float => self.tys.float
+            Bool => self.tys.bool
+            Char => self.tys.char
+            Str => self.tys.str
+            Never => self.tys.never
+            List => {
+              let v = self.fresh()
+              self.tys.list(v)
+            }
+            Set => {
+              let v = self.fresh()
+              self.tys.set(v)
+            }
+            Map => {
+              let k = self.fresh()
+              let v = self.fresh()
+              self.tys.map_ty(k, v)
+            }
+          }
+          return Some(t)
+        }
+        None => {}
+      }
+      return match self.lookup_def(n) {
+        Some(d) => self.type_of_def(d)
+        None => None
+      }
+    }
+    Field(base, name) => {
+      let p = match self.ast.exprs[base].kind {
+        Name(p) => p
+        _ => {
+          return None
+        }
+      }
+      if self.lookup_local(p).is_some() {
+        return None
+      }
+      let target = match self.imported(p) {
+        Some(x) => x
+        None => {
+          return None
+        }
+      }
+      let def = match self.pkgs[target].scope.get(name.text) {
+        Some(d) => d
+        None => {
+          return None
+        }
+      }
+      let t = match self.type_of_def(def) {
+        Some(x) => x
+        None => {
+          return None
+        }
+      }
+      self.use_import(p)
+      if !self.def_is_pub(def) {
+        self.err(
+          "E0205",
+          name.span,
+          "`" + name.text + "` is private to package `" + self.pkgs[target].path + "`",
+        )
+      }
+      return Some(t)
+    }
+    TypeArgs(base, args) => {
+      let bt = match self.try_type_path(base) {
+        Some(x) => x
+        None => {
+          return None
+        }
+      }
+      let targs = self.resolve_type_exprs(args)
+      let r = self.resolve(bt)
+      let built = match self.tys.kinds[r] {
+        Adt(a, old) => if old.len() == targs.len() { self.tys.adt(a, targs) } else { -1 }
+        List(_) => if targs.len() == 1 { self.tys.list(targs[0]) } else { -1 }
+        Set(_) => if targs.len() == 1 { self.tys.set(targs[0]) } else { -1 }
+        Map(_, _) => if targs.len() == 2 { self.tys.map_ty(targs[0], targs[1]) } else { -1 }
+        _ => -1
+      }
+      if built < 0 {
+        self.err("E0313", self.expr_span(e), "wrong number of type arguments")
+        return Some(self.tys.error)
+      }
+      return Some(built)
+    }
+    _ => {
+      return None
+    }
+  }
+}
+
+// ---------- field access ----------
+
+fn Sema.check_field(&mut self, e: Int, base: Int, name: syntax.Name, expected: Option<Int>) -> Int {
+  let span = self.expr_span(e)
+  // A package member.
+  match self.ast.exprs[base].kind {
+    Name(p) => {
+      if self.lookup_local(p).is_none() {
+        match self.imported(p) {
+          Some(target) => {
+            self.use_import(p)
+            self.set_res(base, Res.Pkg(target))
+            match self.pkgs[target].scope.get(name.text) {
+              Some(def) => {
+                if !self.def_is_pub(def) {
+                  self.err(
+                    "E0205",
+                    name.span,
+                    "`" + name.text + "` is private to package `" + self.pkgs[target].path + "`",
+                  )
+                }
+                return self.value_of_def(e, def, name.text, span, None)
+              }
+              None => {
+                self.err(
+                  "E0201",
+                  name.span,
+                  "package `" + self.pkgs[target].path + "` has no item `" + name.text + "`",
+                )
+                return self.tys.error
+              }
+            }
+          }
+          None => {}
+        }
+      }
+    }
+    _ => {}
+  }
+  // A type path: `Shape.Empty`, `Shape.Circle` (a constructor), `Point.origin`.
+  match self.try_type_path(base) {
+    Some(t) => {
+      let _ = self.record(base, t)
+      self.set_res(base, Res.Type(t))
+      let r = self.resolve(t)
+      match self.tys.kinds[r] {
+        Adt(a, args) => {
+          let vs = self.defs.adts[a].variants
+          for vi in 0..vs.len() {
+            if vs[vi].name == name.text {
+              return self.variant_value(e, a, vi, Some(args), expected)
+            }
+          }
+        }
+        _ => {}
+      }
+      match ty_key(self.tys, r) {
+        Some(key) => match self.defs.method(key, name.text) {
+          Some(f) => {
+            if self.defs.fns[f].self_mode.is_none() {
+              let recv = self.type_args_of(r)
+              let inst = self.instantiate(f, recv, None, span)
+              let fd = self.defs.fns[f]
+              var ptys: List<Int> = []
+              for p in fd.params {
+                ptys.push(self.tys.subst(p.ty, inst))
+              }
+              let ret = self.tys.subst(fd.ret, inst)
+              self.set_res(e, Res.Fn(f))
+              self.add_ref(f)
+              return self.tys.func(ptys, ret, fd.eff)
+            }
+          }
+          None => {}
+        }
+        None => {}
+      }
+      self.err(
+        "E0207",
+        name.span,
+        "`" + self.show(t) + "` has no variant or associated function `" + name.text + "`",
+      )
+      return self.tys.error
+    }
+    None => {}
+  }
+  // A value's field.
+  let bt = self.check_expr(base, None)
+  let r = self.resolve(bt)
+  match self.tys.kinds[r] {
+    Adt(a, args) => {
+      let ad = self.defs.adts[a]
+      if !ad.is_enum {
+        for i in 0..ad.fields.len() {
+          let f = ad.fields[i]
+          if f.name == name.text {
+            if ad.pkg != self.pkg && !f.is_pub {
+              self.err(
+                "E0206",
+                name.span,
+                "field `" + name.text + "` of `" + ad.name + "` is private",
+              )
+            }
+            self.set_res(e, Res.Field(i))
+            self.note_field_read(a, i)
+            return self.tys.subst(f.ty, args)
+          }
+        }
+      }
+      return self.no_field(r, name)
+    }
+    Error => {
+      return self.tys.error
+    }
+    Infer(_) => {
+      self.err("E0305", span, "type annotations needed: the value's type is not known here")
+      return self.tys.error
+    }
+    _ => {
+      return self.no_field(r, name)
+    }
+  }
+}
+
+fn Sema.no_field(&mut self, t: Int, name: syntax.Name) -> Int {
+  self.err("E0206", name.span, "`" + self.show(t) + "` has no field `" + name.text + "`")
+  return self.tys.error
+}
+
+// ---------- calls ----------
+
+fn Sema.check_args_untyped(&mut self, args: List<Int>) {
+  for a in args {
+    let _ = self.check_expr(a, None)
+  }
+}
+
+fn Sema.check_call(&mut self, e: Int, callee: Int, args: List<Int>, expected: Option<Int>) -> Int {
+  let span = self.expr_span(e)
+  match self.ast.exprs[callee].kind {
+    Field(base, name) => {
+      return self.check_field_call(e, callee, base, name, args, expected)
+    }
+    Name(n) => {
+      if self.lookup_local(n).is_none() {
+        if n == "old" {
+          if self.ctx != Ctx.Ensures {
+            self.err("E0320", span, "`old(...)` is only available in `ensures` clauses")
+          }
+          self.set_res(callee, Res.Old)
+          if args.len() != 1 {
+            self.err("E0302", span, "`old` takes one argument")
+            return self.tys.error
+          }
+          let t = self.check_expr(args[0], expected)
+          let _ = self.record(callee, t)
+          return t
+        }
+        if !(n == "result" && self.ctx == Ctx.Ensures) {
+          match self.lookup_def(n) {
+            Some(Fn(f)) => {
+              self.set_res(callee, Res.Fn(f))
+              return self.call_fn(e, callee, f, [], None, args, None, expected)
+            }
+            Some(Adt(_)) | Some(Alias(_)) => {
+              self.err("E0326", span, "`" + n + "` is a type and cannot be called")
+              self.check_args_untyped(args)
+              return self.tys.error
+            }
+            _ => {}
+          }
+          match self.prelude_variant(n) {
+            Some((adt, v)) => {
+              return self.construct_variant(e, callee, adt, v, None, args, expected)
+            }
+            None => {}
+          }
+        }
+      }
+    }
+    TypeArgs(base, targs) => {
+      match self.ast.exprs[base].kind {
+        Name(n) => {
+          if self.lookup_local(n).is_none() {
+            match self.lookup_def(n) {
+              Some(Fn(f)) => {
+                let explicit = self.resolve_type_exprs(targs)
+                self.set_res(callee, Res.Fn(f))
+                self.set_res(base, Res.Fn(f))
+                return self.call_fn(e, callee, f, [], Some(explicit), args, None, expected)
+              }
+              _ => {}
+            }
+          }
+        }
+        _ => {}
+      }
+    }
+    _ => {}
+  }
+  let ct = self.check_expr(callee, None)
+  return self.call_value(ct, args, span)
+}
+
+fn Sema.call_value(&mut self, ct: Int, args: List<Int>, span: syntax.Span) -> Int {
+  let r = self.resolve(ct)
+  match self.tys.kinds[r] {
+    Fn(ps, ret, eff) => {
+      if ps.len() != args.len() {
+        let msg = "this function takes " +
+          ps.len().str() +
+          " argument" +
+          plural(ps.len()) +
+          ", but " +
+          args.len().str() +
+          (if args.len() == 1 { " was" } else { " were" }) +
+          " given"
+        self.err("E0302", span, msg)
+      }
+      for i in 0..args.len() {
+        let a = args[i]
+        match self.ast.exprs[a].kind {
+          MutArg(inner) => {
+            self.err(
+              "E0314",
+              self.expr_span(a),
+              "function values take their arguments by value; remove `&mut`",
+            )
+            let _ = self.check_expr(inner, None)
+            continue
+          }
+          _ => {}
+        }
+        let _ = self.check_expr(a, if i < ps.len() { Some(ps[i]) } else { None })
+      }
+      self.use_effects(eff, span, "calling this function value")
+      return ret
+    }
+    Error => {
+      self.check_args_untyped(args)
+      return self.tys.error
+    }
+    _ => {
+      self.err("E0303", span, "`" + self.show(ct) + "` is not a function")
+      self.check_args_untyped(args)
+      return self.tys.error
+    }
+  }
+}
+
+fn Sema.construct_variant(
+  &mut self,
+  e: Int,
+  callee: Int,
+  adt: Int,
+  v: Int,
+  targs: Option<List<Int>>,
+  args: List<Int>,
+  expected: Option<Int>,
+) -> Int {
+  let span = self.expr_span(e)
+  let n = self.defs.adts[adt].generics.len()
+  let ta = match targs {
+    Some(t) => t
+    None => self.fresh_list(n)
+  }
+  let ty = self.tys.adt(adt, ta)
+  match expected {
+    Some(exp) => {
+      let _ = self.unify(ty, exp)
+    }
+    None => {}
+  }
+  self.set_res(callee, Res.Variant(adt, v))
+  self.note_variant_built(adt, v)
+  let fields = self.variant_field_tys(adt, v)
+  let vname = self.defs.adts[adt].variants[v].name
+  if fields.is_empty() {
+    self.err("E0303", span, "variant `" + vname + "` has no fields; write it without parentheses")
+  } else if fields.len() != args.len() {
+    let msg = "variant `" +
+      vname +
+      "` takes " +
+      fields.len().str() +
+      " value" +
+      plural(fields.len()) +
+      ", but " +
+      args.len().str() +
+      (if args.len() == 1 { " was" } else { " were" }) +
+      " given"
+    self.err("E0302", span, msg)
+  }
+  for i in 0..args.len() {
+    let ft = if i < fields.len() { Some(self.tys.subst(fields[i], ta)) } else { None }
+    let _ = self.check_expr(args[i], ft)
+  }
+  let ps = self.tys.subst_all(fields, ta)
+  let ct = self.tys.func(ps, ty, 0)
+  let _ = self.record(callee, ct)
+  return ty
+}
+
+fn Sema.check_field_call(
+  &mut self,
+  e: Int,
+  callee: Int,
+  base: Int,
+  name: syntax.Name,
+  args: List<Int>,
+  expected: Option<Int>,
+) -> Int {
+  let span = self.expr_span(e)
+  // `pkg.func(...)`
+  match self.ast.exprs[base].kind {
+    Name(p) => {
+      if self.lookup_local(p).is_none() {
+        match self.imported(p) {
+          Some(target) => {
+            self.use_import(p)
+            self.set_res(base, Res.Pkg(target))
+            match self.pkgs[target].scope.get(name.text) {
+              Some(Fn(f)) => {
+                if !self.defs.fns[f].is_pub {
+                  self.err(
+                    "E0205",
+                    name.span,
+                    "`" + name.text + "` is private to package `" + self.pkgs[target].path + "`",
+                  )
+                }
+                self.set_res(callee, Res.Fn(f))
+                return self.call_fn(e, callee, f, [], None, args, None, expected)
+              }
+              Some(_) => {}
+              None => {
+                self.err(
+                  "E0201",
+                  name.span,
+                  "package `" + self.pkgs[target].path + "` has no function `" + name.text + "`",
+                )
+                self.check_args_untyped(args)
+                return self.tys.error
+              }
+            }
+          }
+          None => {}
+        }
+      }
+    }
+    _ => {}
+  }
+  // `Type.assoc(...)` and `Enum.Variant(...)`
+  match self.try_type_path(base) {
+    Some(t) => {
+      let _ = self.record(base, t)
+      self.set_res(base, Res.Type(t))
+      let r = self.resolve(t)
+      match self.tys.kinds[r] {
+        Adt(a, targs) => {
+          let vs = self.defs.adts[a].variants
+          for vi in 0..vs.len() {
+            if vs[vi].name == name.text {
+              return self.construct_variant(e, callee, a, vi, Some(targs), args, expected)
+            }
+          }
+        }
+        _ => {}
+      }
+      match ty_key(self.tys, r) {
+        Some(key) => match self.defs.method(key, name.text) {
+          Some(f) => {
+            if self.defs.fns[f].self_mode.is_some() {
+              let msg = "`" +
+                name.text +
+                "` is a method of `" +
+                self.show(t) +
+                "`; call it on a value: `x." +
+                name.text +
+                "(...)`"
+              self.err("E0327", name.span, msg)
+              return self.tys.error
+            }
+            let recv = self.type_args_of(r)
+            self.set_res(callee, Res.Fn(f))
+            return self.call_fn(e, callee, f, recv, None, args, None, expected)
+          }
+          None => {}
+        }
+        None => {}
+      }
+      self.err(
+        "E0207",
+        name.span,
+        "`" + self.show(t) + "` has no variant or associated function `" + name.text + "`",
+      )
+      self.check_args_untyped(args)
+      return self.tys.error
+    }
+    None => {}
+  }
+  // A method call on a value.
+  let bt = self.check_expr(base, None)
+  var r = self.resolve(bt)
+  var kind = self.tys.kinds[r]
+  if kind == TyKind.Error {
+    // Already reported; avoid follow-on lints about the receiver.
+    match self.place_root(base) {
+      Some(root) => self.body.locals[root].mutated = true
+      None => {}
+    }
+    self.check_args_untyped(args)
+    return self.tys.error
+  }
+  match kind {
+    Infer(v) => if self.var_kind[v] != VarKind.General {
+      // A numeric literal: default it, as it would be at the end of the body.
+      let d = if self.var_kind[v] == VarKind.IntLit { self.tys.int } else { self.tys.float }
+      let _ = self.unify(r, d)
+      kind = self.tys.kinds[d]
+    }
+    _ => {}
+  }
+  r = self.resolve(r)
+  match kind {
+    Infer(_) => {
+      self.err(
+        "E0305",
+        self.expr_span(base),
+        "type annotations needed before calling `." + name.text + "()`",
+      )
+      self.check_args_untyped(args)
+      return self.tys.error
+    }
+    _ => {}
+  }
+  // Numbers with units: look up on the plain type, and put the unit back on the result.
+  let u0 = self.tys.unit_of(r)
+  let has_unit = u0 > 0
+  let lookup_ty = if has_unit { self.tys.with_unit(r, 0) } else { r }
+  match ty_key(self.tys, lookup_ty) {
+    Some(key) => match self.defs.method(key, name.text) {
+      Some(f) => {
+        let fd = self.defs.fns[f]
+        if fd.self_mode.is_none() {
+          let msg = "`" +
+            name.text +
+            "` is an associated function; call it as `" +
+            self.show(r) +
+            "." +
+            name.text +
+            "(...)`"
+          self.err("E0327", name.span, msg)
+          return self.tys.error
+        }
+        // A custom `str` customizes `Show` everywhere, like the derived one it replaces.
+        if !fd.is_pub && fd.pkg != self.pkg && name.text != "str" {
+          self.err("E0205", name.span, "method `" + name.text + "` is private")
+        }
+        var recv_place: Option<Int> = None
+        if fd.self_mode == Some(Mode.MutRef) {
+          self.require_mut_place(base, "call a `&mut self` method on")
+          recv_place = Some(base)
+        }
+        let recv_args = self.type_args_of(lookup_ty)
+        self.set_res(callee, Res.Method(f))
+        let t = self.call_fn(e, callee, f, recv_args, None, args, recv_place, expected)
+        if has_unit && self.resolve(t) == lookup_ty {
+          if name.text == "sqrt" {
+            return self.sqrt_unit(r, span)
+          }
+          return r
+        }
+        return t
+      }
+      None => {}
+    }
+    None => {}
+  }
+  // Through a generic bound.
+  match kind {
+    Param(i, pname) => {
+      let bounds = if i < self.generics.len() { self.generics[i].bounds } else { [] }
+      for b in bounds {
+        match b {
+          Iface(iid) => {
+            let ms = self.defs.ifaces[iid].methods
+            for mi in 0..ms.len() {
+              let mf = ms[mi]
+              if self.defs.fns[mf].name == name.text {
+                self.set_res(callee, Res.IfaceMethod(iid, mi))
+                if !self.body.dyn_methods.contains(name.text) {
+                  self.body.dyn_methods.push(name.text)
+                }
+                if self.defs.fns[mf].self_mode == Some(Mode.MutRef) {
+                  self.require_mut_place(base, "call a `&mut self` method on")
+                }
+                return self.call_sig(mf, [r], args, span)
+              }
+            }
+          }
+          _ => {}
+        }
+      }
+      if name.text == "str" && bounds.contains(Bound.Show) {
+        self.set_res(callee, Res.BoundMethod(Bound.Show))
+        if !self.body.dyn_methods.contains(name.text) {
+          self.body.dyn_methods.push(name.text)
+        }
+        if !args.is_empty() {
+          self.err("E0302", span, "`str` takes no arguments")
+        }
+        return self.tys.str
+      }
+      self.err(
+        "E0207",
+        name.span,
+        "type parameter `" + pname + "` has no method `" + name.text + "`",
+      )
+      return self.tys.error
+    }
+    _ => {}
+  }
+  // The built-in `.str()`.
+  if name.text == "str" {
+    if !args.is_empty() {
+      self.err("E0302", span, "`str` takes no arguments")
+    }
+    var seen: Set<(Int, Bound)> = Set.new()
+    if !self.satisfies(r, Bound.Show, &mut seen) {
+      self.err("E0312", span, "`" + self.show(r) + "` cannot be shown")
+    }
+    self.set_res(callee, Res.BoundMethod(Bound.Show))
+    self.body.derived_exprs.push(base)
+    return self.tys.str
+  }
+  // A field holding a function.
+  match kind {
+    Adt(a, targs) => {
+      let ad = self.defs.adts[a]
+      for i in 0..ad.fields.len() {
+        if ad.fields[i].name == name.text {
+          let ft = self.tys.subst(ad.fields[i].ty, targs)
+          match self.tys.kinds[ft] {
+            Fn(_, _, _) => {
+              self.set_res(callee, Res.Field(i))
+              self.note_field_read(a, i)
+              let _ = self.record(callee, ft)
+              return self.call_value(ft, args, span)
+            }
+            _ => {}
+          }
+        }
+      }
+    }
+    _ => {}
+  }
+  self.err("E0207", name.span, "`" + self.show(r) + "` has no method `" + name.text + "`")
+  self.check_args_untyped(args)
+  return self.tys.error
+}
+
+fn Sema.sqrt_unit(&mut self, t: Int, span: syntax.Span) -> Int {
+  let u = self.tys.unit_of(t)
+  let fs = self.tys.units[u]
+  var half: List<Factor> = []
+  for f in fs {
+    if f.exp % 2 != 0 {
+      self.err("E0317", span, "the square root of `" + self.show(t) + "` has no whole-number unit")
+      return self.tys.error
+    }
+    half.push(Factor { name: f.name, exp: f.exp / 2 })
+  }
+  let nu = self.tys.unit_id(half)
+  return self.tys.with_unit(t, nu)
+}
+
+/// Call through an interface method signature with `Self := recv[0]`.
+fn Sema.call_sig(&mut self, f: Int, recv: List<Int>, args: List<Int>, span: syntax.Span) -> Int {
+  let fd = self.defs.fns[f]
+  if fd.params.len() != args.len() {
+    let msg = "`" +
+      fd.name +
+      "` takes " +
+      fd.params.len().str() +
+      " argument" +
+      plural(fd.params.len()) +
+      ", but " +
+      args.len().str() +
+      (if args.len() == 1 { " was" } else { " were" }) +
+      " given"
+    self.err("E0302", span, msg)
+  }
+  var places: List<Int> = []
+  for i in 0..args.len() {
+    if i >= fd.params.len() {
+      let _ = self.check_expr(args[i], None)
+      continue
+    }
+    let pt = self.tys.subst(fd.params[i].ty, recv)
+    self.check_arg(args[i], pt, fd.params[i].mode, &mut places)
+  }
+  self.check_disjoint(places)
+  self.use_effects(fd.eff, span, "`" + fd.name + "`")
+  return self.tys.subst(fd.ret, recv)
+}
+
+fn Sema.check_arg(&mut self, a: Int, pt: Int, mode: Mode, places: &mut List<Int>) {
+  let asp = self.expr_span(a)
+  let kind = self.ast.exprs[a].kind
+  match mode {
+    MutRef => match kind {
+      MutArg(place) => {
+        let t = self.check_expr_quiet(place)
+        self.require_mut_place(place, "pass as `&mut`")
+        if !self.unify(t, pt) {
+          self.mismatch(self.expr_span(place), pt, t)
+        }
+        let _ = self.record(a, t)
+        places.push(place)
+      }
+      _ => {
+        self.err("E0314", asp, "this parameter is `&mut`: pass a mutable place with `&mut`")
+        let _ = self.check_expr(a, Some(pt))
+      }
+    }
+    Value => match kind {
+      MutArg(inner) => {
+        self.err("E0314", asp, "this parameter takes its argument by value; remove `&mut`")
+        let t = self.check_expr(inner, Some(pt))
+        let _ = self.record(a, t)
+      }
+      _ => {
+        let _ = self.check_expr(a, Some(pt))
+      }
+    }
+  }
+}
+
+/// Type-check an expression used as a place without counting it as a read.
+fn Sema.check_expr_quiet(&mut self, e: Int) -> Int {
+  let root = self.place_root(e)
+  let t = self.check_expr(e, None)
+  match root {
+    Some(r) => self.body.locals[r].used = true
+    None => {}
+  }
+  return t
+}
+
+fn Sema.fn_display_name(self, f: Int) -> Str {
+  let fd = self.defs.fns[f]
+  return match fd.recv {
+    Some(k) => self.tykey_name(k) + "." + fd.name
+    None => fd.name
+  }
+}
+
+fn Sema.tykey_name(self, k: TyKey) -> Str {
+  return match k {
+    Adt(a) => self.defs.adts[a].name
+    Int(i) => i.name()
+    Float => "Float"
+    Bool => "Bool"
+    Char => "Char"
+    Str => "Str"
+    List => "List"
+    Map => "Map"
+    Set => "Set"
+  }
+}
+
+fn Sema.call_fn(
+  &mut self,
+  e: Int,
+  callee: Int,
+  f: Int,
+  recv: List<Int>,
+  explicit: Option<List<Int>>,
+  args: List<Int>,
+  recv_place: Option<Int>,
+  expected: Option<Int>,
+) -> Int {
+  let span = self.expr_span(e)
+  let inst = self.instantiate(f, recv, explicit, span)
+  self.add_ref(f)
+  let fd = self.defs.fns[f]
+  let display = self.fn_display_name(f)
+  let ret = self.tys.subst(fd.ret, inst)
+  match expected {
+    Some(exp) => if self.tys.has_vars(ret) {
+      let _ = self.unify(ret, exp)
+    }
+    None => {}
+  }
+  if fd.params.len() != args.len() {
+    let msg = "`" +
+      display +
+      "` takes " +
+      fd.params.len().str() +
+      " argument" +
+      plural(fd.params.len()) +
+      ", but " +
+      args.len().str() +
+      (if args.len() == 1 { " was" } else { " were" }) +
+      " given"
+    self.err("E0302", span, msg)
+  }
+  var places: List<Int> = []
+  match recv_place {
+    Some(p) => places.push(p)
+    None => {}
+  }
+  var mutates = false
+  for p in fd.params {
+    if p.mode == Mode.MutRef {
+      mutates = true
+    }
+  }
+  for i in 0..args.len() {
+    if i >= fd.params.len() {
+      let _ = self.check_expr(args[i], None)
+      continue
+    }
+    let pt = self.tys.subst(fd.params[i].ty, inst)
+    self.check_arg(args[i], pt, fd.params[i].mode, &mut places)
+  }
+  self.check_disjoint(places)
+  if self.ctx != Ctx.Code && mutates {
+    self.err("E0321", span, "contracts must be pure, but `" + display + "` mutates its arguments")
+  }
+  self.use_effects(fd.eff, span, "`" + display + "`")
+  var ps: List<Int> = []
+  for p in fd.params {
+    ps.push(self.tys.subst(p.ty, inst))
+  }
+  let callee_ty = self.tys.func(ps, ret, fd.eff)
+  let _ = self.record(callee, callee_ty)
+  return ret
+}
+
+// ---------- places ----------
+
+/// The local at the root of a place expression (`a.b[i].c` is rooted at `a`).
+fn Sema.place_root(self, e: Int) -> Option<Int> {
+  return match self.ast.exprs[e].kind {
+    Name(n) => self.lookup_local(n)
+    Field(base, _) | TupleField(base, _, _) | Index(base, _) => self.place_root(base)
+    Paren(inner) => self.place_root(inner)
+    _ => None
+  }
+}
+
+fn Sema.place_path(self, e: Int, out: &mut List<Proj>) -> Option<Int> {
+  match self.ast.exprs[e].kind {
+    Name(n) => {
+      return self.lookup_local(n)
+    }
+    Field(base, name) => {
+      let r = self.place_path(base, &mut out)
+      out.push(Proj.Field(name.text))
+      return r
+    }
+    TupleField(base, index, _) => {
+      let r = self.place_path(base, &mut out)
+      out.push(Proj.Tuple(index))
+      return r
+    }
+    Index(base, _) => {
+      let r = self.place_path(base, &mut out)
+      out.push(Proj.Index)
+      return r
+    }
+    Paren(inner) => {
+      return self.place_path(inner, &mut out)
+    }
+    _ => {
+      return None
+    }
+  }
+}
+
+/// Require `e` to be a mutable place (for assignment, `&mut` arguments, `&mut self`).
+fn Sema.require_mut_place(&mut self, e: Int, what: Str) {
+  let span = self.expr_span(e)
+  if !self.is_place(e) {
+    self.err("E0314", span, "can only " + what + " a variable, a field or a list element")
+    return
+  }
+  if self.ctx != Ctx.Code {
+    self.err("E0321", span, "contracts must be pure and cannot mutate anything")
+    return
+  }
+  if self.is_str_index(e) {
+    self.err("E0307", span, "strings are immutable; build a new `Str` instead")
+    match self.place_root(e) {
+      Some(root) => self.body.locals[root].mutated = true
+      None => {}
+    }
+    return
+  }
+  let root = match self.place_root(e) {
+    Some(r) => r
+    None => {
+      return
+    }
+  }
+  let l = self.body.locals[root]
+  if l.depth < self.closures.len() {
+    self.err("E0307", span, "cannot mutate `" + l.name + "` inside a closure")
+    return
+  }
+  if !l.is_mutable() {
+    self.err("E0307", span, "cannot " + what + " `" + l.name + "`, which is not mutable")
+    return
+  }
+  self.body.locals[root].mutated = true
+}
+
+fn Sema.is_place(self, e: Int) -> Bool {
+  return match self.ast.exprs[e].kind {
+    Name(n) => self.lookup_local(n).is_some()
+    Field(base, _) | TupleField(base, _, _) | Index(base, _) => self.is_place(base)
+    Paren(inner) => self.is_place(inner)
+    _ => false
+  }
+}
+
+fn Sema.is_str_index(self, e: Int) -> Bool {
+  return match self.ast.exprs[e].kind {
+    Index(base, _) => self.tys.kinds[self.resolve(self.tab.expr_ty[base])] == TyKind.Str
+    _ => false
+  }
+}
+
+fn Sema.check_disjoint(&mut self, places: List<Int>) {
+  if places.len() < 2 {
+    return
+  }
+  var roots: List<Option<Int>> = []
+  var paths: List<List<Proj>> = []
+  for p in places {
+    var v: List<Proj> = []
+    roots.push(self.place_path(p, &mut v))
+    paths.push(v)
+  }
+  for i in 0..paths.len() {
+    for j in 0..i {
+      if roots[i].is_none() || roots[i] != roots[j] {
+        continue
+      }
+      let pi = paths[i]
+      let pj = paths[j]
+      let n = if pi.len() < pj.len() { pi.len() } else { pj.len() }
+      var overlap = true
+      for k in 0..n {
+        if pi[k] != pj[k] && !(pi[k] == Proj.Index && pj[k] == Proj.Index) {
+          overlap = false
+        }
+      }
+      if overlap {
+        self.err("E0315", self.expr_span(places[i]), "this `&mut` argument overlaps another one")
+      }
+    }
+  }
+}

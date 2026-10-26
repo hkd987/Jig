@@ -1,0 +1,356 @@
+// Match exhaustiveness and redundancy (Maranget's usefulness algorithm), with a witness for
+// the first missing case. Ported from the bootstrap compiler's `sema/exhaust.rs`.
+
+enum Ctor {
+  Variant(index: Int)
+  Bool(v: Bool)
+  Tuple
+  Int(neg: Bool, mag: U64)
+  Str(v: Str)
+  Char(v: Int)
+  /// Something not reasoned about (floats, errors): matches nothing specific.
+  Opaque
+}
+
+enum P {
+  Wild
+  Ctor(c: Ctor, args: List<P>)
+  Or(alts: List<P>)
+}
+
+struct Report {
+  /// A rendering of a value no arm matches.
+  missing: Option<Str>
+  /// Indices of arms that can never match.
+  unreachable: List<Int>
+}
+
+fn int_ctor(neg: Bool, mag: U64) -> Ctor {
+  return Ctor.Int(neg && mag != 0, mag)
+}
+
+fn Sema.exhaust(&mut self, scrut: Int, arms: List<(Int, Bool)>) -> Report {
+  var budget = 100000
+  var rows: List<List<P>> = []
+  var unreachable: List<Int> = []
+  var lowered: List<P> = []
+  for (p, _) in arms {
+    lowered.push(self.lower_pat(p))
+  }
+  for i in 0..arms.len() {
+    let p = lowered[i]
+    if self.useful(rows, [p], [scrut], &mut budget).is_none() {
+      unreachable.push(i)
+    }
+    if !arms[i].1 {
+      rows.push([p])
+    }
+  }
+  let missing = match self.useful(rows, [P.Wild], [scrut], &mut budget) {
+    Some(w) => Some(self.render_pat(w[0], scrut))
+    None => None
+  }
+  if budget == 0 {
+    return Report { missing: None, unreachable: [] }
+  }
+  return Report { missing: missing, unreachable: unreachable }
+}
+
+fn Sema.lower_pats(self, ps: List<Int>) -> List<P> {
+  var out: List<P> = []
+  for a in ps {
+    out.push(self.lower_pat(a))
+  }
+  return out
+}
+
+fn Sema.lower_pat(self, p: Int) -> P {
+  return match self.ast.pats[p].kind {
+    Wild | Bind(_) => P.Wild
+    Lit(e) => match self.ast.exprs[e].kind {
+      Int(v) => P.Ctor(int_ctor(false, v), [])
+      Unary(op, inner) => match (op, self.ast.exprs[inner].kind) {
+        (Neg, Int(v)) => P.Ctor(int_ctor(true, v), [])
+        _ => P.Ctor(Ctor.Opaque, [])
+      }
+      Bool(b) => P.Ctor(Ctor.Bool(b), [])
+      Str(s) => P.Ctor(Ctor.Str(s), [])
+      Char(c) => if self.tys.is_int(self.tab.pat_ty[p]) {
+        P.Ctor(int_ctor(false, c as U64), [])
+      } else {
+        P.Ctor(Ctor.Char(c), [])
+      }
+      _ => P.Ctor(Ctor.Opaque, [])
+    }
+    Variant(_, args, _) => match self.tab.pat_variant.get(p) {
+      Some((_, vi)) => P.Ctor(Ctor.Variant(vi), self.lower_pats(args))
+      None => P.Ctor(Ctor.Opaque, [])
+    }
+    Tuple(elems) => P.Ctor(Ctor.Tuple, self.lower_pats(elems))
+    Or(alts) => P.Or(self.lower_pats(alts))
+  }
+}
+
+/// All constructors of a type, if finitely many.
+fn Sema.all_ctors(self, t: Int) -> Option<List<Ctor>> {
+  return match self.tys.kinds[t] {
+    Bool => Some([Ctor.Bool(false), Ctor.Bool(true)])
+    Tuple(_) => Some([Ctor.Tuple])
+    Adt(a, _) => if self.defs.adts[a].is_enum {
+      var cs: List<Ctor> = []
+      for i in 0..self.defs.adts[a].variants.len() {
+        cs.push(Ctor.Variant(i))
+      }
+      Some(cs)
+    } else {
+      None
+    }
+    _ => None
+  }
+}
+
+fn Sema.ctor_field_tys(&mut self, c: Ctor, t: Int) -> List<Int> {
+  return match (c, self.tys.kinds[t]) {
+    (Tuple, Tuple(ts)) => ts
+    (Variant(vi), Adt(a, args)) => {
+      let fs = self.variant_field_tys(a, vi)
+      self.tys.subst_all(fs, args)
+    }
+    _ => []
+  }
+}
+
+fn wilds(n: Int) -> List<P> {
+  return [P.Wild].repeat(n)
+}
+
+fn rest_of(xs: List<P>) -> List<P> {
+  return xs[1..xs.len()]
+}
+
+/// Rows whose first column matches constructor `c`, with that column replaced by its fields.
+fn specialize(rows: List<List<P>>, c: Ctor, arity: Int) -> List<List<P>> {
+  var out: List<List<P>> = []
+  for row in rows {
+    specialize_row(row, c, arity, &mut out)
+  }
+  return out
+}
+
+fn specialize_row(row: List<P>, c: Ctor, arity: Int, out: &mut List<List<P>>) {
+  match row[0] {
+    Wild => {
+      var r = wilds(arity)
+      r.extend(rest_of(row))
+      out.push(r)
+    }
+    Ctor(c2, args) => {
+      if c2 == c {
+        var r = args
+        if r.len() > arity {
+          r.truncate(arity)
+        }
+        for r.len() < arity {
+          r.push(P.Wild)
+        }
+        r.extend(rest_of(row))
+        out.push(r)
+      }
+    }
+    Or(alts) => {
+      for a in alts {
+        var r = [a]
+        r.extend(rest_of(row))
+        specialize_row(r, c, arity, &mut out)
+      }
+    }
+  }
+}
+
+fn collect_ctors(p: P, out: &mut List<Ctor>) {
+  match p {
+    Wild => {}
+    Ctor(c, _) => { if !out.contains(c) { out.push(c) } }
+    Or(alts) => {
+      for a in alts {
+        collect_ctors(a, &mut out)
+      }
+    }
+  }
+}
+
+fn default_row(row: List<P>, out: &mut List<List<P>>) {
+  match row[0] {
+    Wild => out.push(rest_of(row))
+    Ctor(_, _) => {}
+    Or(alts) => {
+      for a in alts {
+        var r = [a]
+        r.extend(rest_of(row))
+        default_row(r, &mut out)
+      }
+    }
+  }
+}
+
+fn rebuild(c: Ctor, arity: Int, w: List<P>) -> List<P> {
+  let k = if arity < w.len() { arity } else { w.len() }
+  var out = [P.Ctor(c, w[0..k])]
+  out.extend(w[k..w.len()])
+  return out
+}
+
+/// Is `q` useful with respect to `rows`? Returns a witness vector if so.
+fn Sema.useful(
+  &mut self,
+  rows: List<List<P>>,
+  q: List<P>,
+  tys: List<Int>,
+  budget: &mut Int,
+) -> Option<List<P>> {
+  if budget == 0 {
+    return None
+  }
+  budget -= 1
+  if q.is_empty() {
+    return if rows.is_empty() { Some([]) } else { None }
+  }
+  let t = tys[0]
+  match q[0] {
+    Or(alts) => {
+      for a in alts {
+        var q2 = [a]
+        q2.extend(rest_of(q))
+        match self.useful(rows, q2, tys, &mut budget) {
+          Some(w) => {
+            return Some(w)
+          }
+          None => {}
+        }
+      }
+      return None
+    }
+    Ctor(c, args) => {
+      let ftys = self.ctor_field_tys(c, t)
+      let arity = if ftys.len() > args.len() { ftys.len() } else { args.len() }
+      let spec = specialize(rows, c, arity)
+      var q2 = args
+      for q2.len() < arity {
+        q2.push(P.Wild)
+      }
+      q2.extend(rest_of(q))
+      var t2 = ftys
+      for t2.len() < arity {
+        t2.push(t)
+      }
+      t2.extend(tys[1..tys.len()])
+      return match self.useful(spec, q2, t2, &mut budget) {
+        Some(w) => Some(rebuild(c, arity, w))
+        None => None
+      }
+    }
+    Wild => {
+      var used: List<Ctor> = []
+      for row in rows {
+        collect_ctors(row[0], &mut used)
+      }
+      let all = self.all_ctors(t)
+      match all {
+        Some(cs) => {
+          var complete = true
+          for c in cs {
+            if !used.contains(c) {
+              complete = false
+            }
+          }
+          if complete {
+            for c in cs {
+              let ftys = self.ctor_field_tys(c, t)
+              let arity = ftys.len()
+              let spec = specialize(rows, c, arity)
+              var q2 = wilds(arity)
+              q2.extend(rest_of(q))
+              var t2 = ftys
+              t2.extend(tys[1..tys.len()])
+              match self.useful(spec, q2, t2, &mut budget) {
+                Some(w) => {
+                  return Some(rebuild(c, arity, w))
+                }
+                None => {}
+              }
+            }
+            return None
+          }
+        }
+        None => {}
+      }
+      var def: List<List<P>> = []
+      for row in rows {
+        default_row(row, &mut def)
+      }
+      let w = match self.useful(def, rest_of(q), tys[1..tys.len()], &mut budget) {
+        Some(x) => x
+        None => {
+          return None
+        }
+      }
+      var head = P.Wild
+      match all {
+        Some(cs) => {
+          for c in cs {
+            if !used.contains(c) {
+              let n = self.ctor_field_tys(c, t).len()
+              head = P.Ctor(c, wilds(n))
+              break
+            }
+          }
+        }
+        None => {}
+      }
+      var out = [head]
+      out.extend(w)
+      return Some(out)
+    }
+  }
+}
+
+fn Sema.render_pat(&mut self, p: P, t: Int) -> Str {
+  match p {
+    Wild => {
+      return "_"
+    }
+    Or(alts) => {
+      var parts: List<Str> = []
+      for a in alts {
+        parts.push(self.render_pat(a, t))
+      }
+      return parts.join(" | ")
+    }
+    Ctor(c, args) => {
+      let ftys = self.ctor_field_tys(c, t)
+      var sub: List<Str> = []
+      for i in 0..args.len() {
+        sub.push(self.render_pat(args[i], if i < ftys.len() { ftys[i] } else { t }))
+      }
+      return match c {
+        Variant(vi) => {
+          let name = match self.tys.kinds[t] {
+            Adt(a, _) => self.defs.adts[a].variants[vi].name
+            _ => "?"
+          }
+          if sub.is_empty() {
+            name
+          } else {
+            name + "(" + sub.join(", ") + ")"
+          }
+        }
+        Tuple => "(" + sub.join(", ") + ")"
+        Bool(b) => b.str()
+        Int(neg, mag) => (if neg { "-" } else { "" }) + mag.str()
+        Str(s) => "\"" + s + "\""
+        Char(_) => "'?'"
+        Opaque => "_"
+      }
+    }
+  }
+}

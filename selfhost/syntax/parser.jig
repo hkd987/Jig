@@ -2,10 +2,10 @@
 // over the lexer's tokens into the flat-arena `Ast`. It recovers at items, statements and
 // match arms, so one mistake is one error.
 
-struct Parsed {
-  ast: Ast
+pub struct Parsed {
+  pub ast: Ast
   /// The lexer's errors, then the parser's.
-  errors: List<Diag>
+  pub errors: List<Diag>
 }
 
 struct Parser {
@@ -35,7 +35,7 @@ struct EffectSet {
 }
 
 /// Parse `src`, whose first byte is at global offset `base`.
-fn parse(src: Str, base: Int) -> Parsed {
+pub fn parse(src: Str, base: Int) -> Parsed {
   let lx = lex(src, base)
   var p = Parser {
     src: src

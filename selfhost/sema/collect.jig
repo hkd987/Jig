@@ -1,0 +1,1323 @@
+// Item collection, ported from the bootstrap compiler's `sema/collect.rs`: declare every
+// item, then resolve signatures, fields, aliases, methods and constants. Bodies are checked
+// later (`check.jig`).
+
+import "syntax"
+
+/// Context for resolving a type expression written outside a body.
+struct TyScope {
+  pkg: Int
+  file: Int
+  /// Generic parameter names in scope, by index.
+  generics: List<Str>
+  /// Inside an interface: `Self` is `Param(0)`.
+  has_self: Bool
+}
+
+fn generic_defs(gs: List<syntax.GenericParam>) -> List<GenericDef> {
+  var out: List<GenericDef> = []
+  for g in gs {
+    out.push(GenericDef { name: g.name.text, bounds: [], span: g.name.span })
+  }
+  return out
+}
+
+fn generic_names(gs: List<GenericDef>) -> List<Str> {
+  var out: List<Str> = []
+  for g in gs {
+    out.push(g.name)
+  }
+  return out
+}
+
+fn plural(n: Int) -> Str {
+  return if n == 1 { "" } else { "s" }
+}
+
+fn Sema.collect(&mut self) {
+  self.declare_all()
+  for p in self.pkgs {
+    for (name, def) in p.scope {
+      if def == Def.Unit {
+        self.units.insert(name)
+      }
+    }
+  }
+  self.alias_state = [0].repeat(self.defs.aliases.len())
+  for i in 0..self.defs.aliases.len() {
+    self.ensure_alias(i)
+  }
+  self.resolve_adts()
+  for i in 0..self.defs.fns.len() {
+    self.resolve_fn(i)
+  }
+  self.resolve_consts()
+  self.resolve_tests()
+  self.check_recursive_adts()
+  self.find_main()
+}
+
+fn Sema.declare_all(&mut self) {
+  var prelude_names: Set<Str> = Set.new()
+  for pid in 0..self.pkgs.len() {
+    let is_prelude = pid == self.prelude
+    var scope: Map<Str, Def> = Map.new()
+    var spans: Map<Str, syntax.Span> = Map.new()
+    let files = self.pkgs[pid].files
+    for fi in 0..files.len() {
+      let ast = files[fi].ast
+      for item_id in ast.top {
+        let item = ast.items[item_id]
+        var def: Option<Def> = None
+        match item.kind {
+          Import(_, _) => {}
+          Fn(f) => {
+            let fid = self.defs.fns.len()
+            self.defs.fns.push(new_fn(pid, fi, item_id, item, f, None))
+            if f.recv.is_none() {
+              def = Some(Def.Fn(fid))
+            }
+          }
+          Struct(generics, _, _) => def = Some(self.declare_adt(pid, fi, item_id, item, generics, false, is_prelude))
+          Enum(generics, _) => def = Some(self.declare_adt(pid, fi, item_id, item, generics, true, is_prelude))
+          Interface(generics, methods) => {
+            if !generics.is_empty() {
+              self.err("E0904", item.name.span, "generic interfaces are not supported yet")
+            }
+            let iid = self.defs.ifaces.len()
+            var ms: List<Int> = []
+            for m in methods {
+              let mi = ast.items[m]
+              match mi.kind {
+                Fn(f) => {
+                  ms.push(self.defs.fns.len())
+                  self.defs.fns.push(new_fn(pid, fi, m, mi, f, Some(iid)))
+                }
+                _ => {}
+              }
+            }
+            self.defs.ifaces.push(
+              IfaceDef {
+                pkg: pid
+                file: fi
+                item: item_id
+                name: item.name.text
+                methods: ms
+                is_pub: item.is_pub
+              },
+            )
+            def = Some(Def.Iface(iid))
+          }
+          TypeAlias(generics, _) => {
+            let id = self.defs.aliases.len()
+            self.defs.aliases.push(
+              AliasDef {
+                pkg: pid
+                file: fi
+                item: item_id
+                name: item.name.text
+                generics: generic_defs(generics)
+                ty: self.tys.error
+                refine: None
+                is_pub: item.is_pub
+              },
+            )
+            def = Some(Def.Alias(id))
+          }
+          Const(_, _) => {
+            let id = self.defs.consts.len()
+            self.defs.consts.push(
+              ConstDef {
+                pkg: pid
+                file: fi
+                item: item_id
+                name: item.name.text
+                ty: self.tys.error
+                value: None
+                is_pub: item.is_pub
+              },
+            )
+            def = Some(Def.Const(id))
+          }
+          Unit => def = Some(Def.Unit)
+          Test(_, _, _, _) => self.defs.tests.push(
+            TestDef { pkg: pid, file: fi, item: item_id, params: [] },
+          )
+        }
+        match def {
+          Some(d) => {
+            let name = item.name
+            if builtin_type(name.text).is_some() {
+              self.err(
+                "E0202",
+                name.span,
+                "`" + name.text + "` is a built-in type name and cannot be redefined",
+              )
+            } else if !is_prelude && prelude_names.contains(name.text) {
+              self.err(
+                "E0202",
+                name.span,
+                "`" + name.text + "` is defined by the prelude and cannot be redefined",
+              )
+            } else if spans.contains(name.text) {
+              self.err("E0202", name.span, "`" + name.text + "` is defined more than once")
+            } else {
+              spans.insert(name.text, name.span)
+              scope.insert(name.text, d)
+            }
+          }
+          None => {}
+        }
+      }
+    }
+    // Imports conflict with package-level names.
+    for fi in 0..files.len() {
+      for (name, imp) in self.pkgs[pid].imports[fi] {
+        if spans.contains(name) {
+          let span = files[fi].ast.items[imp.1].span
+          self.err(
+            "E0209",
+            span,
+            "import `" + name + "` conflicts with a declaration of the same name",
+          )
+        }
+      }
+    }
+    if is_prelude {
+      for name in scope.keys() {
+        prelude_names.insert(name)
+      }
+      for name in ["Some", "None", "Ok", "Err"] {
+        prelude_names.insert(name)
+      }
+    }
+    self.pkgs[pid].scope = scope
+  }
+}
+
+fn Sema.declare_adt(
+  &mut self,
+  pid: Int,
+  fi: Int,
+  item_id: Int,
+  item: syntax.Item,
+  generics: List<syntax.GenericParam>,
+  is_enum: Bool,
+  is_prelude: Bool,
+) -> Def {
+  for g in generics {
+    if !g.bounds.is_empty() {
+      self.err("E0312", g.name.span, "type parameters of structs and enums cannot have bounds")
+    }
+  }
+  let aid = self.defs.adts.len()
+  self.defs.adts.push(
+    AdtDef {
+      pkg: pid
+      file: fi
+      item: item_id
+      name: item.name.text
+      generics: generic_defs(generics)
+      is_enum: is_enum
+      fields: []
+      variants: []
+      is_pub: item.is_pub
+    },
+  )
+  self.tys.adt_names.push(item.name.text)
+  if is_prelude && item.name.text == "Option" {
+    self.defs.option = aid
+  }
+  if is_prelude && item.name.text == "Result" {
+    self.defs.result = aid
+  }
+  return Def.Adt(aid)
+}
+
+fn new_fn(
+  pid: Int,
+  fi: Int,
+  item_id: Int,
+  item: syntax.Item,
+  f: syntax.FnDecl,
+  iface: Option<Int>,
+) -> FnDef {
+  var generics: List<GenericDef> = []
+  var n_recv = 0
+  if iface.is_some() {
+    generics.push(GenericDef { name: "Self", bounds: [], span: item.name.span })
+    n_recv = 1
+  }
+  match f.recv {
+    Some(r) => {
+      generics.extend(generic_defs(r.generics))
+      n_recv = generics.len()
+    }
+    None => {}
+  }
+  generics.extend(generic_defs(f.generics))
+  let self_mode = match f.self_param {
+    Some(s) => Some(if s.mutable { Mode.MutRef } else { Mode.Value })
+    None => None
+  }
+  return FnDef {
+    pkg: pid
+    file: fi
+    item: item_id
+    name: item.name.text
+    recv: None
+    self_mode: self_mode
+    self_ty: None
+    generics: generics
+    n_recv_generics: n_recv
+    params: []
+    ret: 0
+    eff: 0
+    is_pub: item.is_pub || iface.is_some()
+    has_body: f.body.is_some()
+    ffi: false
+    iface: iface
+    step_attr: f.step_attr
+    name_span: item.name.span
+  }
+}
+
+fn Sema.err(&mut self, code: Str, span: syntax.Span, msg: Str) {
+  self.diags.push(syntax.Diag { code: code, lo: span.lo, hi: span.hi, msg: msg })
+}
+
+fn Sema.def_is_pub(self, def: Def) -> Bool {
+  return match def {
+    Fn(f) => self.defs.fns[f].is_pub
+    Adt(a) => self.defs.adts[a].is_pub
+    Iface(i) => self.defs.ifaces[i].is_pub
+    Const(c) => self.defs.consts[c].is_pub
+    Alias(a) => self.defs.aliases[a].is_pub
+    Unit => true
+  }
+}
+
+/// Look up a name in a package's scope, honoring visibility from package `from`.
+fn Sema.lookup_in(&mut self, target: Int, name: syntax.Name, from: Int) -> Option<Def> {
+  let def = match self.pkgs[target].scope.get(name.text) {
+    Some(d) => d
+    None => {
+      return None
+    }
+  }
+  if target != from && !self.def_is_pub(def) {
+    self.err(
+      "E0205",
+      name.span,
+      "`" + name.text + "` is private to package `" + self.pkgs[target].path + "`",
+    )
+  }
+  return Some(def)
+}
+
+/// An unqualified name at package level: the package's scope, then the prelude's.
+fn Sema.lookup_name(self, pkg: Int, name: Str) -> Option<Def> {
+  match self.pkgs[pkg].scope.get(name) {
+    Some(d) => {
+      return Some(d)
+    }
+    None => {}
+  }
+  if pkg != self.prelude {
+    return self.pkgs[self.prelude].scope.get(name)
+  }
+  return None
+}
+
+fn Sema.ast_of(self, pkg: Int, file: Int) -> syntax.Ast {
+  return self.pkgs[pkg].files[file].ast
+}
+
+fn Sema.resolve_type(&mut self, sc: TyScope, te: Int) -> Int {
+  let ast = self.ast_of(sc.pkg, sc.file)
+  let t = ast.types[te]
+  match t.kind {
+    Tuple(elems) => {
+      var ts: List<Int> = []
+      for e in elems {
+        ts.push(self.resolve_type(sc, e))
+      }
+      return self.tys.tuple(ts)
+    }
+    Fn(params, ret, effect_names) => {
+      var ps: List<Int> = []
+      for e in params {
+        ps.push(self.resolve_type(sc, e))
+      }
+      let r = match ret {
+        Some(x) => self.resolve_type(sc, x)
+        None => self.tys.unit_ty
+      }
+      let eff = match effect_names {
+        Some(names) => self.resolve_effects(names)
+        None => 0
+      }
+      return self.tys.func(ps, r, eff)
+    }
+    Refined(base, _) => {
+      return self.resolve_type(sc, base)
+    }
+    Named(pkg, name, arg_ids, units) => {
+      match pkg {
+        Some(p) => {
+          let target = match self.pkgs[sc.pkg].imports[sc.file].get(p.text) {
+            Some(imp) => imp.0
+            None => {
+              self.err("E0201", p.span, "cannot find package `" + p.text + "`")
+              return self.tys.error
+            }
+          }
+          self.defs.sig_imports_used.insert((sc.pkg, sc.file, p.text))
+          let def = match self.lookup_in(target, name, sc.pkg) {
+            Some(d) => d
+            None => {
+              let msg = "package `" + self.pkgs[target].path + "` has no type `" + name.text + "`"
+              self.err("E0201", name.span, msg)
+              return self.tys.error
+            }
+          }
+          let args = self.resolve_types(sc, arg_ids)
+          return self.type_from_def(def, name, args, t.span)
+        }
+        None => {}
+      }
+      var gi = sc.generics.len() - 1
+      for gi >= 0 {
+        if sc.generics[gi] == name.text {
+          if !arg_ids.is_empty() {
+            self.err("E0313", t.span, "type parameters do not take type arguments")
+          }
+          return self.tys.param(gi, name.text)
+        }
+        gi -= 1
+      }
+      if sc.has_self && name.text == "Self" {
+        return self.tys.param(0, name.text)
+      }
+      match builtin_type(name.text) {
+        Some(b) => {
+          let args = self.resolve_types(sc, arg_ids)
+          var unit_id = 0
+          match units {
+            Some(factors) => {
+              var out: List<Factor> = []
+              for f in factors {
+                if !self.units.contains(f.name.text) {
+                  let msg = "cannot find unit `" +
+                    f.name.text +
+                    "`; declare it with `unit " +
+                    f.name.text +
+                    "`"
+                  self.err("E0201", f.name.span, msg)
+                }
+                out.push(Factor { name: f.name.text, exp: f.exp })
+              }
+              unit_id = self.tys.unit_id(out)
+            }
+            None => {}
+          }
+          return self.builtin_ty(b, args, unit_id, t.span, name.text)
+        }
+        None => {}
+      }
+      match self.lookup_name(sc.pkg, name.text) {
+        Some(def) => {
+          let args = self.resolve_types(sc, arg_ids)
+          return self.type_from_def(def, name, args, t.span)
+        }
+        None => {
+          self.err("E0201", name.span, "cannot find type `" + name.text + "`")
+          return self.tys.error
+        }
+      }
+    }
+  }
+}
+
+fn Sema.resolve_types(&mut self, sc: TyScope, ids: List<Int>) -> List<Int> {
+  var out: List<Int> = []
+  for a in ids {
+    out.push(self.resolve_type(sc, a))
+  }
+  return out
+}
+
+fn Sema.builtin_ty(
+  &mut self,
+  b: BuiltinTy,
+  args: List<Int>,
+  un: Int,
+  span: syntax.Span,
+  name: Str,
+) -> Int {
+  let want = builtin_arity(b)
+  if args.len() != want {
+    let msg = "`" +
+      name +
+      "` takes " +
+      want.str() +
+      " type argument" +
+      plural(want) +
+      ", found " +
+      args.len().str()
+    self.err("E0313", span, msg)
+    return self.tys.error
+  }
+  return match b {
+    Int(k) => self.tys.int_ty(k, un)
+    Float => self.tys.float_ty(un)
+    Bool => self.tys.bool
+    Char => self.tys.char
+    Str => self.tys.str
+    Never => self.tys.never
+    List => self.tys.list(args[0])
+    Set => self.tys.set(args[0])
+    Map => self.tys.map_ty(args[0], args[1])
+  }
+}
+
+fn Sema.type_from_def(
+  &mut self,
+  def: Def,
+  name: syntax.Name,
+  args: List<Int>,
+  span: syntax.Span,
+) -> Int {
+  match def {
+    Adt(a) => {
+      let n = self.defs.adts[a].generics.len()
+      if args.len() != n {
+        let msg = "`" +
+          name.text +
+          "` takes " +
+          n.str() +
+          " type argument" +
+          plural(n) +
+          ", found " +
+          args.len().str()
+        self.err("E0313", span, msg)
+        return self.tys.error
+      }
+      return self.tys.adt(a, args)
+    }
+    Alias(al) => {
+      self.ensure_alias(al)
+      let n = self.defs.aliases[al].generics.len()
+      if args.len() != n {
+        let msg = "`" +
+          name.text +
+          "` takes " +
+          n.str() +
+          " type arguments, found " +
+          args.len().str()
+        self.err("E0313", span, msg)
+        return self.tys.error
+      }
+      let t = self.defs.aliases[al].ty
+      return self.tys.subst(t, args)
+    }
+    Iface(_) => {
+      self.err("E0325", name.span, "interface `" + name.text + "` is not a type")
+      return self.tys.error
+    }
+    _ => {
+      self.err("E0325", name.span, "`" + name.text + "` is not a type")
+      return self.tys.error
+    }
+  }
+}
+
+fn Sema.resolve_effects(&mut self, names: List<syntax.Name>) -> Int {
+  var set = 0
+  for n in names {
+    let e = effect_bit(n.text)
+    if e != 0 {
+      if effects_contain(set, e) {
+        self.err("E0402", n.span, "effect `" + n.text + "` is listed twice")
+      }
+      set = set | e
+    } else {
+      self.err("E0402", n.span, "unknown effect `" + n.text + "`")
+    }
+  }
+  return set
+}
+
+fn Sema.resolve_bounds(&mut self, sc: TyScope, bounds: List<Int>) -> List<Bound> {
+  let ast = self.ast_of(sc.pkg, sc.file)
+  var out: List<Bound> = []
+  for b in bounds {
+    let te = ast.types[b]
+    match te.kind {
+      Named(pkg, name, _, _) => {
+        if pkg.is_none() {
+          match builtin_bound(name.text) {
+            Some(bb) => {
+              out.push(bb)
+              continue
+            }
+            None => {}
+          }
+        }
+        let def = match pkg {
+          Some(p) => match self.pkgs[sc.pkg].imports[sc.file].get(p.text) {
+            Some(imp) => self.lookup_in(imp.0, name, sc.pkg)
+            None => None
+          }
+          None => self.lookup_name(sc.pkg, name.text)
+        }
+        match def {
+          Some(Iface(i)) => out.push(Bound.Iface(i))
+          _ => self.err("E0312", name.span, "`" + name.text + "` is not an interface")
+        }
+      }
+      _ => self.err("E0312", te.span, "a bound must name an interface")
+    }
+  }
+  return out
+}
+
+// ---- aliases ----
+
+fn Sema.ensure_alias(&mut self, al: Int) {
+  if self.alias_state[al] == 2 {
+    return
+  }
+  let a = self.defs.aliases[al]
+  let ast = self.ast_of(a.pkg, a.file)
+  let item = ast.items[a.item]
+  if self.alias_state[al] == 1 {
+    self.err("E0319", item.name.span, "type alias `" + a.name + "` refers to itself")
+    self.defs.aliases[al].ty = self.tys.error
+    self.alias_state[al] = 2
+    return
+  }
+  self.alias_state[al] = 1
+  let te = match item.kind {
+    TypeAlias(_, ty) => ty
+    _ => {
+      return
+    }
+  }
+  let sc = TyScope {
+    pkg: a.pkg
+    file: a.file
+    generics: generic_names(a.generics)
+    has_self: false
+  }
+  let t = self.resolve_type(sc, te)
+  let refine = match ast.types[te].kind {
+    Refined(_, pred) => Some(pred)
+    _ => None
+  }
+  self.defs.aliases[al].ty = t
+  self.defs.aliases[al].refine = refine
+  self.alias_state[al] = 2
+}
+
+// ---- structs and enums ----
+
+fn Sema.resolve_adts(&mut self) {
+  for aid in 0..self.defs.adts.len() {
+    let ad = self.defs.adts[aid]
+    let item = self.ast_of(ad.pkg, ad.file).items[ad.item]
+    let sc = TyScope {
+      pkg: ad.pkg
+      file: ad.file
+      generics: generic_names(ad.generics)
+      has_self: false
+    }
+    match item.kind {
+      Struct(_, fields, _) => {
+        let fs = self.resolve_fields(sc, fields, "field")
+        self.defs.adts[aid].fields = fs
+      }
+      Enum(_, variants) => {
+        var out: List<VariantDef> = []
+        for v in variants {
+          var dup = false
+          for x in out {
+            if x.name == v.name.text {
+              dup = true
+            }
+          }
+          if dup {
+            self.err("E0322", v.name.span, "variant `" + v.name.text + "` is declared twice")
+            continue
+          }
+          let fs = self.resolve_fields(sc, v.fields, "variant field")
+          out.push(VariantDef { name: v.name.text, fields: fs, span: v.span })
+        }
+        self.defs.adts[aid].variants = out
+      }
+      _ => {}
+    }
+  }
+}
+
+fn Sema.resolve_fields(
+  &mut self,
+  sc: TyScope,
+  fs: List<syntax.FieldDecl>,
+  what: Str,
+) -> List<FieldDef> {
+  var out: List<FieldDef> = []
+  for f in fs {
+    var dup = false
+    for x in out {
+      if x.name == f.name.text {
+        dup = true
+      }
+    }
+    if dup {
+      self.err("E0322", f.name.span, what + " `" + f.name.text + "` is declared twice")
+      continue
+    }
+    let ty = self.resolve_type(sc, f.ty)
+    out.push(FieldDef { name: f.name.text, ty: ty, is_pub: f.is_pub, span: f.span })
+  }
+  return out
+}
+
+fn Sema.adt_payload_tys(self, aid: Int) -> List<Int> {
+  let ad = self.defs.adts[aid]
+  var out: List<Int> = []
+  for f in ad.fields {
+    out.push(f.ty)
+  }
+  for v in ad.variants {
+    for f in v.fields {
+      out.push(f.ty)
+    }
+  }
+  return out
+}
+
+/// A struct that contains itself by value (through structs and tuples) has infinite size;
+/// enums that reach themselves are boxed.
+fn Sema.check_recursive_adts(&mut self) {
+  for aid in 0..self.defs.adts.len() {
+    var seen: Set<Int> = Set.new()
+    var stack = self.adt_payload_tys(aid)
+    var reaches_self = false
+    for !stack.is_empty() {
+      let t = stack.pop().unwrap_or(0)
+      match self.tys.kinds[t] {
+        Adt(b, _) => {
+          if b == aid {
+            reaches_self = true
+            continue
+          }
+          if seen.contains(b) {
+            continue
+          }
+          seen.insert(b)
+          stack.extend(self.adt_payload_tys(b))
+        }
+        Tuple(ts) => stack.extend(ts)
+        _ => {}
+      }
+    }
+    if reaches_self && !self.defs.adts[aid].is_enum && !self.struct_reaches_self_through_enum(aid) {
+      let ad = self.defs.adts[aid]
+      let span = self.ast_of(ad.pkg, ad.file).items[ad.item].name.span
+      self.err(
+        "E0319",
+        span,
+        "struct `" + ad.name + "` contains itself and would have infinite size",
+      )
+    }
+  }
+}
+
+/// True if every path from the struct back to itself passes through an enum.
+fn Sema.struct_reaches_self_through_enum(self, aid: Int) -> Bool {
+  var seen: Set<Int> = Set.new()
+  var stack = self.adt_payload_tys(aid)
+  for !stack.is_empty() {
+    let t = stack.pop().unwrap_or(0)
+    match self.tys.kinds[t] {
+      Adt(b, _) => {
+        if b == aid {
+          return false
+        }
+        if self.defs.adts[b].is_enum || seen.contains(b) {
+          continue
+        }
+        seen.insert(b)
+        stack.extend(self.adt_payload_tys(b))
+      }
+      Tuple(ts) => stack.extend(ts)
+      _ => {}
+    }
+  }
+  return true
+}
+
+// ---- functions ----
+
+fn generic_hint(n: Int) -> Str {
+  if n == 0 {
+    return ""
+  }
+  let letters = ["T", "U", "V", "W", "X", "Y", "Z"]
+  var names: List<Str> = []
+  for i in 0..n {
+    names.push(if i < letters.len() { letters[i] } else { "T" + i.str() })
+  }
+  return "<" + names.join(", ") + ">"
+}
+
+fn Sema.resolve_fn(&mut self, fid: Int) {
+  let fd = self.defs.fns[fid]
+  let pid = fd.pkg
+  let item = self.fn_item(fid)
+  let f = match item.kind {
+    Fn(decl) => decl
+    _ => {
+      return
+    }
+  }
+  let is_iface = fd.iface.is_some()
+  let sc = TyScope {
+    pkg: pid
+    file: fd.file
+    generics: generic_names(fd.generics)
+    has_self: is_iface
+  }
+  var gi = if is_iface { 1 } else { 0 }
+  let recv_generics = match f.recv {
+    Some(r) => r.generics
+    None => []
+  }
+  for list in [recv_generics, f.generics] {
+    for g in list {
+      let b = self.resolve_bounds(sc, g.bounds)
+      self.defs.fns[fid].generics[gi].bounds = b
+      gi += 1
+    }
+  }
+  if is_iface {
+    if f.self_param.is_none() {
+      self.err("E0327", item.name.span, "interface methods take `self` or `&mut self`")
+    }
+    let self_ty = self.tys.param(0, "Self")
+    self.defs.fns[fid].self_ty = Some(self_ty)
+  } else {
+    match f.recv {
+      Some(r) => {
+        let n = fd.n_recv_generics
+        var params: List<Int> = []
+        for i in 0..n {
+          params.push(self.tys.param(i, sc.generics[i]))
+        }
+        var key = TyKey.Bool
+        var self_ty = 0
+        match self.pkgs[pid].scope.get(r.ty.text) {
+          Some(Adt(a)) => {
+            let want = self.defs.adts[a].generics.len()
+            if want != n {
+              let msg = "`" +
+                r.ty.text +
+                "` takes " +
+                want.str() +
+                " type parameter" +
+                plural(want) +
+                "; write `fn " +
+                r.ty.text +
+                generic_hint(want) +
+                "." +
+                item.name.text +
+                "`"
+              self.err("E0313", r.ty.span, msg)
+              return
+            }
+            key = TyKey.Adt(a)
+            self_ty = self.tys.adt(a, params)
+          }
+          Some(_) => {
+            self.err("E0328", r.ty.span, "`" + r.ty.text + "` is not a struct or enum")
+            return
+          }
+          None => match builtin_type(r.ty.text) {
+            Some(b) => {
+              if pid != self.prelude {
+                self.err(
+                  "E0328",
+                  r.ty.span,
+                  "cannot declare methods on the built-in type `" + r.ty.text + "`",
+                )
+                return
+              }
+              let t = self.builtin_ty(b, params, 0, r.ty.span, r.ty.text)
+              match ty_key(self.tys, t) {
+                Some(k) => {
+                  key = k
+                  self_ty = t
+                }
+                None => {
+                  return
+                }
+              }
+            }
+            None => {
+              var in_other = false
+              for p in self.pkgs {
+                if p.scope.contains(r.ty.text) {
+                  in_other = true
+                }
+              }
+              if in_other {
+                self.err(
+                  "E0328",
+                  r.ty.span,
+                  "methods on `" + r.ty.text + "` must be declared in its own package",
+                )
+              } else {
+                self.err("E0201", r.ty.span, "cannot find type `" + r.ty.text + "`")
+              }
+              return
+            }
+          }
+        }
+        self.defs.fns[fid].recv = Some(key)
+        self.defs.fns[fid].self_ty = Some(self_ty)
+        let mk = (key, item.name.text)
+        if self.defs.methods.contains(mk) {
+          self.err(
+            "E0202",
+            item.name.span,
+            "method `" + item.name.text + "` is defined more than once",
+          )
+        } else {
+          self.defs.methods.insert(mk, fid)
+        }
+      }
+      None => {
+        if f.self_param.is_some() {
+          self.err("E0327", item.name.span, "only methods (`fn Type.name`) can take `self`")
+        }
+      }
+    }
+  }
+  var params: List<ParamDef> = []
+  for p in f.params {
+    for q in params {
+      if q.name == p.name.text {
+        self.err("E0322", p.name.span, "parameter `" + p.name.text + "` is declared twice")
+        break
+      }
+    }
+    let ty = match p.ty {
+      Some(t) => self.resolve_type(sc, t)
+      None => self.tys.error
+    }
+    params.push(
+      ParamDef {
+        name: p.name.text
+        ty: ty
+        mode: if p.mut_ref { Mode.MutRef } else { Mode.Value }
+        span: p.span
+      },
+    )
+  }
+  self.defs.fns[fid].params = params
+  self.defs.fns[fid].ret = match f.ret {
+    Some(t) => self.resolve_type(sc, t)
+    None => self.tys.unit_ty
+  }
+  self.defs.fns[fid].eff = match f.effect_names {
+    Some(names) => self.resolve_effects(names)
+    None => 0
+  }
+  if !fd.has_body && !self.pkgs[pid].is_std && !is_iface {
+    if effects_contain(self.defs.fns[fid].eff, effect_bit("ffi")) {
+      self.defs.fns[fid].ffi = true
+      self.check_ffi_signature(fid)
+    } else {
+      self.err("E0109", item.name.span, "function `" + item.name.text + "` has no body")
+    }
+  }
+}
+
+/// The AST item that declares function `fid`.
+fn Sema.fn_item(self, fid: Int) -> syntax.Item {
+  let fd = self.defs.fns[fid]
+  return self.ast_of(fd.pkg, fd.file).items[fd.item]
+}
+
+/// A C function's signature: scalars and `Str` only, few enough arguments for registers.
+fn Sema.check_ffi_signature(&mut self, fid: Int) {
+  let fd = self.defs.fns[fid]
+  var problems: List<Str> = []
+  if !fd.generics.is_empty() {
+    problems.push("it is generic")
+  }
+  if fd.recv.is_some() || fd.self_mode.is_some() {
+    problems.push("it is a method")
+  }
+  var ints = 0
+  var floats = 0
+  for p in fd.params {
+    if p.mode == Mode.MutRef {
+      problems.push("`" + p.name + "` is `&mut`")
+    }
+    match self.tys.kinds[p.ty] {
+      Float(_) => floats += 1
+      Int(_, _) | Bool | Str => ints += 1
+      _ => problems.push("`" + p.name + "` has type `" + self.tys.display(p.ty) + "`")
+    }
+  }
+  let scalar = match self.tys.kinds[fd.ret] {
+    Int(_, _) | Float(_) | Bool | Str => true
+    _ => false
+  }
+  if !scalar && fd.ret != self.tys.unit_ty {
+    problems.push("it returns `" + self.tys.display(fd.ret) + "`")
+  }
+  if ints > 6 || floats > 8 {
+    problems.push("it takes more than 6 integer or 8 `Float` arguments")
+  }
+  if !problems.is_empty() {
+    self.err(
+      "E0331",
+      fd.name_span,
+      "`" + fd.name + "` cannot be a C function: " + problems.join(", "),
+    )
+  }
+}
+
+// ---- constants ----
+
+fn Sema.resolve_consts(&mut self) {
+  for cid in 0..self.defs.consts.len() {
+    let cd = self.defs.consts[cid]
+    let item = self.ast_of(cd.pkg, cd.file).items[cd.item]
+    match item.kind {
+      Const(ty, _) => {
+        let sc = TyScope { pkg: cd.pkg, file: cd.file, generics: [], has_self: false }
+        let t = self.resolve_type(sc, ty)
+        self.defs.consts[cid].ty = t
+      }
+      _ => {}
+    }
+  }
+  for cid in 0..self.defs.consts.len() {
+    var visiting: List<Int> = []
+    let _ = self.eval_const(cid, &mut visiting)
+  }
+}
+
+fn Sema.eval_const(&mut self, cid: Int, visiting: &mut List<Int>) -> Option<ConstVal> {
+  let cd = self.defs.consts[cid]
+  match cd.value {
+    Some(v) => {
+      return Some(v)
+    }
+    None => {}
+  }
+  let item = self.ast_of(cd.pkg, cd.file).items[cd.item]
+  if visiting.contains(cid) {
+    self.err("E0329", item.name.span, "constant `" + item.name.text + "` depends on itself")
+    return None
+  }
+  visiting.push(cid)
+  let v = match item.kind {
+    Const(_, value) => self.eval_const_expr(cd.pkg, cd.file, value, cd.ty, &mut visiting)
+    _ => None
+  }
+  let _ = visiting.pop()
+  match v {
+    Some(x) => self.defs.consts[cid].value = Some(x)
+    None => {}
+  }
+  return v
+}
+
+fn Sema.const_bad(&mut self, span: syntax.Span, msg: Str) -> Option<ConstVal> {
+  self.err("E0329", span, msg)
+  return None
+}
+
+fn Sema.const_mismatch(&mut self, span: syntax.Span, ty: Int, found: Str) -> Option<ConstVal> {
+  self.err(
+    "E0301",
+    span,
+    "mismatched types: expected `" + self.tys.display(ty) + "`, found " + found,
+  )
+  return None
+}
+
+fn Sema.check_int_range(&mut self, span: syntax.Span, ty: Int, v: Int) -> Option<ConstVal> {
+  match self.tys.kinds[ty] {
+    Int(k, _) => {
+      if v < k.min_int() || v > k.max_int() {
+        self.err("E0329", span, "constant value " + v.str() + " does not fit in `" + k.name() + "`")
+        return None
+      }
+    }
+    _ => {}
+  }
+  return Some(ConstVal.Int(v))
+}
+
+/// The value of a float literal's source text.
+fn float_value(text: Str) -> Float {
+  return text.replace("_", "").to_float().unwrap_or(0.0)
+}
+
+fn Sema.source_text(self, pkg: Int, file: Int, span: syntax.Span) -> Str {
+  let f = self.pkgs[pkg].files[file]
+  return f.text[span.lo - f.base..span.hi - f.base]
+}
+
+/// Integer arithmetic that reports overflow as `None`.
+fn checked_int(op: syntax.BinOp, x: Int, y: Int) -> Option<Int> {
+  let max = 9223372036854775807
+  let min = -max - 1
+  return match op {
+    Add => if (y > 0 && x > max - y) || (y < 0 && x < min - y) { None } else { Some(x + y) }
+    Sub => if (y < 0 && x > max + y) || (y > 0 && x < min + y) { None } else { Some(x - y) }
+    Mul => {
+      if x == 0 || y == 0 {
+        Some(0)
+      } else if (x == -1 && y == min) || (y == -1 && x == min) {
+        None
+      } else {
+        let p = x.wrapping_mul(y)
+        if p / y != x {
+          None
+        } else {
+          Some(p)
+        }
+      }
+    }
+    Div => if y == 0 || (x == min && y == -1) { None } else { Some(x / y) }
+    Rem => if y == 0 || (x == min && y == -1) { None } else { Some(x % y) }
+    Shl => if y >= 0 && y < 64 { checked_shl(x, y) } else { None }
+    Shr => if y >= 0 && y < 64 { Some(x >> y) } else { None }
+    BitAnd => Some(x & y)
+    BitOr => Some(x | y)
+    BitXor => Some(x ^ y)
+    _ => None
+  }
+}
+
+/// `x << y`, or `None` if bits are lost.
+fn checked_shl(x: Int, y: Int) -> Option<Int> {
+  var r = x
+  for _ in 0..y {
+    if r > 4611686018427387903 || r < -4611686018427387904 {
+      return None
+    }
+    r = r * 2
+  }
+  return Some(r)
+}
+
+fn Sema.eval_const_expr(
+  &mut self,
+  pid: Int,
+  file: Int,
+  e: Int,
+  ty: Int,
+  visiting: &mut List<Int>,
+) -> Option<ConstVal> {
+  let ast = self.ast_of(pid, file)
+  let ex = ast.exprs[e]
+  let kind = self.tys.kinds[ty]
+  match ex.kind {
+    Paren(inner) => {
+      return self.eval_const_expr(pid, file, inner, ty, &mut visiting)
+    }
+    Int(v) => {
+      return match kind {
+        Int(k, _) => {
+          if !k.fits(v, false) {
+            self.const_bad(ex.span, "literal does not fit in `" + k.name() + "`")
+          } else if v > 9223372036854775807 {
+            Some(ConstVal.Big(v))
+          } else {
+            Some(ConstVal.Int(v as Int))
+          }
+        }
+        Float(_) => Some(ConstVal.Float(v as Float))
+        _ => self.const_mismatch(ex.span, ty, "an integer")
+      }
+    }
+    Float => {
+      return match kind {
+        Float(_) => Some(ConstVal.Float(float_value(self.source_text(pid, file, ex.span))))
+        _ => self.const_mismatch(ex.span, ty, "a float")
+      }
+    }
+    Bool(b) => {
+      return match kind {
+        Bool => Some(ConstVal.Bool(b))
+        _ => self.const_mismatch(ex.span, ty, "a Bool")
+      }
+    }
+    Str(s) => {
+      return match kind {
+        Str => Some(ConstVal.Str(s))
+        _ => self.const_mismatch(ex.span, ty, "a Str")
+      }
+    }
+    Char(c) => {
+      return match kind {
+        Char => Some(ConstVal.Char(c))
+        Int(k, _) => if k == IntTy.U8 && c < 128 {
+          Some(ConstVal.Int(c))
+        } else {
+          self.const_mismatch(ex.span, ty, "a Char")
+        }
+        _ => self.const_mismatch(ex.span, ty, "a Char")
+      }
+    }
+    Unary(op, inner) => {
+      let v = match self.eval_const_expr(pid, file, inner, ty, &mut visiting) {
+        Some(x) => x
+        None => {
+          return None
+        }
+      }
+      return match (op, v) {
+        (Neg, Int(i)) => if i == -9223372036854775807 - 1 {
+          self.const_bad(ex.span, "invalid operand in constant expression")
+        } else {
+          self.check_int_range(ex.span, ty, -i)
+        }
+        (Neg, Float(f)) => Some(ConstVal.Float(-f))
+        (Not, Bool(b)) => Some(ConstVal.Bool(!b))
+        (BitNot, Int(i)) => self.check_int_range(ex.span, ty, ~i)
+        _ => self.const_bad(ex.span, "invalid operand in constant expression")
+      }
+    }
+    Binary(op, lhs, rhs) => {
+      if is_comparison(op) {
+        return self.const_bad(ex.span, "comparisons are not supported in constant expressions")
+      }
+      let a = match self.eval_const_expr(pid, file, lhs, ty, &mut visiting) {
+        Some(x) => x
+        None => {
+          return None
+        }
+      }
+      let b = match self.eval_const_expr(pid, file, rhs, ty, &mut visiting) {
+        Some(x) => x
+        None => {
+          return None
+        }
+      }
+      let r: Option<ConstVal> = match (a, b) {
+        (Int(x), Int(y)) => match checked_int(op, x, y) {
+          Some(z) => Some(ConstVal.Int(z))
+          None => None
+        }
+        (Float(x), Float(y)) => match op {
+          Add => Some(ConstVal.Float(x + y))
+          Sub => Some(ConstVal.Float(x - y))
+          Mul => Some(ConstVal.Float(x * y))
+          Div => Some(ConstVal.Float(x / y))
+          _ => None
+        }
+        (Bool(x), Bool(y)) => match op {
+          And => Some(ConstVal.Bool(x && y))
+          Or => Some(ConstVal.Bool(x || y))
+          _ => None
+        }
+        (Str(x), Str(y)) => if op == syntax.BinOp.Add { Some(ConstVal.Str(x + y)) } else { None }
+        _ => None
+      }
+      return match r {
+        Some(Int(i)) => self.check_int_range(ex.span, ty, i)
+        Some(v) => Some(v)
+        None => self.const_bad(
+          ex.span,
+          "invalid constant expression (overflow, division by zero, or unsupported operator)",
+        )
+      }
+    }
+    Name(n) => {
+      return match self.lookup_name(pid, n) {
+        Some(Const(c)) => {
+          let cty = self.defs.consts[c].ty
+          if cty != ty {
+            self.const_mismatch(ex.span, ty, "`" + self.tys.display(cty) + "`")
+          } else {
+            self.eval_const(c, &mut visiting)
+          }
+        }
+        _ => self.const_bad(ex.span, "constants may only refer to other constants")
+      }
+    }
+    Field(base, name) => {
+      let p = match ast.exprs[base].kind {
+        Name(p) => p
+        _ => {
+          return self.const_bad(ex.span, "not a constant expression")
+        }
+      }
+      let target = match self.pkgs[pid].imports[file].get(p) {
+        Some(imp) => imp.0
+        None => {
+          return self.const_bad(ex.span, "not a constant expression")
+        }
+      }
+      return match self.lookup_in(target, name, pid) {
+        Some(Const(c)) => self.eval_const(c, &mut visiting)
+        _ => self.const_bad(ex.span, "constants may only refer to other constants")
+      }
+    }
+    _ => {
+      return self.const_bad(ex.span, "constants must be literals or arithmetic on other constants")
+    }
+  }
+}
+
+// ---- tests ----
+
+fn Sema.resolve_tests(&mut self) {
+  for tid in 0..self.defs.tests.len() {
+    let td = self.defs.tests[tid]
+    let item = self.ast_of(td.pkg, td.file).items[td.item]
+    let ps = match item.kind {
+      Test(_, params, _, _) => params
+      _ => []
+    }
+    let sc = TyScope { pkg: td.pkg, file: td.file, generics: [], has_self: false }
+    var out: List<ParamDef> = []
+    for p in ps {
+      let ty = match p.ty {
+        Some(t) => self.resolve_type(sc, t)
+        None => {
+          self.err("E0305", p.name.span, "test parameters need a type")
+          self.tys.error
+        }
+      }
+      if p.mut_ref {
+        self.err("E0314", p.span, "test parameters cannot be `&mut`")
+      }
+      out.push(ParamDef { name: p.name.text, ty: ty, mode: Mode.Value, span: p.span })
+    }
+    self.defs.tests[tid].params = out
+  }
+}
+
+fn Sema.find_main(&mut self) {
+  match self.pkgs[self.root].scope.get("main") {
+    Some(Fn(f)) => {
+      self.defs.main = Some(f)
+      let fd = self.defs.fns[f]
+      if !fd.params.is_empty() || !fd.generics.is_empty() || fd.ret != self.tys.unit_ty {
+        self.err("E0318", fd.name_span, "`main` takes no parameters and returns nothing")
+      }
+    }
+    _ => {}
+  }
+}

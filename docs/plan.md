@@ -178,13 +178,15 @@ core passes.
       tags into a module cache with commits pinned in `jig.sum`, highest-version selection,
       imports through modules (`compiler/tests/modules.rs`).
 - [ ] Self-hosted compiler: lexer, parser, checker, MIR, backends, ported pass by pass;
-      arena-and-index design carries over directly. `selfhost/` (`jigc`): the lexer and
-      parser are done, every contract proved, and their token and AST dumps match the
-      bootstrap compiler's on every repository file and 400 mutations, most of them with
-      syntax errors, so error recovery is compared too (`compiler/tests/selfhost.rs`).
+      arena-and-index design carries over directly. `selfhost/` (`jigc`): the lexer, parser
+      and checker are done. Token and AST dumps match the bootstrap compiler's on every
+      repository file and 400 mutations, most of them with syntax errors, so error recovery
+      is compared too; the checker's dump (every diagnostic, and the type of every
+      expression and pattern) matches on every example, UI and run test, `jigc` itself and
+      300 semantic mutations raising over fifty error codes (`compiler/tests/selfhost.rs`).
       `bench/selfhost.py` compares speed on the same corpus (CI gate: instruction ratio at
-      most 1.10); jigc is at 0.99 (lexer) and 0.74 (parser) of the bootstrap compiler's
-      instructions, 1.08–1.10 of its wall time.
+      most 1.10, now 1.03); jigc is at 0.99 (lexer), 0.75 (parser) and 1.49 (checker) of the
+      bootstrap compiler's instructions. MIR and the C back end are next.
 - [ ] Agent benchmark vs. Rust and TypeScript. `bench/agents`: six tasks with acceptance cases
       and reference solutions in all three languages (checked in CI), and a harness that runs
       an agent per task and language and reports tasks solved and turns. Results need agent

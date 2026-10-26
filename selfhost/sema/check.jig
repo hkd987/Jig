@@ -1,0 +1,1185 @@
+// Body checking, ported from the bootstrap compiler's `sema/check/mod.rs`: name resolution
+// inside bodies, bidirectional type inference with unification, effects, mutability and
+// `&mut` rules, divergence, and the lints that need types. Expressions are in `expr.jig`,
+// calls and places in `call.jig`, statements and patterns in `stmt.jig`.
+
+import "syntax"
+
+/// What kind of code is being checked.
+enum Ctx {
+  /// Ordinary code.
+  Code
+  /// `requires`, invariants, refinements: pure and read-only.
+  Pure
+  /// `ensures`: pure, with `result` and `old` available.
+  Ensures
+}
+
+/// What an inference variable may become.
+enum VarKind {
+  General
+  /// An integer literal's type.
+  IntLit
+  /// A float literal's type.
+  FloatLit
+}
+
+struct ClosureFrame {
+  ret: Int
+  /// Effects the closure may perform (`None`: inferred, anything goes).
+  allowed: Option<Int>
+  used: Int
+  captures: List<Int>
+  saved_loop_depth: Int
+}
+
+struct PendingBound {
+  span: syntax.Span
+  ty: Int
+  bound: Bound
+}
+
+struct IntLit {
+  expr: Int
+  v: U64
+  neg: Bool
+}
+
+/// The whole checker: the program, and the state of the item being checked.
+struct Sema {
+  pkgs: List<Package>
+  tables: List<List<Tables>>
+  defs: Defs
+  tys: TyCtx
+  diags: List<syntax.Diag>
+  bodies: List<Option<Body>>
+  test_bodies: List<Option<Body>>
+  prelude: Int
+  root: Int
+  /// Every declared unit of measure.
+  units: Set<Str>
+  /// Per alias: 0 unresolved, 1 resolving, 2 resolved.
+  alias_state: List<Int>
+  /// Per package: (file, import name) of every import a body used.
+  imports_used: List<Set<(Int, Str)>>
+  // ---- the item being checked ----
+  pkg: Int
+  file: Int
+  ast: syntax.Ast
+  tab: Tables
+  generics: List<GenericDef>
+  ret_ty: Int
+  declared_effects: Int
+  ctx: Ctx
+  /// Per inference variable: its binding (-1: none) and kind.
+  var_ty: List<Int>
+  var_kind: List<VarKind>
+  trail: List<Int>
+  body: Body
+  scope: List<(Str, Int)>
+  scope_marks: List<Int>
+  loop_depth: Int
+  /// For each enclosing loop, whether it contains a `break`.
+  loop_breaks: List<Bool>
+  closures: List<ClosureFrame>
+  pending_bounds: List<PendingBound>
+  int_lits: List<IntLit>
+  touched: List<Int>
+  touched_pats: List<Int>
+  diverges: Bool
+  /// Report "cannot infer" once per variable.
+  reported_vars: Set<Int>
+  errors_at_start: Int
+  /// The item's span (signature included), for functions.
+  item_span: syntax.Span
+}
+
+fn empty_ast() -> syntax.Ast {
+  return syntax.Ast { items: [], exprs: [], stmts: [], types: [], pats: [], top: [] }
+}
+
+fn new_sema(ld: Loaded) -> Sema {
+  let tys = new_tys()
+  var tables: List<List<Tables>> = []
+  for p in ld.pkgs {
+    var ts: List<Tables> = []
+    for f in p.files {
+      ts.push(new_tables(f.ast.exprs.len(), f.ast.pats.len(), tys.error))
+    }
+    tables.push(ts)
+  }
+  return Sema {
+    pkgs: ld.pkgs
+    tables: tables
+    defs: Defs {
+      fns: []
+      adts: []
+      ifaces: []
+      consts: []
+      aliases: []
+      tests: []
+      methods: Map.new()
+      option: 0
+      result: 0
+      main: None
+      sig_imports_used: Set.new()
+    }
+    tys: tys
+    diags: ld.diags
+    bodies: []
+    test_bodies: []
+    prelude: 0
+    root: ld.root
+    units: Set.new()
+    alias_state: []
+    imports_used: []
+    pkg: 0
+    file: 0
+    ast: empty_ast()
+    tab: new_tables(0, 0, 0)
+    generics: []
+    ret_ty: 0
+    declared_effects: 0
+    ctx: Ctx.Code
+    var_ty: []
+    var_kind: []
+    trail: []
+    body: new_body()
+    scope: []
+    scope_marks: []
+    loop_depth: 0
+    loop_breaks: []
+    closures: []
+    pending_bounds: []
+    int_lits: []
+    touched: []
+    touched_pats: []
+    diverges: false
+    reported_vars: Set.new()
+    errors_at_start: 0
+    item_span: dummy_span()
+  }
+}
+
+/// Start checking an item of `pkg`'s file `file`: fresh state, and the file's tables.
+fn Sema.begin(&mut self, pkg: Int, file: Int) {
+  self.pkg = pkg
+  self.file = file
+  self.ast = self.pkgs[pkg].files[file].ast
+  self.tab = self.tables[pkg][file]
+  self.tables[pkg][file] = new_tables(0, 0, 0)
+  self.generics = []
+  self.ret_ty = self.tys.unit_ty
+  self.declared_effects = 0
+  self.ctx = Ctx.Code
+  self.var_ty = []
+  self.var_kind = []
+  self.trail = []
+  self.body = new_body()
+  self.scope = []
+  self.scope_marks = []
+  self.loop_depth = 0
+  self.loop_breaks = []
+  self.closures = []
+  self.pending_bounds = []
+  self.int_lits = []
+  self.touched = []
+  self.touched_pats = []
+  self.diverges = false
+  self.reported_vars = Set.new()
+  self.errors_at_start = self.diags.len()
+  self.item_span = dummy_span()
+}
+
+/// Finish an item: its tables go back, and its body is the result.
+fn Sema.end(&mut self) -> Body {
+  self.tables[self.pkg][self.file] = self.tab
+  self.tab = new_tables(0, 0, 0)
+  let b = self.body
+  self.body = new_body()
+  return b
+}
+
+fn Sema.check_bodies(&mut self) {
+  self.imports_used = []
+  for _ in self.pkgs {
+    self.imports_used.push(Set.new())
+  }
+  self.bodies = []
+  for fid in 0..self.defs.fns.len() {
+    let fd = self.defs.fns[fid]
+    if fd.iface.is_some() {
+      self.bodies.push(None)
+      continue
+    }
+    self.begin(fd.pkg, fd.file)
+    self.check_fn(fid)
+    self.bodies.push(Some(self.end()))
+  }
+  self.test_bodies = []
+  for tid in 0..self.defs.tests.len() {
+    let td = self.defs.tests[tid]
+    self.begin(td.pkg, td.file)
+    self.check_test(tid)
+    self.test_bodies.push(Some(self.end()))
+  }
+  for aid in 0..self.defs.adts.len() {
+    let ad = self.defs.adts[aid]
+    self.begin(ad.pkg, ad.file)
+    self.check_adt_predicates(aid)
+    let _ = self.end()
+  }
+  for al in 0..self.defs.aliases.len() {
+    let a = self.defs.aliases[al]
+    self.begin(a.pkg, a.file)
+    self.check_alias_predicate(al)
+    let _ = self.end()
+  }
+  // Unused imports.
+  for pi in 0..self.pkgs.len() {
+    let pkg = self.pkgs[pi]
+    if pkg.is_std {
+      continue
+    }
+    for fi in 0..pkg.imports.len() {
+      for (name, imp) in pkg.imports[fi] {
+        if !self.imports_used[pi].contains((fi, name)) &&
+          !self.defs.sig_imports_used.contains((pi, fi, name)) {
+          let item = pkg.files[fi].ast.items[imp.1]
+          self.err("E0502", item.span, "unused import `" + item.name.text + "`")
+        }
+      }
+    }
+  }
+}
+
+// ---------- diagnostics ----------
+
+fn Sema.show(&mut self, t: Int) -> Str {
+  let z = self.zonk(t)
+  return self.tys.display(z)
+}
+
+fn Sema.mismatch(&mut self, span: syntax.Span, expected: Int, found: Int) {
+  let e = self.show(expected)
+  let f = self.show(found)
+  self.err("E0301", span, "mismatched types: expected `" + e + "`, found `" + f + "`")
+}
+
+fn Sema.expr_span(self, e: Int) -> syntax.Span {
+  return self.ast.exprs[e].span
+}
+
+// ---------- inference variables ----------
+
+fn Sema.new_var(&mut self, kind: VarKind) -> Int {
+  let v = self.var_ty.len()
+  self.var_ty.push(-1)
+  self.var_kind.push(kind)
+  return self.tys.infer(v)
+}
+
+fn Sema.fresh(&mut self) -> Int {
+  return self.new_var(VarKind.General)
+}
+
+fn Sema.fresh_list(&mut self, n: Int) -> List<Int> {
+  var out: List<Int> = []
+  for _ in 0..n {
+    out.push(self.fresh())
+  }
+  return out
+}
+
+/// Follow variable bindings at the top level.
+fn Sema.resolve(self, t: Int) -> Int {
+  var cur = t
+  for {
+    match self.tys.kinds[cur] {
+      Infer(v) => {
+        if v < self.var_ty.len() && self.var_ty[v] >= 0 {
+          cur = self.var_ty[v]
+        } else {
+          return cur
+        }
+      }
+      _ => {
+        return cur
+      }
+    }
+  }
+}
+
+fn Sema.kind_of(self, t: Int) -> TyKind {
+  return self.tys.kinds[self.resolve(t)]
+}
+
+/// Deep-resolve inference variables.
+fn Sema.zonk(&mut self, t: Int) -> Int {
+  let r = self.resolve(t)
+  return match self.tys.kinds[r] {
+    Tuple(ts) => {
+      let v = self.zonk_all(ts)
+      self.tys.tuple(v)
+    }
+    Adt(a, ts) => {
+      let v = self.zonk_all(ts)
+      self.tys.adt(a, v)
+    }
+    List(x) => {
+      let y = self.zonk(x)
+      self.tys.list(y)
+    }
+    Set(x) => {
+      let y = self.zonk(x)
+      self.tys.set(y)
+    }
+    Map(k, v) => {
+      let k2 = self.zonk(k)
+      let v2 = self.zonk(v)
+      self.tys.map_ty(k2, v2)
+    }
+    Fn(ps, ret, e) => {
+      let v = self.zonk_all(ps)
+      let r2 = self.zonk(ret)
+      self.tys.func(v, r2, e)
+    }
+    _ => r
+  }
+}
+
+fn Sema.zonk_all(&mut self, ts: List<Int>) -> List<Int> {
+  var out: List<Int> = []
+  for x in ts {
+    out.push(self.zonk(x))
+  }
+  return out
+}
+
+/// Default unresolved literal variables (Int, Float) at the end of a body.
+fn Sema.default_vars(&mut self) {
+  for i in 0..self.var_ty.len() {
+    if self.var_ty[i] < 0 {
+      match self.var_kind[i] {
+        IntLit => self.var_ty[i] = self.tys.int
+        FloatLit => self.var_ty[i] = self.tys.float
+        General => {}
+      }
+    }
+  }
+}
+
+fn Sema.rollback(&mut self, snap: Int) {
+  for self.trail.len() > snap {
+    let v = self.trail.pop().unwrap_or(0)
+    self.var_ty[v] = -1
+  }
+}
+
+fn Sema.bind(&mut self, v: Int, t: Int) {
+  self.var_ty[v] = t
+  self.trail.push(v)
+}
+
+fn Sema.occurs(self, v: Int, t: Int) -> Bool {
+  let r = self.resolve(t)
+  return match self.tys.kinds[r] {
+    Infer(w) => w == v
+    Tuple(ts) | Adt(_, ts) => self.occurs_any(v, ts)
+    List(x) | Set(x) => self.occurs(v, x)
+    Map(k, x) => self.occurs(v, k) || self.occurs(v, x)
+    Fn(ps, ret, _) => self.occurs_any(v, ps) || self.occurs(v, ret)
+    _ => false
+  }
+}
+
+fn Sema.occurs_any(self, v: Int, ts: List<Int>) -> Bool {
+  for x in ts {
+    if self.occurs(v, x) {
+      return true
+    }
+  }
+  return false
+}
+
+/// Make two types equal. Rolls back partial bindings on failure.
+fn Sema.unify(&mut self, a: Int, b: Int) -> Bool {
+  let snap = self.trail.len()
+  let ok = self.unify_inner(a, b, false)
+  if !ok {
+    self.rollback(snap)
+  }
+  return ok
+}
+
+/// `actual` may be used where `expected` is required: equality, except that `Never`
+/// converts to anything and a function with fewer effects fits a type with more.
+fn Sema.coerce(&mut self, actual: Int, expected: Int) -> Bool {
+  let snap = self.trail.len()
+  let ok = self.unify_inner(actual, expected, true)
+  if !ok {
+    self.rollback(snap)
+  }
+  return ok
+}
+
+fn Sema.unify_lists(&mut self, x: List<Int>, y: List<Int>) -> Bool {
+  let n = if x.len() < y.len() { x.len() } else { y.len() }
+  for i in 0..n {
+    if !self.unify_inner(x[i], y[i], false) {
+      return false
+    }
+  }
+  return true
+}
+
+fn Sema.unify_inner(&mut self, a0: Int, b0: Int, coerce: Bool) -> Bool {
+  let a = self.resolve(a0)
+  let b = self.resolve(b0)
+  if a == b {
+    return true
+  }
+  let ka = self.tys.kinds[a]
+  let kb = self.tys.kinds[b]
+  return match (ka, kb) {
+    (Error, _) | (_, Error) => true
+    (Never, _) if coerce => true
+    (Infer(v), Infer(w)) => {
+      let kv = self.var_kind[v]
+      let kw = self.var_kind[w]
+      if kv == VarKind.General {
+        self.bind(v, b)
+        true
+      } else if kw == VarKind.General {
+        self.bind(w, a)
+        true
+      } else if kv == kw {
+        self.bind(v, b)
+        true
+      } else {
+        false
+      }
+    }
+    (Infer(v), _) => self.bind_checked(v, b, kb)
+    (_, Infer(w)) => self.bind_checked(w, a, ka)
+    (Tuple(x), Tuple(y)) => x.len() == y.len() && self.unify_lists(x, y)
+    (Adt(p, x), Adt(q, y)) => p == q && self.unify_lists(x, y)
+    (List(x), List(y)) | (Set(x), Set(y)) => self.unify_inner(x, y, false)
+    (Map(k1, v1), Map(k2, v2)) => self.unify_inner(k1, k2, false) && self.unify_inner(v1, v2, false)
+    (Fn(p1, r1, e1), Fn(p2, r2, e2)) => {
+      let eff_ok = if coerce { effects_contain(e2, e1) } else { e1 == e2 }
+      eff_ok && p1.len() == p2.len() && self.unify_lists(p1, p2) && self.unify_inner(r1, r2, coerce)
+    }
+    _ => false
+  }
+}
+
+fn Sema.bind_checked(&mut self, v: Int, t: Int, k: TyKind) -> Bool {
+  match self.var_kind[v] {
+    IntLit => match k {
+      Int(_, _) => {}
+      _ => {
+        return false
+      }
+    }
+    FloatLit => match k {
+      Float(_) => {}
+      _ => {
+        return false
+      }
+    }
+    General => {}
+  }
+  if k == TyKind.Never {
+    return false
+  }
+  if self.occurs(v, t) {
+    return false
+  }
+  self.bind(v, t)
+  return true
+}
+
+/// Join the types of two branches.
+fn Sema.join(&mut self, a: Int, b: Int, span: syntax.Span) -> Int {
+  if self.resolve(a) == self.tys.never {
+    return b
+  }
+  if self.resolve(b) == self.tys.never {
+    return a
+  }
+  if !self.coerce(b, a) {
+    self.mismatch(span, a, b)
+  }
+  return a
+}
+
+// ---------- scopes and locals ----------
+
+fn Sema.push_scope(&mut self) {
+  self.scope_marks.push(self.scope.len())
+}
+
+fn Sema.pop_scope(&mut self) {
+  let m = self.scope_marks.pop().unwrap_or(0)
+  self.scope.truncate(m)
+}
+
+fn Sema.declare_local(&mut self, name: Str, ty: Int, kind: LocalKind, span: syntax.Span) -> Int {
+  if name != "_" && kind != LocalKind.SelfValue && kind != LocalKind.SelfMut {
+    if self.lookup_local(name).is_some() {
+      self.err("E0505", span, "`" + name + "` shadows another variable")
+    }
+    self.check_snake(name, span, "variable")
+  }
+  let id = self.body.locals.len()
+  self.body.locals.push(
+    LocalDef {
+      name: name
+      ty: ty
+      kind: kind
+      span: span
+      used: false
+      mutated: false
+      depth: self.closures.len()
+    },
+  )
+  self.scope.push((name, id))
+  return id
+}
+
+fn Sema.lookup_local(self, name: Str) -> Option<Int> {
+  var i = self.scope.len() - 1
+  for i >= 0 {
+    if self.scope[i].0 == name {
+      return Some(self.scope[i].1)
+    }
+    i -= 1
+  }
+  return None
+}
+
+/// Record a use of a local, capturing it into enclosing closures if needed.
+fn Sema.use_local(&mut self, id: Int) {
+  self.body.locals[id].used = true
+  let depth = self.body.locals[id].depth
+  for i in depth..self.closures.len() {
+    if !self.closures[i].captures.contains(id) {
+      self.closures[i].captures.push(id)
+    }
+  }
+}
+
+// ---------- effects ----------
+
+/// Perform effects at `span` (a call or a function value invocation).
+fn Sema.use_effects(&mut self, eff: Int, span: syntax.Span, what: Str) {
+  if eff == 0 {
+    return
+  }
+  if self.ctx != Ctx.Code {
+    self.err(
+      "E0321",
+      span,
+      "contracts must be pure, but " + what + " has effects " + effects_render(eff),
+    )
+    return
+  }
+  let nc = self.closures.len()
+  if nc > 0 {
+    self.closures[nc - 1].used = self.closures[nc - 1].used | eff
+    match self.closures[nc - 1].allowed {
+      Some(allowed) => {
+        let missing = effects_minus(eff, allowed)
+        if missing != 0 {
+          // Count it as used by the function too, so its declaration is not also unused.
+          self.body.used_effects = self.body.used_effects | missing
+          let msg = what +
+            " performs " +
+            effects_render(missing) +
+            " but the closure's type allows only " +
+            effects_render(allowed)
+          self.err("E0401", span, msg)
+        }
+      }
+      None => {}
+    }
+    return
+  }
+  self.body.used_effects = self.body.used_effects | eff
+  let missing = effects_minus(eff, self.declared_effects)
+  if missing != 0 {
+    let names = effect_list(missing)
+    let msg = what +
+      " needs effect" +
+      (if names.len() > 1 { "s" } else { "" }) +
+      " `" +
+      names.join("`, `") +
+      "`, which this function does not declare"
+    self.err("E0401", span, msg)
+  }
+}
+
+// ---------- bounds ----------
+
+fn Sema.require_bound(&mut self, span: syntax.Span, ty: Int, b: Bound) {
+  self.pending_bounds.push(PendingBound { span: span, ty: ty, bound: b })
+}
+
+fn Sema.check_pending_bounds(&mut self) {
+  let pending = self.pending_bounds
+  self.pending_bounds = []
+  for pb in pending {
+    let t = self.zonk(pb.ty)
+    if self.tys.has_infer(t) {
+      continue
+    }
+    var seen: Set<(Int, Bound)> = Set.new()
+    if !self.satisfies(t, pb.bound, &mut seen) {
+      let msg = "`" + self.tys.display(t) + "` does not satisfy `" + self.bound_name(pb.bound) + "`"
+      self.err("E0312", pb.span, msg)
+    }
+  }
+}
+
+fn Sema.bound_name(self, b: Bound) -> Str {
+  return match b {
+    Eq => "Eq"
+    Ord => "Ord"
+    Hash => "Hash"
+    Show => "Show"
+    Iface(i) => self.defs.ifaces[i].name
+  }
+}
+
+/// Does `t` satisfy bound `b`?
+fn Sema.satisfies(&mut self, t: Int, b: Bound, seen: &mut Set<(Int, Bound)>) -> Bool {
+  if seen.contains((t, b)) {
+    return true
+  }
+  seen.insert((t, b))
+  let k = self.tys.kinds[t]
+  match k {
+    Error | Never => {
+      return true
+    }
+    Param(i, _) => {
+      let bounds = if i < self.generics.len() { self.generics[i].bounds } else { [] }
+      // Every ordered or hashable type can be compared for equality.
+      let implied = b == Bound.Eq && (bounds.contains(Bound.Ord) || bounds.contains(Bound.Hash))
+      return bounds.contains(b) || implied
+    }
+    Fn(_, _, _) => {
+      return false
+    }
+    _ => {}
+  }
+  match b {
+    Iface(iid) => {
+      return self.satisfies_iface(t, iid)
+    }
+    _ => {}
+  }
+  return match k {
+    Float(_) => b != Bound.Ord && b != Bound.Hash
+    Int(_, _) | Bool | Char | Str => true
+    Tuple(ts) => self.satisfies_all(ts, b, &mut seen)
+    List(x) | Set(x) => self.satisfies(x, b, &mut seen)
+    Map(kk, v) => self.satisfies(kk, b, &mut seen) && self.satisfies(v, b, &mut seen)
+    Adt(a, args) => {
+      if b == Bound.Show && self.defs.method(TyKey.Adt(a), "str").is_some() {
+        return true
+      }
+      for ft in self.adt_payload_tys(a) {
+        let st = self.tys.subst(ft, args)
+        if !self.satisfies(st, b, &mut seen) {
+          return false
+        }
+      }
+      true
+    }
+    _ => true
+  }
+}
+
+fn Sema.satisfies_all(&mut self, ts: List<Int>, b: Bound, seen: &mut Set<(Int, Bound)>) -> Bool {
+  for x in ts {
+    if !self.satisfies(x, b, &mut seen) {
+      return false
+    }
+  }
+  return true
+}
+
+/// The type arguments of a type constructor.
+fn Sema.type_args_of(self, t: Int) -> List<Int> {
+  return match self.tys.kinds[t] {
+    Adt(_, args) => args
+    List(x) | Set(x) => [x]
+    Map(k, v) => [k, v]
+    _ => []
+  }
+}
+
+fn Sema.satisfies_iface(&mut self, t: Int, iid: Int) -> Bool {
+  let key = match ty_key(self.tys, t) {
+    Some(k) => k
+    None => {
+      return false
+    }
+  }
+  let targs = self.type_args_of(t)
+  for m in self.defs.ifaces[iid].methods {
+    let md = self.defs.fns[m]
+    let cf = match self.defs.method(key, md.name) {
+      Some(c) => c
+      None => {
+        return false
+      }
+    }
+    let cd = self.defs.fns[cf]
+    if cd.self_mode != md.self_mode ||
+      cd.params.len() != md.params.len() ||
+      cd.generics.len() != cd.n_recv_generics {
+      return false
+    }
+    if targs.len() != cd.n_recv_generics {
+      return false
+    }
+    for i in 0..cd.params.len() {
+      let a = self.tys.subst(cd.params[i].ty, targs)
+      let b = self.tys.subst(md.params[i].ty, [t])
+      if a != b || cd.params[i].mode != md.params[i].mode {
+        return false
+      }
+    }
+    let ra = self.tys.subst(cd.ret, targs)
+    let rb = self.tys.subst(md.ret, [t])
+    if ra != rb || !effects_contain(md.eff, cd.eff) {
+      return false
+    }
+  }
+  return true
+}
+
+// ---------- finishing ----------
+
+fn Sema.finish(&mut self) {
+  self.default_vars()
+  // Final types for every expression this body touched.
+  let touched = self.touched
+  for e in touched {
+    let z = self.zonk(self.tab.expr_ty[e])
+    if self.tys.has_infer(z) && !self.item_has_errors() {
+      match self.tys.kinds[self.first_var(z)] {
+        Infer(v) => {
+          if !self.reported_vars.contains(v) {
+            self.reported_vars.insert(v)
+            self.err("E0305", self.ast.exprs[e].span, "type annotations needed")
+          }
+        }
+        _ => {}
+      }
+    }
+    self.tab.expr_ty[e] = z
+  }
+  let pats = self.touched_pats
+  self.touched_pats = []
+  for p in pats {
+    let t = self.tab.pat_ty[p]
+    if self.tys.has_infer(t) {
+      self.tab.pat_ty[p] = self.zonk(t)
+    }
+  }
+  for id in 0..self.body.locals.len() {
+    self.body.locals[id].ty = self.zonk(self.body.locals[id].ty)
+  }
+  // Integer literal ranges.
+  let lits = self.int_lits
+  self.int_lits = []
+  for lit in lits {
+    match self.tys.kinds[self.tab.expr_ty[lit.expr]] {
+      Int(k, _) => {
+        if !k.fits(lit.v, lit.neg) {
+          let val = if lit.neg && lit.v != 0 { "-" + lit.v.str() } else { lit.v.str() }
+          let msg = "literal `" +
+            val +
+            "` does not fit in `" +
+            k.name() +
+            "` (" +
+            k.min_text() +
+            "..=" +
+            k.max_text() +
+            ")"
+          self.err("E0104", self.ast.exprs[lit.expr].span, msg)
+        }
+      }
+      _ => {}
+    }
+  }
+  self.check_pending_bounds()
+}
+
+/// Has an error been reported inside this item (body or signature)? Then unresolved types
+/// are follow-on noise.
+fn Sema.item_has_errors(self) -> Bool {
+  if self.diags.len() != self.errors_at_start {
+    return true
+  }
+  let s = self.item_span
+  if s.lo == 0 && s.hi == 0 {
+    return false
+  }
+  for d in self.diags {
+    if d.lo >= s.lo && d.hi <= s.hi {
+      return true
+    }
+  }
+  return false
+}
+
+fn Sema.first_var(self, t: Int) -> Int {
+  return match self.tys.kinds[t] {
+    Infer(_) => t
+    Tuple(ts) | Adt(_, ts) => self.first_var_in(ts, t)
+    List(x) | Set(x) => self.first_var(x)
+    Map(k, v) => {
+      let a = self.first_var(k)
+      if self.tys.is_infer(a) {
+        a
+      } else {
+        self.first_var(v)
+      }
+    }
+    Fn(ps, r, _) => {
+      let a = self.first_var_in(ps, -1)
+      if a >= 0 {
+        a
+      } else {
+        self.first_var(r)
+      }
+    }
+    _ => t
+  }
+}
+
+fn Sema.first_var_in(self, ts: List<Int>, fallback: Int) -> Int {
+  for x in ts {
+    let a = self.first_var(x)
+    if self.tys.is_infer(a) {
+      return a
+    }
+  }
+  return fallback
+}
+
+/// Unused variables, needless `var`, needless `&mut`.
+fn Sema.lint_locals(&mut self) {
+  for l in self.body.locals {
+    if l.name.starts_with("_") {
+      continue
+    }
+    match l.kind {
+      SelfValue => {}
+      SelfMut => { if !l.mutated { self.err("E0510", l.span, "`&mut self` is never mutated") } }
+      _ => {
+        if !l.used {
+          let what = if l.kind == LocalKind.Param || l.kind == LocalKind.MutParam {
+            "parameter"
+          } else {
+            "variable"
+          }
+          self.err("E0501", l.span, "unused " + what + " `" + l.name + "`")
+        } else if l.kind == LocalKind.Var && !l.mutated {
+          self.err("E0503", l.span, "`" + l.name + "` is declared `var` but never mutated")
+        } else if l.kind == LocalKind.MutParam && !l.mutated {
+          self.err("E0510", l.span, "parameter `" + l.name + "` is `&mut` but never mutated")
+        }
+      }
+    }
+  }
+}
+
+// ---------- entry points ----------
+
+fn Sema.setup_params(&mut self, params: List<ParamDef>) {
+  for p in params {
+    let kind = if p.mode == Mode.MutRef { LocalKind.MutParam } else { LocalKind.Param }
+    let _ = self.declare_local(p.name, p.ty, kind, p.span)
+  }
+}
+
+fn Sema.check_bool(&mut self, e: Int) {
+  let b = self.tys.bool
+  let _ = self.check_expr(e, Some(b))
+}
+
+fn Sema.check_fn(&mut self, fid: Int) {
+  let fd = self.defs.fns[fid]
+  let item = self.ast.items[fd.item]
+  self.generics = fd.generics
+  self.ret_ty = fd.ret
+  self.declared_effects = fd.eff
+  let f = match item.kind {
+    Fn(decl) => decl
+    _ => {
+      return
+    }
+  }
+  self.item_span = item.span
+  self.check_snake(item.name.text, item.name.span, "function")
+  for g in fd.generics {
+    if g.name != "Self" {
+      self.check_camel(g.name, g.span, "type parameter")
+    }
+  }
+  self.push_scope()
+  match (fd.self_mode, fd.self_ty) {
+    (Some(m), Some(t)) => {
+      let kind = if m == Mode.MutRef { LocalKind.SelfMut } else { LocalKind.SelfValue }
+      let span = match f.self_param {
+        Some(s) => s.span
+        None => item.name.span
+      }
+      let _ = self.declare_local("self", t, kind, span)
+    }
+    _ => {}
+  }
+  self.setup_params(fd.params)
+  // Parameter refinements and requires.
+  self.ctx = Ctx.Pure
+  for p in f.params {
+    match p.refine {
+      Some(pred) => self.check_bool(pred)
+      None => {}
+    }
+  }
+  for r in f.pre {
+    self.check_bool(r)
+  }
+  self.ctx = Ctx.Code
+  match f.body {
+    Some(body) => {
+      self.diverges = false
+      self.check_block_stmts(body)
+      if !self.diverges && self.ret_ty != self.tys.unit_ty {
+        let span = self.ast.exprs[body].span
+        let close = syntax.Span { lo: if span.hi > 0 { span.hi - 1 } else { 0 }, hi: span.hi }
+        let rt = self.show(self.ret_ty)
+        self.err(
+          "E0308",
+          close,
+          "missing `return`: this function must return `" + rt + "` on every path",
+        )
+      }
+    }
+    None => {}
+  }
+  self.ctx = Ctx.Ensures
+  for e in f.post {
+    self.check_bool(e)
+  }
+  self.ctx = Ctx.Code
+  self.pop_scope()
+  self.finish()
+  if f.body.is_some() {
+    self.lint_locals()
+    let unused = effects_minus(self.declared_effects, self.body.used_effects)
+    if unused != 0 && fd.iface.is_none() {
+      let span = if f.effects_span.lo == 0 && f.effects_span.hi == 0 {
+        item.name.span
+      } else {
+        f.effects_span
+      }
+      var quoted: List<Str> = []
+      for n in effect_list(unused) {
+        quoted.push("`" + n + "`")
+      }
+      let msg = "declared effect" + plural(quoted.len()) + " " + quoted.join(", ") + " never used"
+      self.err("E0403", span, msg)
+    }
+  }
+}
+
+fn Sema.check_test(&mut self, tid: Int) {
+  let td = self.defs.tests[tid]
+  let item = self.ast.items[td.item]
+  // Tests run against deterministic fakes and may use any effect.
+  self.declared_effects = 255
+  let (pre, body) = match item.kind {
+    Test(_, _, pre, body) => (pre, body)
+    _ => {
+      return
+    }
+  }
+  self.push_scope()
+  self.setup_params(td.params)
+  self.ctx = Ctx.Pure
+  for r in pre {
+    self.check_bool(r)
+  }
+  self.ctx = Ctx.Code
+  self.diverges = false
+  self.check_block_stmts(body)
+  self.pop_scope()
+  self.finish()
+  self.lint_locals()
+}
+
+fn Sema.check_adt_predicates(&mut self, aid: Int) {
+  let ad = self.defs.adts[aid]
+  let item = self.ast.items[ad.item]
+  self.generics = ad.generics
+  self.check_camel(item.name.text, item.name.span, if ad.is_enum { "enum" } else { "struct" })
+  self.ctx = Ctx.Pure
+  match item.kind {
+    Struct(_, fields, invariants) => {
+      for f in fields {
+        self.check_snake(f.name.text, f.name.span, "field")
+      }
+      for i in 0..fields.len() {
+        let f = fields[i]
+        match f.refine {
+          Some(pred) => {
+            self.push_scope()
+            let t = if i < ad.fields.len() { ad.fields[i].ty } else { self.tys.error }
+            let id = self.declare_local(f.name.text, t, LocalKind.Param, f.name.span)
+            self.body.locals[id].used = true
+            self.check_bool(pred)
+            self.pop_scope()
+          }
+          None => {}
+        }
+      }
+      if !invariants.is_empty() {
+        self.push_scope()
+        for i in 0..fields.len() {
+          let t = if i < ad.fields.len() { ad.fields[i].ty } else { self.tys.error }
+          let id = self.declare_local(fields[i].name.text, t, LocalKind.Param, fields[i].name.span)
+          self.body.locals[id].used = true
+        }
+        for e in invariants {
+          self.check_bool(e)
+        }
+        self.pop_scope()
+      }
+    }
+    Enum(_, variants) => {
+      for v in variants {
+        self.check_camel(v.name.text, v.name.span, "variant")
+        for f in v.fields {
+          if !f.name.text.starts_with("_") {
+            self.check_snake(f.name.text, f.name.span, "field")
+          }
+        }
+      }
+    }
+    _ => {}
+  }
+  self.ctx = Ctx.Code
+  self.finish()
+}
+
+fn Sema.check_alias_predicate(&mut self, al: Int) {
+  let ad = self.defs.aliases[al]
+  let item = self.ast.items[ad.item]
+  self.check_camel(item.name.text, item.name.span, "type alias")
+  self.generics = ad.generics
+  match ad.refine {
+    Some(pred) => {
+      self.ctx = Ctx.Pure
+      self.push_scope()
+      let id = self.declare_local("self", ad.ty, LocalKind.SelfValue, item.name.span)
+      self.body.locals[id].used = true
+      self.check_bool(pred)
+      self.pop_scope()
+      self.ctx = Ctx.Code
+    }
+    None => {}
+  }
+  self.finish()
+}
+
+// ---------- shared helpers ----------
+
+fn Sema.record(&mut self, e: Int, t: Int) -> Int {
+  self.tab.expr_ty[e] = t
+  self.touched.push(e)
+  return t
+}
+
+fn Sema.set_pat_ty(&mut self, p: Int, t: Int) {
+  self.tab.pat_ty[p] = t
+  self.touched_pats.push(p)
+}
+
+fn Sema.set_res(&mut self, e: Int, r: Res) {
+  self.tab.expr_res[e] = r
+}
+
+fn Sema.add_ref(&mut self, f: Int) {
+  if !self.body.refs.contains(f) {
+    self.body.refs.push(f)
+  }
+}
+
+/// The package a name imports in the current file.
+fn Sema.imported(self, name: Str) -> Option<Int> {
+  return match self.pkgs[self.pkg].imports[self.file].get(name) {
+    Some(imp) => Some(imp.0)
+    None => None
+  }
+}
+
+fn Sema.use_import(&mut self, name: Str) {
+  self.imports_used[self.pkg].insert((self.file, name))
+}
+
+// ---------- naming ----------
+
+fn is_snake(s: Str) -> Bool {
+  if s.is_empty() || (s[0] >= '0' && s[0] <= '9') {
+    return false
+  }
+  for c in s.chars() {
+    if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
+      return false
+    }
+  }
+  return true
+}
+
+fn is_camel(s: Str) -> Bool {
+  return !s.is_empty() && s[0] >= 'A' && s[0] <= 'Z' && !s.contains("_")
+}
+
+fn to_camel(s: Str) -> Str {
+  var out = ""
+  for part in s.split("_") {
+    if part.is_empty() {
+      continue
+    }
+    let cs = part.chars()
+    out = out + cs[0].to_upper().str() + part[cs[0].str().len()..part.len()]
+  }
+  return out
+}
+
+fn Sema.check_snake(&mut self, name: Str, span: syntax.Span, what: Str) {
+  var start = 0
+  for start < name.len() && name[start] == '_' {
+    start += 1
+  }
+  let t = name[start..name.len()]
+  if t.is_empty() || is_snake(t) {
+    return
+  }
+  self.err("E0504", span, what + " `" + name + "` should be snake_case")
+}
+
+fn Sema.check_camel(&mut self, name: Str, span: syntax.Span, what: Str) {
+  if is_camel(name) || to_camel(name) == name {
+    return
+  }
+  self.err("E0504", span, what + " `" + name + "` should be UpperCamel")
+}

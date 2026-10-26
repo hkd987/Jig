@@ -1,15 +1,22 @@
+import "sema"
 import "std/fs"
 import "std/io"
 import "std/os"
 import "syntax"
 
-// jigc: the Jig compiler, written in Jig. So far it lexes and parses: `jigc tokens FILE` and
-// `jigc ast FILE` print the same text as `jig debug tokens FILE` and `jig debug ast FILE`.
+// jigc: the Jig compiler, written in Jig. So far it lexes, parses and checks:
+// `jigc tokens FILE`, `jigc ast FILE` and `jigc check DIR STD` print the same text as
+// `jig debug tokens FILE`, `jig debug ast FILE` and `jig debug check DIR` (STD is the
+// standard library's directory, `compiler/std`).
 
 fn main() effects {io, fs, env} {
   let args = os.args()
+  if args.len() == 4 && args[1] == "check" {
+    io.print(sema.check_dump(args[2], args[3]))
+    return
+  }
   if args.len() < 3 || (args[1] != "tokens" && args[1] != "ast") {
-    io.eprintln("usage: jigc tokens|ast FILE")
+    io.eprintln("usage: jigc tokens|ast FILE, jigc check DIR STD")
     os.exit(2)
   }
   match fs.read(args[2]) {

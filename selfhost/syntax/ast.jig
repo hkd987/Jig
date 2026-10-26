@@ -2,35 +2,35 @@
 // holds a file in flat arenas; nodes refer to each other by index into them.
 
 /// A byte range of the source (global offsets).
-struct Span {
-  lo: Int
-  hi: Int
+pub struct Span {
+  pub lo: Int
+  pub hi: Int
 }
 
 /// A name with its source location.
-struct Name {
-  text: Str
-  span: Span
+pub struct Name {
+  pub text: Str
+  pub span: Span
 }
 
-struct Ast {
-  items: List<Item>
-  exprs: List<Expr>
-  stmts: List<Stmt>
-  types: List<TypeExpr>
-  pats: List<Pat>
+pub struct Ast {
+  pub items: List<Item>
+  pub exprs: List<Expr>
+  pub stmts: List<Stmt>
+  pub types: List<TypeExpr>
+  pub pats: List<Pat>
   /// The file's top-level items, in order.
-  top: List<Int>
+  pub top: List<Int>
 }
 
-struct Item {
-  kind: ItemKind
-  name: Name
-  span: Span
-  is_pub: Bool
+pub struct Item {
+  pub kind: ItemKind
+  pub name: Name
+  pub span: Span
+  pub is_pub: Bool
 }
 
-enum ItemKind {
+pub enum ItemKind {
   /// `import "path"`; the item's name is the last path segment.
   Import(path: Str, path_span: Span)
   Fn(decl: FnDecl)
@@ -43,82 +43,82 @@ enum ItemKind {
   Test(label: Str, params: List<Param>, pre: List<Int>, body: Int)
 }
 
-struct FnDecl {
+pub struct FnDecl {
   /// `fn Type.name`: the receiver type and the type's generic parameters.
-  recv: Option<Receiver>
-  self_param: Option<SelfParam>
-  generics: List<GenericParam>
-  params: List<Param>
-  ret: Option<Int>
-  pre: List<Int>
-  post: List<Int>
+  pub recv: Option<Receiver>
+  pub self_param: Option<SelfParam>
+  pub generics: List<GenericParam>
+  pub params: List<Param>
+  pub ret: Option<Int>
+  pub pre: List<Int>
+  pub post: List<Int>
   /// `None`: no clause (pure). `Some([])`: explicit `effects {}`.
-  effect_names: Option<List<Name>>
-  effects_span: Span
+  pub effect_names: Option<List<Name>>
+  pub effects_span: Span
   /// A `Block` expression; `None` for interface method signatures.
-  body: Option<Int>
+  pub body: Option<Int>
   /// `step "pattern"` attached to this function.
-  step_attr: Option<Step>
-  sig_span: Span
+  pub step_attr: Option<Step>
+  pub sig_span: Span
 }
 
-struct Receiver {
-  ty: Name
-  generics: List<GenericParam>
+pub struct Receiver {
+  pub ty: Name
+  pub generics: List<GenericParam>
 }
 
-struct SelfParam {
-  mutable: Bool
-  span: Span
+pub struct SelfParam {
+  pub mutable: Bool
+  pub span: Span
 }
 
-struct Step {
-  pattern: Str
-  span: Span
+pub struct Step {
+  pub pattern: Str
+  pub span: Span
 }
 
-struct Param {
-  name: Name
+pub struct Param {
+  pub name: Name
   /// `None` only for closure parameters whose type is inferred.
-  ty: Option<Int>
-  mut_ref: Bool
+  pub ty: Option<Int>
+  pub mut_ref: Bool
   /// `x: Int where x > 0`
-  refine: Option<Int>
-  span: Span
+  pub refine: Option<Int>
+  pub span: Span
 }
 
-struct GenericParam {
-  name: Name
-  bounds: List<Int>
+pub struct GenericParam {
+  pub name: Name
+  pub bounds: List<Int>
 }
 
-struct FieldDecl {
-  name: Name
-  ty: Int
-  is_pub: Bool
-  refine: Option<Int>
-  span: Span
+pub struct FieldDecl {
+  pub name: Name
+  pub ty: Int
+  pub is_pub: Bool
+  pub refine: Option<Int>
+  pub span: Span
 }
 
-struct VariantDecl {
-  name: Name
-  fields: List<FieldDecl>
+pub struct VariantDecl {
+  pub name: Name
+  pub fields: List<FieldDecl>
   /// Whether the variant was written with parentheses (`Empty` vs `Empty()`).
-  has_parens: Bool
-  span: Span
+  pub has_parens: Bool
+  pub span: Span
 }
 
-struct UnitFactor {
-  name: Name
-  exp: Int
+pub struct UnitFactor {
+  pub name: Name
+  pub exp: Int
 }
 
-struct TypeExpr {
-  kind: TypeKind
-  span: Span
+pub struct TypeExpr {
+  pub kind: TypeKind
+  pub span: Span
 }
 
-enum TypeKind {
+pub enum TypeKind {
   /// `Name`, `pkg.Name`, `Name<A, B>`, `Float<m/s>`.
   Named(pkg: Option<Name>, name: Name, args: List<Int>, units: Option<List<UnitFactor>>)
   /// `()` and `(A, B)`.
@@ -128,18 +128,18 @@ enum TypeKind {
   Refined(base: Int, pred: Int)
 }
 
-struct Expr {
-  kind: ExprKind
-  span: Span
+pub struct Expr {
+  pub kind: ExprKind
+  pub span: Span
 }
 
-enum UnOp {
+pub enum UnOp {
   Neg
   Not
   BitNot
 }
 
-enum BinOp {
+pub enum BinOp {
   Mul
   Div
   Rem
@@ -172,7 +172,7 @@ fn BinOp.precedence(self) -> Int
   }
 }
 
-fn BinOp.text(self) -> Str {
+pub fn BinOp.text(self) -> Str {
   return match self {
     Mul => "*"
     Div => "/"
@@ -203,7 +203,7 @@ fn UnOp.text(self) -> Str {
   }
 }
 
-enum ExprKind {
+pub enum ExprKind {
   Int(value: U64)
   /// The value is the source text.
   Float
@@ -237,24 +237,24 @@ enum ExprKind {
   Quant(is_forall: Bool, binder: Name, lo: Int, hi: Int, body: Int)
 }
 
-struct Arm {
-  pat: Int
-  guard: Option<Int>
-  body: Int
-  span: Span
+pub struct Arm {
+  pub pat: Int
+  pub guard: Option<Int>
+  pub body: Int
+  pub span: Span
 }
 
-struct FieldInit {
-  name: Name
-  value: Int
+pub struct FieldInit {
+  pub name: Name
+  pub value: Int
 }
 
-struct Stmt {
-  kind: StmtKind
-  span: Span
+pub struct Stmt {
+  pub kind: StmtKind
+  pub span: Span
 }
 
-enum StmtKind {
+pub enum StmtKind {
   Let(pat: Int, ty: Option<Int>, init: Int, mutable: Bool)
   Assign(target: Int, op: Option<BinOp>, value: Int)
   Expr(expr: Int)
@@ -264,18 +264,18 @@ enum StmtKind {
   For(head: ForHead, invariants: List<Int>, body: Int)
 }
 
-enum ForHead {
+pub enum ForHead {
   Forever
   While(cond: Int)
   In(pat: Int, iter: Int)
 }
 
-struct Pat {
-  kind: PatKind
-  span: Span
+pub struct Pat {
+  pub kind: PatKind
+  pub span: Span
 }
 
-enum PatKind {
+pub enum PatKind {
   Wild
   Bind(name: Str)
   /// A literal expression: Int, Float, Str, Char, Bool, or a negated number.
