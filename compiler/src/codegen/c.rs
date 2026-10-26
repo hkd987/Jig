@@ -218,80 +218,10 @@ struct FnCx {
     params: FxHashSet<Local>,
     /// Lists made unique where they are defined, whose element writes need no copy check.
     unique: FxHashSet<Local>,
-}
-
-/// Lists that stay unique once made so: they are written through indices, and otherwise used
-/// only by intrinsics that read them in place or keep them unique (`len`, `push`, `swap`, ...).
-/// Nothing copies one whole or passes it `&mut` to a function that could replace it, so after
-/// it is made unique where it is defined (at entry for `&mut` parameters, after each
-/// assignment for locals) its element writes can skip the copy-on-write check.
-fn unique_lists(mf: &MFn, tys: &crate::sema::ty::TyCtx) -> FxHashSet<Local> {
-    fn whole(op: &Operand, bad: &mut FxHashSet<Local>) {
-        if let Operand::Copy(p) = op {
-            if p.proj.is_empty() {
-                bad.insert(p.local);
-            }
-        }
-    }
-    let reads_in_place =
-        |op: Op| matches!(op, Op::ListLen | Op::ListIsEmpty | Op::Get | Op::ListSlice | Op::ListRepeat | Op::Show);
-    let mut written: FxHashSet<Local> = FxHashSet::default();
-    let mut bad: FxHashSet<Local> = FxHashSet::default();
-    for block in mf.blocks.iter() {
-        for (stmt, _) in &block.stmts {
-            let Stmt::Assign(p, rv) = stmt else { continue };
-            if matches!(p.proj.first(), Some(PlaceElem::Index(..))) {
-                written.insert(p.local);
-            }
-            match rv {
-                Rvalue::Use(a) | Rvalue::Unary(_, a, _) | Rvalue::Cast(a, _, _) | Rvalue::Inc(a, _) => {
-                    whole(a, &mut bad)
-                }
-                Rvalue::Binary(_, a, b, _) => {
-                    whole(a, &mut bad);
-                    whole(b, &mut bad);
-                }
-                Rvalue::Aggregate(_, _, ops) | Rvalue::Closure(_, ops) => ops.iter().for_each(|o| whole(o, &mut bad)),
-                Rvalue::Discriminant(_) => {}
-                Rvalue::Call(callee, args, _) => {
-                    let intr = match callee {
-                        Callee::Intrinsic(i) => Some(i.op),
-                        Callee::Value(f) => {
-                            whole(f, &mut bad);
-                            None
-                        }
-                        Callee::Fn(_) => None,
-                    };
-                    for a in args {
-                        match (a, intr) {
-                            (Arg::Value(o), Some(op)) if reads_in_place(op) => {}
-                            (Arg::Value(o), _) => whole(o, &mut bad),
-                            // List intrinsics taking `&mut` keep a unique list unique.
-                            (Arg::MutRef(_), Some(_)) => {}
-                            (Arg::MutRef(p), None) if p.proj.is_empty() => {
-                                bad.insert(p.local);
-                            }
-                            (Arg::MutRef(p), None) => {
-                                if matches!(p.proj.first(), Some(PlaceElem::Index(..))) {
-                                    written.insert(p.local);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let by_value: FxHashSet<Local> = mf.params.iter().filter(|(_, m)| *m != Mode::MutRef).map(|(l, _)| *l).collect();
-    written
-        .into_iter()
-        .filter(|l| {
-            l.0 != 0
-                && !bad.contains(l)
-                && !by_value.contains(l)
-                && matches!(tys.kind(mf.locals[*l].ty), TyKind::List(_))
-        })
-        .collect()
+    /// Locals aliasing part of a by-value parameter: no count of their own.
+    borrowed: FxHashSet<Local>,
+    /// Locals the current statement reads for the last time, so it may move them out.
+    movable: FxHashSet<Local>,
 }
 
 impl<'l, 'a> CGen<'l, 'a> {
@@ -950,14 +880,29 @@ impl<'l, 'a> CGen<'l, 'a> {
     fn emit_fn(&mut self, f: MFnId) {
         let mf = self.lw.mir.fns[f].clone();
         let sig = self.fn_sig(f);
-        let unique = unique_lists(&mf, self.lw.tys);
-        let mut cx = FnCx { out: String::new(), mutref: FxHashSet::default(), params: FxHashSet::default(), unique };
+        let unique = super::own::unique_lists(&mf, self.lw.tys);
+        let borrowed = super::own::borrowed_locals(&mf);
+        let mut cx = FnCx {
+            out: String::new(),
+            mutref: FxHashSet::default(),
+            params: FxHashSet::default(),
+            unique,
+            borrowed,
+            movable: FxHashSet::default(),
+        };
         for &(l, m) in &mf.params {
             cx.params.insert(l);
             if m == Mode::MutRef {
                 cx.mutref.insert(l);
             }
         }
+        let owners: FxHashSet<Local> = mf
+            .locals
+            .iter_enumerated()
+            .filter(|(l, d)| l.0 != 0 && !cx.params.contains(l) && !cx.borrowed.contains(l) && self.needs_rc(d.ty))
+            .map(|(l, _)| l)
+            .collect();
+        let moves = super::own::last_uses(&mf, &owners);
         let _ = writeln!(cx.out, "/* {} */\n{sig} {{", mf.name.replace("*/", "* /"));
         for (l, d) in mf.locals.iter_enumerated() {
             if cx.params.contains(&l) {
@@ -974,9 +919,11 @@ impl<'l, 'a> CGen<'l, 'a> {
         }
         for (b, block) in mf.blocks.iter_enumerated() {
             let _ = writeln!(cx.out, "bb{}:;", b.0);
-            for (stmt, span) in &block.stmts {
+            for (i, (stmt, span)) in block.stmts.iter().enumerate() {
+                cx.movable = moves[b.0 as usize][i].clone();
                 self.emit_stmt(&mf, &mut cx, stmt, *span);
             }
+            cx.movable.clear();
             self.emit_term(&mf, &mut cx, &block.term, block.term_span);
         }
         cx.out.push_str("}\n\n");
@@ -1206,6 +1153,13 @@ impl<'l, 'a> CGen<'l, 'a> {
         }
         let c = self.cty(t);
         let n = self.fresh();
+        if let Operand::Copy(p) = op {
+            if p.proj.is_empty() && cx.movable.contains(&p.local) {
+                // Its last use: take the value and clear the local instead of counting.
+                let _ = writeln!(cx.out, "    {c} t{n} = {e}; memset(&{e}, 0, sizeof {e});");
+                return format!("t{n}");
+            }
+        }
         let g = self.glue_name(t, G_RETAIN);
         let _ = writeln!(cx.out, "    {c} t{n} = {e}; {g}(&t{n});");
         format!("t{n}")
@@ -1242,6 +1196,15 @@ impl<'l, 'a> CGen<'l, 'a> {
                         // Never returns: evaluate for its effect; nothing is stored.
                         let val = self.rvalue(mf, cx, rv, t, span);
                         let _ = writeln!(cx.out, "    (void)({val});");
+                        return;
+                    }
+                }
+                if p.proj.is_empty() && cx.borrowed.contains(&p.local) {
+                    // An alias of part of a parameter: no count, nothing to release.
+                    if let Rvalue::Use(op) = rv {
+                        let src = self.operand(mf, cx, op, span);
+                        let dst = self.local_lval(cx, p.local);
+                        let _ = writeln!(cx.out, "    {dst} = {src};");
                         return;
                     }
                 }
@@ -1302,7 +1265,7 @@ impl<'l, 'a> CGen<'l, 'a> {
             }
             Stmt::Drop(l) => {
                 let t = mf.locals[*l].ty;
-                if self.needs_rc(t) && !cx.params.contains(l) {
+                if self.needs_rc(t) && !cx.params.contains(l) && !cx.borrowed.contains(l) {
                     let lv = self.local_lval(cx, *l);
                     let rel = self.release_stmt(t, &lv);
                     let _ = writeln!(cx.out, "    {rel} memset(&{lv}, 0, sizeof {lv});");
@@ -1330,7 +1293,7 @@ impl<'l, 'a> CGen<'l, 'a> {
             }
             Terminator::Return => {
                 for (l, d) in mf.locals.iter_enumerated() {
-                    if l.0 == 0 || cx.params.contains(&l) {
+                    if l.0 == 0 || cx.params.contains(&l) || cx.borrowed.contains(&l) {
                         continue;
                     }
                     let rel = self.release_stmt(d.ty, &format!("l{}", l.0));
@@ -1623,6 +1586,65 @@ impl<'l, 'a> CGen<'l, 'a> {
             .collect()
     }
 
+    /// Value arguments rooted in a local that is also passed `&mut` in the same call, each
+    /// retained into a temporary: (argument index, temporary, its type).
+    fn hold_aliased(
+        &mut self,
+        mf: &MFn,
+        cx: &mut FnCx,
+        args: &[Arg],
+        span: crate::diag::Span,
+    ) -> Vec<(usize, String, Ty)> {
+        let roots: FxHashSet<Local> = args
+            .iter()
+            .filter_map(|a| match a {
+                Arg::MutRef(p) => Some(p.local),
+                Arg::Value(_) => None,
+            })
+            .collect();
+        let mut held = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            if let Arg::Value(o @ Operand::Copy(p)) = a {
+                let t = self.operand_ty(mf, o);
+                if roots.contains(&p.local) && self.needs_rc(t) {
+                    let v = self.owned(mf, cx, o, span);
+                    held.push((i, v, t));
+                }
+            }
+        }
+        held
+    }
+
+    fn arg_exprs_with(
+        &mut self,
+        mf: &MFn,
+        cx: &mut FnCx,
+        args: &[Arg],
+        held: &[(usize, String, Ty)],
+        span: crate::diag::Span,
+    ) -> Vec<String> {
+        let mut a = self.arg_exprs(mf, cx, args, span);
+        for (i, v, _) in held {
+            a[*i] = v.clone();
+        }
+        a
+    }
+
+    /// Run the call now and release the held arguments after it.
+    fn release_held(&mut self, cx: &mut FnCx, call: String, ret: Ty, held: &[(usize, String, Ty)]) -> String {
+        if held.is_empty() {
+            return call;
+        }
+        let n = self.fresh();
+        let c = self.cty(ret);
+        let _ = writeln!(cx.out, "    {c} cr{n} = {call};");
+        for (_, v, t) in held {
+            let rel = self.release_stmt(*t, v);
+            let _ = writeln!(cx.out, "    {rel}");
+        }
+        format!("cr{n}")
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn call(
         &mut self,
@@ -1637,9 +1659,11 @@ impl<'l, 'a> CGen<'l, 'a> {
         match callee {
             Callee::Fn(f) => {
                 self.enqueue(*f);
-                // Value arguments are borrowed; freeze each in a local first so that a
-                // `&mut` argument cannot observe the read.
-                let a = self.arg_exprs(mf, cx, args, span);
+                // Value arguments are borrowed. One that shares a local with a `&mut`
+                // argument is counted for the call, so writes through the reference copy
+                // instead of changing it.
+                let held = self.hold_aliased(mf, cx, args, span);
+                let a = self.arg_exprs_with(mf, cx, args, &held, span);
                 let r = format!("f{}({})", f.0, a.join(", "));
                 if self.lw.tys.is_never(ret) {
                     let n = self.fresh();
@@ -1647,7 +1671,7 @@ impl<'l, 'a> CGen<'l, 'a> {
                     let _ = writeln!(cx.out, "    {r};\n    {c} nv{n} = {{0}};");
                     return format!("nv{n}");
                 }
-                r
+                self.release_held(cx, r, ret, &held)
             }
             Callee::Value(op) => {
                 let ft = self.operand_ty(mf, op);
@@ -1661,12 +1685,14 @@ impl<'l, 'a> CGen<'l, 'a> {
                 for p in ps {
                     pcs.push(self.cty(p));
                 }
-                let a = self.arg_exprs(mf, cx, args, span);
+                let held = self.hold_aliased(mf, cx, args, span);
+                let a = self.arg_exprs_with(mf, cx, args, &held, span);
                 let n = self.fresh();
                 let _ = writeln!(cx.out, "    jig_fn fv{n} = {fe};");
                 let mut all = vec![format!("fv{n}.env")];
                 all.extend(a);
-                format!("(({rc} (*)({}))fv{n}.code)({})", pcs.join(", "), all.join(", "))
+                let call = format!("(({rc} (*)({}))fv{n}.code)({})", pcs.join(", "), all.join(", "));
+                self.release_held(cx, call, ret, &held)
             }
             Callee::Intrinsic(i) => self.intrinsic(mf, cx, i, args, ret, span),
         }

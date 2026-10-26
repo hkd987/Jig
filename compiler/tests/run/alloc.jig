@@ -1,0 +1,70 @@
+import "std/io"
+
+// Allocation patterns: blocks of every size class, growth from small blocks to large
+// ones, and many short-lived values freed in different orders.
+
+fn checksum(s: Str) -> Int {
+  var h = 0
+  for b in s.bytes() {
+    h = (h * 31 + b as Int) % 1000000007
+  }
+  return h
+}
+
+fn main() effects {io} {
+  // Strings growing one byte at a time through every size class, then far past them.
+  var s = ""
+  var sums = 0
+  for i in 0..2000 {
+    s = s + (i % 10).str()
+    if i % 97 == 0 {
+      sums = (sums + checksum(s)) % 1000000007
+    }
+  }
+  io.println(s.len().str() + " " + sums.str())
+
+  // Lists of different element sizes, grown by push and dropped.
+  var total = 0
+  for round in 0..50 {
+    var ints: List<Int> = []
+    var pairs: List<(Int, Str)> = []
+    for i in 0..round * 7 {
+      ints.push(i)
+      pairs.push((i, i.str()))
+    }
+    total += ints.len() + pairs.len()
+    if pairs.len() > 3 {
+      total += pairs[3].1.len()
+    }
+  }
+  io.println(total.str())
+
+  // Maps that grow and shrink, with keys freed out of order.
+  var m: Map<Str, List<Int>> = Map.new()
+  for i in 0..600 {
+    let k = "key" + (i * 7 % 600).str()
+    var v = m.get(k).unwrap_or([])
+    v.push(i)
+    m.insert(k, v)
+    if i % 3 == 0 {
+      let _ = m.remove("key" + (i / 2).str())
+    }
+  }
+  var vals = 0
+  for k in m.keys() {
+    vals += m.get(k).unwrap_or([]).len()
+  }
+  io.println(m.len().str() + " " + vals.str())
+
+  // Nested lists copied and changed independently.
+  var grid = [[0].repeat(40)].repeat(30)
+  let saved = grid
+  for i in 0..30 {
+    grid[i][i] = i
+  }
+  var diag = 0
+  for i in 0..30 {
+    diag += grid[i][i] + saved[i][i]
+  }
+  io.println(diag.str())
+}

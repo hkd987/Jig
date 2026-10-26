@@ -179,10 +179,14 @@ pub fn build(prog: &mut Program, opts: &BuildOpts) -> Result<PathBuf, String> {
     }
     let mut objs = Vec::new();
     if opts.release {
-        // One unit: the optimizer sees the whole program, runtime included.
+        // One unit: the optimizer sees the whole program, runtime included. Release builds
+        // allocate from the runtime's pools; debug builds use malloc so Valgrind sees each block.
         write_if_changed(&opts.build_dir.join("jig_rt.c"), RUNTIME_C)?;
         let src = opts.build_dir.join(format!("{stem}.c"));
-        write_if_changed(&src, &format!("#define _GNU_SOURCE\n{}\n#include \"jig_rt.c\"\n", c.unity()))?;
+        write_if_changed(
+            &src,
+            &format!("#define _GNU_SOURCE\n#define JIG_POOL 1\n{}\n#include \"jig_rt.c\"\n", c.unity()),
+        )?;
         objs.push(src);
     } else {
         let n = unit_count(&c);

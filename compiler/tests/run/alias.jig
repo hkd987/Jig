@@ -1,0 +1,14 @@
+import "std/io"
+
+// A value argument and a `&mut` argument naming the same variable: the value is a copy
+// taken before the call, so writes through the reference do not show through it.
+fn f(a: List<Int>, b: &mut List<Int>) -> Int {
+  b[0] = 99
+  return a[0]
+}
+
+fn main() effects {io} {
+  var x = [1, 2]
+  x[1] = 3
+  io.println(f(x, &mut x).str())
+}

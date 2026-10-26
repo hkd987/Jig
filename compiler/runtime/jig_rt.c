@@ -78,12 +78,104 @@ void jig_unreachable(const char *loc) { jig_panic("entered unreachable code", lo
 
 /* ---------- memory ---------- */
 
+static void jig_oom(void) __attribute__((noreturn, cold));
+static void jig_oom(void) {
+    fputs("out of memory\n", stderr);
+    _exit(102);
+}
+
+#ifdef JIG_POOL
+/* Release builds: blocks up to POOL_MAX bytes come from per-thread free lists, one per
+ * 16-byte size class, carved from 64 KiB slabs that are never returned. Each block starts
+ * with an 8-byte header holding its class (0 for a large block from malloc), so jig_free
+ * needs no size. Debug builds use malloc directly so Valgrind sees every block. */
+#define POOL_MAX 512
+typedef struct pool_block {
+    struct pool_block *next;
+} pool_block;
+static __thread pool_block *pool_free[POOL_MAX / 16 + 1];
+static __thread char *pool_cur, *pool_end;
+
+static uint64_t *pool_carve(size_t sz) __attribute__((noinline));
+static uint64_t *pool_carve(size_t sz) {
+    if ((size_t)(pool_end - pool_cur) < sz) {
+        size_t slab = (size_t)1 << 16;
+        pool_cur = malloc(slab);
+        if (!pool_cur) jig_oom();
+        pool_end = pool_cur + slab;
+    }
+    uint64_t *h = (uint64_t *)pool_cur;
+    pool_cur += sz;
+    return h;
+}
+
+void *jig_alloc(size_t n) {
+    size_t need = n + 8;
+    if (__builtin_expect(need <= POOL_MAX, 1)) {
+        size_t c = (need + 15) >> 4;
+        pool_block *b = pool_free[c];
+        uint64_t *h;
+        if (b) {
+            pool_free[c] = b->next;
+            h = (uint64_t *)b;
+        } else {
+            h = pool_carve(c << 4);
+        }
+        h[0] = c;
+        return h + 1;
+    }
+    uint64_t *h = malloc(need);
+    if (!h) jig_oom();
+    h[0] = 0;
+    return h + 1;
+}
+
+static void *jig_alloc_zeroed(size_t n) {
+    if (n + 8 <= POOL_MAX) return memset(jig_alloc(n), 0, n);
+    uint64_t *h = calloc(1, n + 8);
+    if (!h) jig_oom();
+    return h + 1;
+}
+
+void jig_free(void *p) {
+    if (!p) return;
+    uint64_t *h = (uint64_t *)p - 1;
+    size_t c = h[0];
+    if (c == 0) {
+        free(h);
+        return;
+    }
+    pool_block *b = (pool_block *)h;
+    b->next = pool_free[c];
+    pool_free[c] = b;
+}
+
+static void *jig_realloc(void *p, size_t n) {
+    if (!p) return jig_alloc(n);
+    uint64_t *h = (uint64_t *)p - 1;
+    size_t c = h[0];
+    if (c == 0) {
+        h = realloc(h, n + 8);
+        if (!h) jig_oom();
+        return h + 1;
+    }
+    size_t have = (c << 4) - 8;
+    if (n <= have) return p;
+    void *q = jig_alloc(n);
+    memcpy(q, p, have);
+    jig_free(p);
+    return q;
+}
+#else
 void *jig_alloc(size_t n) {
     void *p = malloc(n ? n : 1);
-    if (!p) {
-        fputs("out of memory\n", stderr);
-        _exit(102);
-    }
+    if (!p) jig_oom();
+    return p;
+}
+
+static void *jig_alloc_zeroed(size_t n) {
+    void *p = calloc(1, n ? n : 1);
+    if (!p) jig_oom();
     return p;
 }
 
@@ -91,12 +183,10 @@ void jig_free(void *p) { free(p); }
 
 static void *jig_realloc(void *p, size_t n) {
     void *q = realloc(p, n ? n : 1);
-    if (!q) {
-        fputs("out of memory\n", stderr);
-        _exit(102);
-    }
+    if (!q) jig_oom();
     return q;
 }
+#endif
 
 /* ---------- buffers ---------- */
 
@@ -116,7 +206,7 @@ void jig_buf_push_cstr(jig_buf *b, const char *s) { jig_buf_push(b, s, (int64_t)
 void jig_buf_push_str(jig_buf *b, const jig_str *s) { jig_buf_push(b, jig_str_data(s), jig_str_len(s)); }
 
 void jig_buf_free(jig_buf *b) {
-    free(b->data);
+    jig_free(b->data);
     b->data = NULL;
     b->len = b->cap = 0;
 }
@@ -239,9 +329,8 @@ int64_t jig_str_find(const jig_str *s, const jig_str *t) {
     int64_t n = jig_str_len(s), m = jig_str_len(t);
     if (m == 0) return 0;
     const char *a = jig_str_data(s), *b = jig_str_data(t);
-    for (int64_t i = 0; i + m <= n; i++)
-        if (a[i] == b[0] && memcmp(a + i, b, (size_t)m) == 0) return i;
-    return -1;
+    const char *p = m <= n ? memmem(a, (size_t)n, b, (size_t)m) : NULL;
+    return p ? p - a : -1;
 }
 
 bool jig_str_contains(const jig_str *s, const jig_str *t) { return jig_str_find(s, t) >= 0; }
@@ -258,7 +347,7 @@ bool jig_str_ends_with(const jig_str *s, const jig_str *t) {
 
 static void push_str_elem(jig_list **l, const char *d, int64_t n) {
     jig_str *p = jig_str_new(d, n);
-    jig_list_push(l, &p, &jig_type_str);
+    jig_list_push_fast(l, &p, sizeof p, &jig_type_str);
 }
 
 static int utf8_len(unsigned char c) { return c < 0x80 ? 1 : c < 0xe0 ? 2 : c < 0xf0 ? 3 : 4; }
@@ -275,9 +364,14 @@ jig_list *jig_str_split(const jig_str *s, const jig_str *sep) {
         }
         return out;
     }
+    const char *sd = jig_str_data(sep);
     int64_t start = 0;
     for (int64_t i = 0; i + m <= n;) {
-        if (memcmp(d + i, jig_str_data(sep), (size_t)m) == 0) {
+        /* Jump to the next occurrence of the separator's first byte. */
+        const char *p = memchr(d + i, sd[0], (size_t)(n - m + 1 - i));
+        if (!p) break;
+        i = p - d;
+        if (m == 1 || memcmp(p + 1, sd + 1, (size_t)m - 1) == 0) {
             push_str_elem(&out, d + start, i - start);
             i += m;
             start = i;
@@ -501,8 +595,8 @@ void jig_list_release(jig_list *l, const jig_type *t) {
     if (!l || !jig_rc_dec(&l->rc)) return;
     if (t->release)
         for (int64_t i = 0; i < l->len; i++) t->release(l->data + (size_t)i * t->size);
-    free(l->data);
-    free(l);
+    jig_free(l->data);
+    jig_free(l);
 }
 
 jig_list *jig_list_with_capacity(int64_t n, const jig_type *t) {
@@ -634,11 +728,7 @@ jig_list *jig_list_repeat(const jig_list *l, int64_t n, const jig_type *t, const
     r->len = r->cap = m * n;
     if (zero) {
         /* All-zero elements (false, 0, empty values): fresh zeroed pages, no copying. */
-        r->data = calloc(1, all);
-        if (!r->data) {
-            fputs("out of memory\n", stderr);
-            _exit(102);
-        }
+        r->data = jig_alloc_zeroed(all);
         return r;
     }
     r->data = jig_alloc(all);
@@ -663,7 +753,7 @@ void jig_list_reverse(jig_list **lp, const jig_type *t) {
         memcpy(l->data + (size_t)i * t->size, l->data + (size_t)j * t->size, t->size);
         memcpy(l->data + (size_t)j * t->size, tmp, t->size);
     }
-    free(tmp);
+    jig_free(tmp);
 }
 
 void jig_list_swap(jig_list **lp, int64_t i, int64_t j, const jig_type *t, const char *loc) {
@@ -681,7 +771,7 @@ void jig_list_swap(jig_list **lp, int64_t i, int64_t j, const jig_type *t, const
     memcpy(tmp, l->data + (size_t)i * t->size, t->size);
     memcpy(l->data + (size_t)i * t->size, l->data + (size_t)j * t->size, t->size);
     memcpy(l->data + (size_t)j * t->size, tmp, t->size);
-    free(tmp);
+    jig_free(tmp);
 }
 
 void jig_list_truncate(jig_list **lp, int64_t n, const jig_type *t, const char *loc) {
@@ -733,7 +823,7 @@ static void sort_impl(jig_list **lp, const sort_ctx *c) {
     jig_list *l = *lp;
     char *buf = jig_alloc((size_t)l->len * c->t->size);
     merge_sort(l->data, buf, l->len, c);
-    free(buf);
+    jig_free(buf);
 }
 
 void jig_swap_oob(int64_t i, int64_t j, int64_t n, const char *loc) {
@@ -871,7 +961,7 @@ void jig_list_show(jig_buf *b, const jig_list *l, const jig_type *t) {
 static void map_rebuild_index(jig_map *m, const jig_type *k) {
     int64_t cap = 8;
     while (cap < m->len * 2 + 2) cap *= 2;
-    free(m->index);
+    jig_free(m->index);
     m->index = jig_alloc((size_t)cap * sizeof(int32_t));
     for (int64_t i = 0; i < cap; i++) m->index[i] = -1;
     m->index_cap = cap;
@@ -904,15 +994,20 @@ void jig_map_release(jig_map *m, const jig_type *k, const jig_type *v) {
         if (k->release) k->release(m->keys + (size_t)i * k->size);
         if (v->release) v->release(m->vals + (size_t)i * v->size);
     }
-    free(m->keys);
-    free(m->vals);
-    free(m->index);
-    free(m);
+    jig_free(m->keys);
+    jig_free(m->vals);
+    jig_free(m->index);
+    jig_free(m);
 }
 
-static void map_make_unique(jig_map **mp, const jig_type *k, const jig_type *v) {
+static void map_copy(jig_map **mp, const jig_type *k, const jig_type *v) __attribute__((noinline));
+
+static inline void map_make_unique(jig_map **mp, const jig_type *k, const jig_type *v) {
+    if (__builtin_expect(!*mp || (*mp)->rc != 1, 0)) map_copy(mp, k, v);
+}
+
+static void map_copy(jig_map **mp, const jig_type *k, const jig_type *v) {
     jig_map *m = *mp;
-    if (m && m->rc == 1) return;
     jig_map *c = jig_alloc(sizeof(jig_map));
     c->rc = 1;
     c->len = m ? m->len : 0;
@@ -1286,7 +1381,7 @@ static jig_str *err_str(const jig_str *path) {
 jig_str *jig_fs_read(const jig_str *path, bool *ok) {
     char *p = cpath(path);
     FILE *f = fopen(p, "rb");
-    free(p);
+    jig_free(p);
     if (!f) {
         *ok = false;
         return err_str(path);
@@ -1303,7 +1398,7 @@ jig_str *jig_fs_read(const jig_str *path, bool *ok) {
 jig_str *jig_fs_write(const jig_str *path, const jig_str *contents, bool *ok) {
     char *p = cpath(path);
     FILE *f = fopen(p, "wb");
-    free(p);
+    jig_free(p);
     if (!f) {
         *ok = false;
         return err_str(path);
@@ -1318,7 +1413,7 @@ bool jig_fs_exists(const jig_str *path) {
     char *p = cpath(path);
     struct stat st;
     bool r = stat(p, &st) == 0;
-    free(p);
+    jig_free(p);
     return r;
 }
 
@@ -1327,7 +1422,7 @@ static int cmp_strp(const void *a, const void *b) { return jig_str_cmp(*(jig_str
 jig_list *jig_fs_list(const jig_str *dir, bool *ok, jig_str **err) {
     char *p = cpath(dir);
     DIR *d = opendir(p);
-    free(p);
+    jig_free(p);
     if (!d) {
         *ok = false;
         *err = err_str(dir);
@@ -1354,7 +1449,7 @@ jig_list *jig_args(void) {
 jig_str *jig_env_var(const jig_str *name, bool *ok) {
     char *p = cpath(name);
     const char *v = getenv(p);
-    free(p);
+    jig_free(p);
     *ok = v != NULL;
     return v ? jig_str_new(v, (int64_t)strlen(v)) : NULL;
 }
