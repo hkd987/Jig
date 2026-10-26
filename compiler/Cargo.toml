@@ -1,0 +1,17 @@
+[package]
+name = "jig"
+description = "The Jig compiler and toolchain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "jig"
+path = "src/main.rs"
+
+[lib]
+name = "jig"
+path = "src/lib.rs"
+
+[dependencies]

@@ -1,0 +1,176 @@
+// A tour of Jig syntax, used by parser and formatter tests.
+import "std/io"
+import "std/math"
+
+/// An account.
+pub struct Acct {
+  pub id: Int
+  bal: Int where bal >= 0
+}
+
+pub struct Span {
+  lo: Int
+  hi: Int
+  invariant lo <= hi
+}
+
+pub enum Shape {
+  Circle(r: Float)
+  Rect(w: Float, h: Float)
+  Empty
+}
+
+pub enum Tree<T> {
+  Leaf
+  Node(left: Tree<T>, value: T, right: Tree<T>)
+}
+
+type Cents = Int where self >= 0
+type Grid = List<List<Int>>
+const MAX_USERS: Int = 1_000
+unit m
+unit s
+
+pub interface Area {
+  fn area(self) -> Float
+}
+
+pub fn transfer(from: &mut Acct, to: &mut Acct, amt: Cents)
+  requires amt > 0, from.bal >= amt
+  ensures from.bal + to.bal == old(from.bal + to.bal)
+  effects {}
+{
+  from.bal -= amt
+  to.bal += amt
+}
+
+fn speed(d: Float<m>, t: Float<s>) -> Float<m/s> {
+  return d / t
+}
+
+fn accel(v: Float<m/s>, t: Float<s>) -> Float<m/s^2> {
+  return v / t
+}
+
+fn Acct.deposit(&mut self, amt: Cents) {
+  self.bal += amt
+}
+
+fn Shape.area(self) -> Float {
+  return match self {
+    Circle(r) => math.PI * r * r
+    Rect(w, h) if w == h => w * w
+    Rect(w, h) => w * h
+    Empty => 0.0
+  }
+}
+
+fn Tree<T>.size(self) -> Int {
+  return match self {
+    Leaf => 0
+    Node(l, _, r) => l.size() + 1 + r.size()
+  }
+}
+
+fn largest<T: Ord>(xs: List<T>) -> Option<T> {
+  var best: Option<T> = None
+  for x in xs {
+    best = match best {
+      None => Some(x)
+      Some(b) => if x > b { Some(x) } else { Some(b) }
+    }
+  }
+  return best
+}
+
+fn parse_port(s: Str) -> Result<Int, Str> {
+  let n = s.to_int().ok_or("not a number")?
+  if n < 1 || n > 65535 {
+    return Err("out of range: " + n.str())
+  } else if n == 80 {
+    return Ok(80)
+  }
+  return Ok(n)
+}
+
+fn sum_to(n: Int) -> Int
+  requires n >= 0
+  ensures result == n * (n - 1) / 2
+{
+  var total = 0
+  for i in 0..n invariant total == i * (i - 1) / 2 {
+    total += i
+  }
+  return total
+}
+
+fn all_positive(xs: List<Int>) -> Bool
+  ensures result == forall i in 0..xs.len(): xs[i] > 0
+{
+  for x in xs {
+    if x <= 0 {
+      return false
+    }
+  }
+  return true
+}
+
+fn loops(m: Map<Str, Int>) -> Int {
+  var total = 0
+  for (k, v) in m {
+    total += v + k.len()
+  }
+  var i = 0
+  for i < 10 {
+    i += 1
+  }
+  for {
+    break
+  }
+  let (q, r) = divmod(17, 5)
+  let t = (q, r, "x")
+  let c = 'a'
+  let b = 0xff & ~0b1010 | 3 << 2
+  let big = if total > 10 { "big" } else { "small" }
+  let doubled = [1, 2, 3].map(fn(x) { x * 2 }).filter(fn(x: Int) -> Bool { x > 2 })
+  let slice = doubled[1..2]
+  let neg = -t.0 as Float
+  let ok = match c {
+    'a' | 'b' => true
+    _ => false
+  }
+  return total + q + r + b + big.len() + slice.len() + neg as Int + (if ok { 1 } else { 0 })
+}
+
+fn divmod(a: Int, b: Int) -> (Int, Int)
+  requires b != 0
+{
+  return (a / b, a % b)
+}
+
+fn main() effects {io} {
+  var a = Acct { id: 1, bal: 100 }
+  var b = Acct {
+    id: 2
+    bal: 0
+  }
+  transfer(&mut a, &mut b, 40)
+  a.deposit(5)
+  io.println("a = " + a.bal.str())
+}
+
+test "transfer keeps the total" {
+  var a = Acct { id: 1, bal: 100 }
+  var b = Acct { id: 2, bal: 0 }
+  transfer(&mut a, &mut b, 40)
+  assert(a.bal == 60 && b.bal == 40)
+}
+
+test "add commutes"(x: Int, y: Int) requires x < 1000, y < 1000 {
+  assert(x + y == y + x)
+}
+
+step "an account {name} with balance {amt}"
+fn given_account(w: &mut World, name: Str, amt: Cents) {
+  w.accts.insert(name, Acct { id: w.accts.len(), bal: amt })
+}

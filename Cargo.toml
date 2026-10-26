@@ -1,0 +1,21 @@
+[workspace]
+members = ["compiler"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/hkd987/Jig"
+
+[profile.release]
+debug = 1
+codegen-units = 4
+lto = "thin"
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
