@@ -189,8 +189,40 @@ impl Printer<'_> {
         s.push_str(name.sym.as_str());
         self.generics_into(f.generics, &mut s);
         let ret = f.ret.map(|t| format!(" -> {}", self.ty(t))).unwrap_or_default();
-        let has_clauses =
-            !f.requires.is_empty() || !f.ensures.is_empty() || f.effects.is_some() || self.has(Key::Clauses(id));
+        // A lone `effects` clause stays on the signature line when it fits:
+        // `fn main() effects {io} {`.
+        let effects_inline = if f.requires.is_empty() && f.ensures.is_empty() && !self.has(Key::Clauses(id)) {
+            f.effects.map(|es| {
+                let mut o = String::from(" ");
+                self.effects_into(es, &mut o);
+                o
+            })
+        } else {
+            None
+        };
+        let has_clauses = !f.requires.is_empty() || !f.ensures.is_empty() || f.effects.is_some() || self.has(Key::Clauses(id));
+        if let Some(eff) = &effects_inline {
+            let mut one = s.clone();
+            let mut elems = Vec::new();
+            if let Some(sp) = f.self_param {
+                elems.push(Elem::SelfParam(sp));
+            }
+            elems.extend(self.ast.params.get(f.params).iter().map(|&p| Elem::Param(p)));
+            let tail = width(&ret) + width(eff) + if f.body.is_some() { 2 } else { 0 };
+            let col = ind + width(&one[line..]);
+            one += &self.delimited("(", ")", Key::Item(id), &elems, ind, col, tail, false);
+            let last = one.rsplit('\n').next().unwrap_or("");
+            let start_col = if one[line..].contains('\n') { 0 } else { ind };
+            if !one[line..].contains('\n') && start_col + width(last) + width(&ret) + width(eff) + 2 <= self.width {
+                one += &ret;
+                one += eff;
+                if let Some(b) = f.body {
+                    one.push(' ');
+                    one += &self.block(b, ind);
+                }
+                return one;
+            }
+        }
         let tail = width(&ret) + if f.body.is_some() && !has_clauses { 2 } else { 0 };
         let mut elems = Vec::new();
         if let Some(sp) = f.self_param {

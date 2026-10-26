@@ -143,6 +143,71 @@ fn cmd_test(args: &[String]) -> i32 {
     if failed == 0 { 0 } else { 1 }
 }
 
+fn cmd_fmt(args: &[String]) -> i32 {
+    let check = args.iter().any(|a| a == "--check");
+    let mut files: Vec<PathBuf> = Vec::new();
+    let targets: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+    let roots: Vec<PathBuf> = if targets.is_empty() { vec![PathBuf::from(".")] } else { targets.iter().map(PathBuf::from).collect() };
+    for r in roots {
+        collect_jig_files(&r, &mut files);
+    }
+    let mut changed = 0;
+    let mut failed = 0;
+    for f in &files {
+        let Ok(src) = std::fs::read_to_string(f) else {
+            eprintln!("error: cannot read {}", f.display());
+            failed += 1;
+            continue;
+        };
+        match crate::fmt::format_source(&src) {
+            Ok(out) => {
+                if out != src {
+                    changed += 1;
+                    if check {
+                        println!("{}", f.display());
+                    } else if std::fs::write(f, out).is_err() {
+                        eprintln!("error: cannot write {}", f.display());
+                        failed += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("{}: cannot format a file that does not parse:\n{e}", f.display());
+                failed += 1;
+            }
+        }
+    }
+    if check && changed > 0 {
+        eprintln!("{changed} file{} not formatted", if changed == 1 { "" } else { "s" });
+        return 1;
+    }
+    if !check && changed > 0 {
+        eprintln!("formatted {changed} file{}", if changed == 1 { "" } else { "s" });
+    }
+    if failed > 0 { 1 } else { 0 }
+}
+
+/// `.jig` files under a path (a file, or a directory searched recursively, skipping hidden
+/// directories and build output).
+pub fn collect_jig_files(p: &std::path::Path, out: &mut Vec<PathBuf>) {
+    if p.is_file() {
+        if p.extension().is_some_and(|e| e == "jig") {
+            out.push(p.to_path_buf());
+        }
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(p) else { return };
+    let mut entries: Vec<PathBuf> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+    entries.sort();
+    for e in entries {
+        let name = e.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.starts_with('.') || name == "target" {
+            continue;
+        }
+        collect_jig_files(&e, out);
+    }
+}
+
 pub fn main() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let rest = if args.len() > 1 { &args[1..] } else { &[][..] };
@@ -150,6 +215,7 @@ pub fn main() -> i32 {
         Some("check") => cmd_check(rest),
         Some("run") => cmd_run(rest),
         Some("test") => cmd_test(rest),
+        Some("fmt") => cmd_fmt(rest),
         Some("explain") => {
             let Some(code) = args.get(1).and_then(|c| crate::diag::Code::parse(c)) else {
                 eprintln!("usage: jig explain <code>");
@@ -160,7 +226,7 @@ pub fn main() -> i32 {
             0
         }
         _ => {
-            eprintln!("usage: jig <check|test|run|explain> [path] [--json]");
+            eprintln!("usage: jig <check|test|run|fmt|explain> [path] [--json]");
             2
         }
     }

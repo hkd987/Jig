@@ -54,7 +54,11 @@ fn pay(accts: &mut List<Acct>, from: Str, to: Str, amt: Int) -> Result<(), TxErr
 
 fn main() effects {io} {
   var accts = [Acct { name: "ann", bal: 100 }, Acct { name: "bob", bal: 5 }]
-  let results = [pay(&mut accts, "ann", "bob", 40), pay(&mut accts, "bob", "ann", 500), pay(&mut accts, "cat", "ann", 1)]
+  let results = [
+    pay(&mut accts, "ann", "bob", 40),
+    pay(&mut accts, "bob", "ann", 500),
+    pay(&mut accts, "cat", "ann", 1),
+  ]
   for r in results {
     match r {
       Ok(_) => io.println("ok")

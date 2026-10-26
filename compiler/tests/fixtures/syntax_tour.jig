@@ -150,9 +150,7 @@ fn divmod(a: Int, b: Int) -> (Int, Int)
   return (a / b, a % b)
 }
 
-fn main()
-  effects {io}
-{
+fn main() effects {io} {
   var a = Acct { id: 1, bal: 100 }
   var b = Acct { id: 2, bal: 0 }
   transfer(&mut a, &mut b, 40)

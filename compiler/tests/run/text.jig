@@ -44,7 +44,9 @@ fn main() effects {io} {
   io.println(secret + " / " + caesar(secret, -3))
   let parts = "a,b,,c".split(",")
   io.println(parts.len().str() + " " + parts.str())
-  io.println("abc"[1].str() + " " + "hello"[1..3] + " " + "x".repeat(3) + " " + "  pad ".trim() + "|")
+  io.println(
+    "abc"[1].str() + " " + "hello"[1..3] + " " + "x".repeat(3) + " " + "  pad ".trim() + "|",
+  )
   match "42".to_int() {
     Some(n) => io.println((n * 2).str())
     None => io.println("nan")

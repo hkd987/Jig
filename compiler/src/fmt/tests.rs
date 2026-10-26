@@ -608,13 +608,9 @@ fn contract(x: Int, y: Int) -> Int
   return x + y
 }
 
-fn pure_marker()
-  effects {}
-{}
+fn pure_marker() effects {} {}
 
-fn eff()
-  effects {io}
-{
+fn eff() effects {io} {
   io.println("hi")
 }
 
