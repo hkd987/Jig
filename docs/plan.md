@@ -187,7 +187,7 @@ and 0.1.0-alpha is ready to tag (`.github/workflows/release.yml`).
       expression and pattern) matches on every example, UI and run test, `jigc` itself and
       300 semantic mutations raising over fifty error codes (`compiler/tests/selfhost.rs`).
       `bench/selfhost.py` compares speed on the same corpus (CI gate: instruction ratio at
-      most 1.05, now 1.00); jigc is at 0.97 (lexer), 0.71 (parser), 1.36 (checker) and 1.07
+      most 1.05, now 0.96); jigc is at 0.95 (lexer), 0.63 (parser), 1.37 (checker) and 1.02
       (checker through C) of the bootstrap compiler's instructions. MIR lowering, the ownership analyses and the C back
       end are done too: `jigc c` prints byte-identical C to `jig debug c` for every example,
       run test, agent benchmark solution and `jigc` itself, and `jigc` compiles itself to a

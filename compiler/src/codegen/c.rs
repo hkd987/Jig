@@ -247,6 +247,11 @@ struct FnCx {
     borrowed: FxHashSet<Local>,
     /// Locals the current statement reads for the last time, so it may move them out.
     movable: FxHashSet<Local>,
+    /// The locals the current statement moved out (cleared).
+    moved: FxHashSet<Local>,
+    /// For each block, the owned locals that may hold a value at its end.
+    held: Vec<FxHashSet<Local>>,
+    cur_block: usize,
 }
 
 impl<'l, 'a> CGen<'l, 'a> {
@@ -936,7 +941,8 @@ impl<'l, 'a> CGen<'l, 'a> {
         let unique = super::own::unique_lists(&mf, self.lw.tys);
         let rc: FxHashSet<Local> =
             mf.locals.iter_enumerated().filter(|(_, d)| self.needs_rc(d.ty)).map(|(l, _)| l).collect();
-        let borrowed = super::own::borrowed_locals(&mf, &rc);
+        let roots = super::own::borrowed_locals(&mf, &rc);
+        let borrowed: FxHashSet<Local> = roots.keys().copied().collect();
         let mut cx = FnCx {
             out: String::new(),
             mutref: FxHashSet::default(),
@@ -944,6 +950,9 @@ impl<'l, 'a> CGen<'l, 'a> {
             unique,
             borrowed,
             movable: FxHashSet::default(),
+            moved: FxHashSet::default(),
+            held: Vec::new(),
+            cur_block: 0,
         };
         for &(l, m) in &mf.params {
             cx.params.insert(l);
@@ -958,6 +967,8 @@ impl<'l, 'a> CGen<'l, 'a> {
             .map(|(l, _)| l)
             .collect();
         let moves = super::own::last_uses(&mf, &owners);
+        let dead = super::own::dead_after(&mf, &owners, &roots);
+        cx.held = super::own::held_at_end(&mf, &owners, &dead);
         let _ = writeln!(cx.out, "/* {} */\n{sig} {{", mf.name.replace("*/", "* /"));
         for (l, d) in mf.locals.iter_enumerated() {
             if cx.params.contains(&l) {
@@ -976,9 +987,18 @@ impl<'l, 'a> CGen<'l, 'a> {
             let _ = writeln!(cx.out, "bb{}:;", b.0);
             for (i, (stmt, span)) in block.stmts.iter().enumerate() {
                 cx.movable = moves[b.0 as usize][i].clone();
+                cx.moved.clear();
                 self.emit_stmt(&mf, &mut cx, stmt, *span);
+                for &l in &dead[b.0 as usize][i] {
+                    if !cx.moved.contains(&l) {
+                        let lv = self.local_lval(&cx, l);
+                        let rel = self.release_stmt(mf.locals[l].ty, &lv);
+                        let _ = writeln!(cx.out, "    {rel} memset(&{lv}, 0, sizeof {lv});");
+                    }
+                }
             }
             cx.movable.clear();
+            cx.cur_block = b.0 as usize;
             self.emit_term(&mf, &mut cx, &block.term, block.term_span);
         }
         cx.out.push_str("}\n\n");
@@ -1211,6 +1231,7 @@ impl<'l, 'a> CGen<'l, 'a> {
         if let Operand::Copy(p) = op {
             if p.proj.is_empty() && cx.movable.contains(&p.local) {
                 // Its last use: take the value and clear the local instead of counting.
+                cx.moved.insert(p.local);
                 let _ = writeln!(cx.out, "    {c} t{n} = {e}; memset(&{e}, 0, sizeof {e});");
                 return format!("t{n}");
             }
@@ -1231,65 +1252,7 @@ impl<'l, 'a> CGen<'l, 'a> {
     fn emit_stmt(&mut self, mf: &MFn, cx: &mut FnCx, stmt: &Stmt, span: crate::diag::Span) {
         match stmt {
             Stmt::Assign(p, rv) => {
-                let t = self.place_ty(mf, p);
-                let c = self.cty(t);
-                // `s = s + t` appends in place when `s` is not shared.
-                if let Rvalue::Call(Callee::Intrinsic(i), args, _) = rv {
-                    if i.op == Op::StrConcat {
-                        if let [Arg::Value(Operand::Copy(src)), Arg::Value(rhs)] = args.as_slice() {
-                            if src == p && !p.proj.iter().any(|e| matches!(e, PlaceElem::Index(..))) {
-                                let r = self.operand(mf, cx, rhs, span);
-                                let dst = self.place_expr(mf, cx, p, true, span);
-                                let _ = writeln!(cx.out, "    jig_str_append(&{dst}, {r});");
-                                return;
-                            }
-                        }
-                    }
-                }
-                if let Rvalue::Call(_, _, ret) = rv {
-                    if self.lw.tys.is_never(*ret) {
-                        // Never returns: evaluate for its effect; nothing is stored.
-                        let val = self.rvalue(mf, cx, rv, t, span);
-                        let _ = writeln!(cx.out, "    (void)({val});");
-                        return;
-                    }
-                }
-                if p.proj.is_empty() && cx.borrowed.contains(&p.local) {
-                    // An alias of part of a parameter: no count, nothing to release.
-                    if let Rvalue::Use(op) = rv {
-                        let src = self.operand(mf, cx, op, span);
-                        let dst = self.local_lval(cx, p.local);
-                        let _ = writeln!(cx.out, "    {dst} = {src};");
-                        return;
-                    }
-                }
-                let val = self.rvalue(mf, cx, rv, t, span);
-                let rc = self.needs_rc(t);
-                if p.proj.is_empty() {
-                    // The common case: a plain local. Evaluate, then release the old value.
-                    let dst = self.local_lval(cx, p.local);
-                    if rc {
-                        let rel = self.release_stmt(t, &dst);
-                        let n = self.fresh();
-                        let _ = writeln!(cx.out, "    {{ {c} v{n} = {val}; {rel} {dst} = v{n}; }}");
-                    } else {
-                        let _ = writeln!(cx.out, "    {dst} = {val};");
-                    }
-                    if cx.unique.contains(&p.local) {
-                        let s = self.make_unique(mf, cx, p.local);
-                        cx.out.push_str(&s);
-                    }
-                    return;
-                }
-                let n = self.fresh();
-                let _ = writeln!(cx.out, "    {c} v{n} = {val};");
-                let dst = self.place_expr(mf, cx, p, true, span);
-                let rel = self.release_stmt(t, "*d");
-                if rel.is_empty() {
-                    let _ = writeln!(cx.out, "    {dst} = v{n};");
-                } else {
-                    let _ = writeln!(cx.out, "    {{ {c} *d = &{dst}; {rel} *d = v{n}; }}");
-                }
+                self.emit_assign(mf, cx, p, rv, span);
             }
             Stmt::Check { cond, kind, msg, values, span } => {
                 let c = self.operand(mf, cx, cond, *span);
@@ -1329,6 +1292,68 @@ impl<'l, 'a> CGen<'l, 'a> {
         }
     }
 
+    fn emit_assign(&mut self, mf: &MFn, cx: &mut FnCx, p: &Place, rv: &Rvalue, span: crate::diag::Span) {
+        let t = self.place_ty(mf, p);
+        let c = self.cty(t);
+        // `s = s + t` appends in place when `s` is not shared.
+        if let Rvalue::Call(Callee::Intrinsic(i), args, _) = rv {
+            if i.op == Op::StrConcat {
+                if let [Arg::Value(Operand::Copy(src)), Arg::Value(rhs)] = args.as_slice() {
+                    if src == p && !p.proj.iter().any(|e| matches!(e, PlaceElem::Index(..))) {
+                        let r = self.operand(mf, cx, rhs, span);
+                        let dst = self.place_expr(mf, cx, p, true, span);
+                        let _ = writeln!(cx.out, "    jig_str_append(&{dst}, {r});");
+                        return;
+                    }
+                }
+            }
+        }
+        if let Rvalue::Call(_, _, ret) = rv {
+            if self.lw.tys.is_never(*ret) {
+                // Never returns: evaluate for its effect; nothing is stored.
+                let val = self.rvalue(mf, cx, rv, t, span);
+                let _ = writeln!(cx.out, "    (void)({val});");
+                return;
+            }
+        }
+        if p.proj.is_empty() && cx.borrowed.contains(&p.local) {
+            // An alias of part of a parameter: no count, nothing to release.
+            if let Rvalue::Use(op) = rv {
+                let src = self.operand(mf, cx, op, span);
+                let dst = self.local_lval(cx, p.local);
+                let _ = writeln!(cx.out, "    {dst} = {src};");
+                return;
+            }
+        }
+        let val = self.rvalue(mf, cx, rv, t, span);
+        let rc = self.needs_rc(t);
+        if p.proj.is_empty() {
+            // The common case: a plain local. Evaluate, then release the old value.
+            let dst = self.local_lval(cx, p.local);
+            if rc {
+                let rel = self.release_stmt(t, &dst);
+                let n = self.fresh();
+                let _ = writeln!(cx.out, "    {{ {c} v{n} = {val}; {rel} {dst} = v{n}; }}");
+            } else {
+                let _ = writeln!(cx.out, "    {dst} = {val};");
+            }
+            if cx.unique.contains(&p.local) {
+                let s = self.make_unique(mf, cx, p.local);
+                cx.out.push_str(&s);
+            }
+            return;
+        }
+        let n = self.fresh();
+        let _ = writeln!(cx.out, "    {c} v{n} = {val};");
+        let dst = self.place_expr(mf, cx, p, true, span);
+        let rel = self.release_stmt(t, "*d");
+        if rel.is_empty() {
+            let _ = writeln!(cx.out, "    {dst} = v{n};");
+        } else {
+            let _ = writeln!(cx.out, "    {{ {c} *d = &{dst}; {rel} *d = v{n}; }}");
+        }
+    }
+
     fn emit_term(&mut self, mf: &MFn, cx: &mut FnCx, term: &Terminator, span: crate::diag::Span) {
         match term {
             Terminator::Goto(b) => {
@@ -1349,6 +1374,9 @@ impl<'l, 'a> CGen<'l, 'a> {
             Terminator::Return => {
                 for (l, d) in mf.locals.iter_enumerated() {
                     if l.0 == 0 || cx.params.contains(&l) || cx.borrowed.contains(&l) {
+                        continue;
+                    }
+                    if !cx.held[cx.cur_block].contains(&l) {
                         continue;
                     }
                     let rel = self.release_stmt(d.ty, &format!("l{}", l.0));

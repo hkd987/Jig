@@ -94,8 +94,8 @@ fn successors(t: &Terminator) -> Vec<BlockId> {
 /// from (its *root*, through other borrowed locals) stays alive and unchanged while it is
 /// used: always for a by-value parameter, which the caller keeps alive and nobody changes;
 /// for any other root (`rc` locals only), when no path from a copy to a use of the local
-/// writes, drops or may move the root.
-pub fn borrowed_locals(mf: &MFn, rc: &FxHashSet<Local>) -> FxHashSet<Local> {
+/// writes, drops or may move the root. Each borrowed local maps to its roots.
+pub fn borrowed_locals(mf: &MFn, rc: &FxHashSet<Local>) -> FxHashMap<Local, Vec<Local>> {
     let params: FxHashSet<Local> = mf.params.iter().map(|(l, _)| *l).collect();
     let by_value: FxHashSet<Local> = mf.params.iter().filter(|(_, m)| *m != Mode::MutRef).map(|(l, _)| *l).collect();
     let mut sources: FxHashMap<Local, Vec<Option<Local>>> = FxHashMap::default();
@@ -162,7 +162,7 @@ pub fn borrowed_locals(mf: &MFn, rc: &FxHashSet<Local>) -> FxHashSet<Local> {
             break;
         }
     }
-    roots.into_iter().filter(|(_, r)| r.is_some()).map(|(l, _)| l).collect()
+    roots.into_iter().filter_map(|(l, r)| r.map(|r| (l, r))).collect()
 }
 
 /// Whether a statement may write, drop or move one of `roots`: assign it (in whole or part),
@@ -339,6 +339,136 @@ pub fn last_uses(mf: &MFn, owners: &FxHashSet<Local>) -> Vec<Vec<FxHashSet<Local
         result.push(per);
     }
     result
+}
+
+/// For each statement, the owned locals to release after it: the ones it reads or assigns
+/// that are dead afterwards, where reading a borrowed local reads its roots too (a root
+/// stays alive while what borrows from it is used). Values then die at their last use, so
+/// a value they shared is not copied when it is changed next.
+pub fn dead_after(mf: &MFn, owners: &FxHashSet<Local>, roots: &FxHashMap<Local, Vec<Local>>) -> Vec<Vec<Vec<Local>>> {
+    let with_roots = |us: &mut Vec<Local>| {
+        for i in 0..us.len() {
+            if let Some(rs) = roots.get(&us[i]) {
+                us.extend(rs.iter().copied());
+            }
+        }
+    };
+    let n = mf.blocks.len();
+    let mut uses_b: Vec<FxHashSet<Local>> = vec![FxHashSet::default(); n];
+    let mut defs_b: Vec<FxHashSet<Local>> = vec![FxHashSet::default(); n];
+    let mut term_b: Vec<Vec<Local>> = Vec::with_capacity(n);
+    for (b, block) in mf.blocks.iter_enumerated() {
+        let (u, d) = (&mut uses_b[b.0 as usize], &mut defs_b[b.0 as usize]);
+        let mut t = Vec::new();
+        term_uses(&block.term, &mut t);
+        with_roots(&mut t);
+        u.extend(t.iter().copied());
+        term_b.push(t);
+        for (stmt, _) in block.stmts.iter().rev() {
+            let mut us = Vec::new();
+            let def = stmt_uses(stmt, &mut us);
+            with_roots(&mut us);
+            if let Some(l) = def {
+                u.remove(&l);
+                d.insert(l);
+            }
+            u.extend(us);
+        }
+    }
+    let succ: Vec<Vec<BlockId>> = mf.blocks.iter().map(|b| successors(&b.term)).collect();
+    let mut live_in: Vec<FxHashSet<Local>> = vec![FxHashSet::default(); n];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for b in (0..n).rev() {
+            let mut out: FxHashSet<Local> = FxHashSet::default();
+            for s in &succ[b] {
+                out.extend(live_in[s.0 as usize].iter().copied());
+            }
+            let mut inn: FxHashSet<Local> = out.into_iter().filter(|l| !defs_b[b].contains(l)).collect();
+            inn.extend(uses_b[b].iter().copied());
+            if inn.len() != live_in[b].len() {
+                live_in[b] = inn;
+                changed = true;
+            }
+        }
+    }
+    let mut result = Vec::with_capacity(n);
+    for (b, block) in mf.blocks.iter_enumerated() {
+        let mut live: FxHashSet<Local> = FxHashSet::default();
+        for s in &succ[b.0 as usize] {
+            live.extend(live_in[s.0 as usize].iter().copied());
+        }
+        live.extend(term_b[b.0 as usize].iter().copied());
+        let mut per = vec![Vec::new(); block.stmts.len()];
+        for (i, (stmt, _)) in block.stmts.iter().enumerate().rev() {
+            let mut us = Vec::new();
+            let def = stmt_uses(stmt, &mut us);
+            with_roots(&mut us);
+            let mut dead: Vec<Local> =
+                us.iter().copied().chain(def).filter(|l| owners.contains(l) && !live.contains(l)).collect();
+            dead.sort();
+            dead.dedup();
+            per[i] = dead;
+            if let Some(l) = def {
+                live.remove(&l);
+            }
+            live.extend(us);
+        }
+        result.push(per);
+    }
+    result
+}
+
+/// For each block, the owned locals that may hold a value when its terminator runs: assigned
+/// (or passed `&mut`) on some path since they were last released. Every local starts empty,
+/// so a function's return releases only these.
+pub fn held_at_end(mf: &MFn, owners: &FxHashSet<Local>, dead: &[Vec<Vec<Local>>]) -> Vec<FxHashSet<Local>> {
+    let n = mf.blocks.len();
+    let succ: Vec<Vec<BlockId>> = mf.blocks.iter().map(|b| successors(&b.term)).collect();
+    let mut held_in: Vec<FxHashSet<Local>> = vec![FxHashSet::default(); n];
+    let mut held_out: Vec<FxHashSet<Local>> = vec![FxHashSet::default(); n];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for b in 0..n {
+            let mut h = held_in[b].clone();
+            for (i, (stmt, _)) in mf.blocks[BlockId(b as u32)].stmts.iter().enumerate() {
+                match stmt {
+                    Stmt::Assign(p, rv) => {
+                        if owners.contains(&p.local) {
+                            h.insert(p.local);
+                        }
+                        if let Rvalue::Call(_, args, _) = rv {
+                            for a in args {
+                                if let Arg::MutRef(q) = a {
+                                    if owners.contains(&q.local) {
+                                        h.insert(q.local);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Stmt::Drop(l) => {
+                        h.remove(l);
+                    }
+                    Stmt::Check { .. } => {}
+                }
+                for l in &dead[b][i] {
+                    h.remove(l);
+                }
+            }
+            // Sets only grow, so a change shows in the size.
+            if h.len() != held_out[b].len() {
+                for s in &succ[b] {
+                    held_in[s.0 as usize].extend(h.iter().copied());
+                }
+                held_out[b] = h;
+                changed = true;
+            }
+        }
+    }
+    held_out
 }
 
 /// Lists that stay unique once made so: they are written through indices, and otherwise used

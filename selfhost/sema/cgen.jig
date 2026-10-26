@@ -18,6 +18,11 @@ struct FnCx {
   borrowed: Set<Int>
   /// Locals the current statement reads for the last time.
   movable: Set<Int>
+  /// The locals the current statement moved out (cleared).
+  moved: Set<Int>
+  /// For each block, the owned locals that may hold a value at its end.
+  held: List<Set<Int>>
+  cur_block: Int
 }
 
 struct Cg {

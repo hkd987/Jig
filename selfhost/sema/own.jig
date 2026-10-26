@@ -109,8 +109,8 @@ fn by_value_params(mf: MFn) -> Set<Int> {
 /// from (its root, through other borrowed locals) stays alive and unchanged while it is used:
 /// always for a by-value parameter, which the caller keeps alive and nobody changes; for any
 /// other root (`rc` locals only), when no path from a copy to a use of the local writes,
-/// drops or may move the root.
-fn borrowed_locals(mf: MFn, rc: Set<Int>) -> Set<Int> {
+/// drops or may move the root. Each borrowed local maps to its roots.
+fn borrowed_locals(mf: MFn, rc: Set<Int>) -> Map<Int, List<Int>> {
   var params: Set<Int> = Set.new()
   for (l, _) in mf.params {
     params.insert(l)
@@ -213,11 +213,7 @@ fn borrowed_locals(mf: MFn, rc: Set<Int>) -> Set<Int> {
       break
     }
   }
-  var out: Set<Int> = Set.new()
-  for (l, _) in roots {
-    out.insert(l)
-  }
-  return out
+  return roots
 }
 
 fn whole_read(op: Operand, roots: List<Int>, params: Set<Int>) -> Bool {
@@ -485,6 +481,192 @@ fn last_uses(mf: MFn, owners: Set<Int>) -> List<List<Set<Int>>> {
     result.push(per)
   }
   return result
+}
+
+/// Locals with their borrowed locals' roots added.
+fn with_roots(us: &mut List<Int>, roots: Map<Int, List<Int>>) {
+  let n = us.len()
+  for i in 0..n {
+    match roots.get(us[i]) {
+      Some(rs) => us.extend(rs)
+      None => {}
+    }
+  }
+}
+
+/// For each statement, the owned locals to release after it: the ones it reads or assigns that
+/// are dead afterwards, where reading a borrowed local reads its roots too (a root stays alive
+/// while what borrows from it is used). Values then die at their last use, so a value they
+/// shared is not copied when it is changed next.
+fn dead_after(mf: MFn, owners: Set<Int>, roots: Map<Int, List<Int>>) -> List<List<List<Int>>> {
+  let n = mf.blocks.len()
+  var uses_b: List<Set<Int>> = []
+  var defs_b: List<Set<Int>> = []
+  var term_b: List<List<Int>> = []
+  for block in mf.blocks {
+    var u: Set<Int> = Set.new()
+    var d: Set<Int> = Set.new()
+    var t: List<Int> = []
+    term_uses(block.term, &mut t)
+    with_roots(&mut t, roots)
+    for x in t {
+      u.insert(x)
+    }
+    term_b.push(t)
+    var i = block.stmts.len() - 1
+    for i >= 0 {
+      var us: List<Int> = []
+      let l = stmt_uses(block.stmts[i].stmt, &mut us)
+      with_roots(&mut us, roots)
+      if l >= 0 {
+        let _ = u.remove(l)
+        d.insert(l)
+      }
+      for x in us {
+        u.insert(x)
+      }
+      i -= 1
+    }
+    uses_b.push(u)
+    defs_b.push(d)
+  }
+  var succ: List<List<Int>> = []
+  for block in mf.blocks {
+    succ.push(successors(block.term))
+  }
+  var live_in: List<Set<Int>> = []
+  for _ in 0..n {
+    live_in.push(Set.new())
+  }
+  var changed = true
+  for changed {
+    changed = false
+    var b = n - 1
+    for b >= 0 {
+      var inn: Set<Int> = Set.new()
+      for s in succ[b] {
+        for l in live_in[s].items() {
+          if !defs_b[b].contains(l) {
+            inn.insert(l)
+          }
+        }
+      }
+      for l in uses_b[b].items() {
+        inn.insert(l)
+      }
+      if inn.len() != live_in[b].len() {
+        live_in[b] = inn
+        changed = true
+      }
+      b -= 1
+    }
+  }
+  var result: List<List<List<Int>>> = []
+  for b in 0..n {
+    let block = mf.blocks[b]
+    var live: Set<Int> = Set.new()
+    for s in succ[b] {
+      for l in live_in[s].items() {
+        live.insert(l)
+      }
+    }
+    for x in term_b[b] {
+      live.insert(x)
+    }
+    var per: List<List<Int>> = []
+    for _ in block.stmts {
+      per.push([])
+    }
+    var i = block.stmts.len() - 1
+    for i >= 0 {
+      var us: List<Int> = []
+      let def = stmt_uses(block.stmts[i].stmt, &mut us)
+      with_roots(&mut us, roots)
+      var dead: List<Int> = []
+      for l in us {
+        if owners.contains(l) && !live.contains(l) && !dead.contains(l) {
+          dead.push(l)
+        }
+      }
+      if def >= 0 && owners.contains(def) && !live.contains(def) && !dead.contains(def) {
+        dead.push(def)
+      }
+      dead.sort()
+      per[i] = dead
+      if def >= 0 {
+        let _ = live.remove(def)
+      }
+      for x in us {
+        live.insert(x)
+      }
+      i -= 1
+    }
+    result.push(per)
+  }
+  return result
+}
+
+/// For each block, the owned locals that may hold a value when its terminator runs: assigned
+/// (or passed `&mut`) on some path since they were last released. Every local starts empty, so
+/// a function's return releases only these.
+fn held_at_end(mf: MFn, owners: Set<Int>, dead: List<List<List<Int>>>) -> List<Set<Int>> {
+  let n = mf.blocks.len()
+  var succ: List<List<Int>> = []
+  for block in mf.blocks {
+    succ.push(successors(block.term))
+  }
+  var held_in: List<Set<Int>> = []
+  var held_out: List<Set<Int>> = []
+  for _ in 0..n {
+    held_in.push(Set.new())
+    held_out.push(Set.new())
+  }
+  var changed = true
+  for changed {
+    changed = false
+    for b in 0..n {
+      var h = held_in[b]
+      let stmts = mf.blocks[b].stmts
+      for i in 0..stmts.len() {
+        match stmts[i].stmt {
+          Assign(p, rv) => {
+            if owners.contains(p.local) {
+              h.insert(p.local)
+            }
+            match rv {
+              Call(_, args, _) => {
+                for a in args {
+                  match a {
+                    MutRef(q) => if owners.contains(q.local) { h.insert(q.local) }
+                    _ => {}
+                  }
+                }
+              }
+              _ => {}
+            }
+          }
+          Drop(l) => {
+            let _ = h.remove(l)
+          }
+          _ => {}
+        }
+        for l in dead[b][i] {
+          let _ = h.remove(l)
+        }
+      }
+      // Sets only grow, so a change shows in the size.
+      if h.len() != held_out[b].len() {
+        for s in succ[b] {
+          for l in h.items() {
+            held_in[s].insert(l)
+          }
+        }
+        held_out[b] = h
+        changed = true
+      }
+    }
+  }
+  return held_out
 }
 
 /// Intrinsics that read a list argument in place.

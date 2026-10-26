@@ -38,13 +38,21 @@ fn Cg.emit_fn(&mut self, f: Int) {
       rc.insert(l)
     }
   }
+  let roots = borrowed_locals(mf, rc)
+  var borrowed: Set<Int> = Set.new()
+  for (l, _) in roots {
+    borrowed.insert(l)
+  }
   var cx = FnCx {
     out: ""
     mutref: Set.new()
     params: Set.new()
     unique: unique_lists(mf, self.lw.s.tys)
-    borrowed: borrowed_locals(mf, rc)
+    borrowed: borrowed
     movable: Set.new()
+    moved: Set.new()
+    held: []
+    cur_block: 0
   }
   for (l, m) in mf.params {
     cx.params.insert(l)
@@ -59,6 +67,8 @@ fn Cg.emit_fn(&mut self, f: Int) {
     }
   }
   let moves = last_uses(mf, owners)
+  let dead = dead_after(mf, owners, roots)
+  cx.held = held_at_end(mf, owners, dead)
   cx.out = "/* " + mf.name.replace("*/", "* /") + " */\n" + sig + " {\n"
   for l in 0..mf.locals.len() {
     if cx.params.contains(l) {
@@ -82,9 +92,18 @@ fn Cg.emit_fn(&mut self, f: Int) {
     cx.out += "bb" + b.str() + ":;\n"
     for i in 0..block.stmts.len() {
       cx.movable = moves[b][i]
+      cx.moved = Set.new()
       self.emit_stmt(mf, &mut cx, block.stmts[i].stmt, block.stmts[i].span)
+      for l in dead[b][i] {
+        if !cx.moved.contains(l) {
+          let lv = local_lval(cx, l)
+          let rel = self.release_stmt(mf.locals[l], lv)
+          cx.out += "    " + rel + " memset(&" + lv + ", 0, sizeof " + lv + ");\n"
+        }
+      }
     }
     cx.movable = Set.new()
+    cx.cur_block = b
     self.emit_term(mf, &mut cx, block.term, block.term_span)
   }
   cx.out += "}\n\n"
@@ -373,6 +392,7 @@ fn Cg.owned(&mut self, mf: MFn, cx: &mut FnCx, op: Operand, span: syntax.Span) -
   match op {
     Copy(p) => if p.proj.is_empty() && cx.movable.contains(p.local) {
       // Its last use: take the value and clear the local instead of counting.
+      cx.moved.insert(p.local)
       cx.out += "    " +
         c +
         " t" +
@@ -555,7 +575,7 @@ fn Cg.emit_term(&mut self, mf: MFn, cx: &mut FnCx, term: Terminator, span: synta
     }
     Return => {
       for l in 1..mf.locals.len() {
-        if cx.params.contains(l) || cx.borrowed.contains(l) {
+        if cx.params.contains(l) || cx.borrowed.contains(l) || !cx.held[cx.cur_block].contains(l) {
           continue
         }
         let rel = self.release_stmt(mf.locals[l], "l" + l.str())

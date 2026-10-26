@@ -354,15 +354,15 @@ fn Interp.panic(self, msg: Str, span: syntax.Span) -> Trap {
   return Trap.Panic(msg, span, bt)
 }
 
-/// Call a function with argument values: the result and the final values of `&mut`
-/// parameters.
-fn Interp.call(&mut self, f: Int, args: List<Value>) -> Result<(Value, List<Value>), Trap> {
+/// Call a function with argument values (which it takes, leaving `()`): the result and the
+/// final values of `&mut` parameters.
+fn Interp.call(&mut self, f: Int, args: &mut List<Value>) -> Result<(Value, List<Value>), Trap> {
   self.lw.ensure_lowered(f)
   let code = self.lw.mir.fns[f]
   match code.intrinsic {
     Some(intr) => {
       let span = if self.stack.is_empty() { code.span } else { self.stack[self.stack.len() - 1].1 }
-      return self.intrinsic(intr, args, span)
+      return self.intrinsic(intr, &mut args, span)
     }
     None => {}
   }
@@ -370,15 +370,15 @@ fn Interp.call(&mut self, f: Int, args: List<Value>) -> Result<(Value, List<Valu
     return Err(self.panic("stack overflow: recursion too deep", code.span))
   }
   self.stack.push((f, code.span))
-  let r = self.run(code, args)
+  let r = self.run(code, &mut args)
   let _ = self.stack.pop()
   return r
 }
 
-fn Interp.run(&mut self, code: MFn, args: List<Value>) -> Result<(Value, List<Value>), Trap> {
+fn Interp.run(&mut self, code: MFn, args: &mut List<Value>) -> Result<(Value, List<Value>), Trap> {
   var locals = [Value.Unit].repeat(code.locals.len())
   for i in 0..min(code.params.len(), args.len()) {
-    locals[code.params[i].0] = args[i]
+    locals[code.params[i].0] = take_at(&mut args, i)
   }
   var bb = 0
   for {
@@ -545,34 +545,51 @@ fn Interp.write_into(
   }
   let whole = v
   v = Value.Unit
-  match (proj[k], whole) {
-    (Field(i), Tuple(xs0)) => {
-      var xs = xs0
-      let r = self.write_into(&mut xs[i], proj, k + 1, idx, ki, val, span)
-      v = Value.Tuple(xs)
-      return r
-    }
-    (VariantField(_, i), Variant(tag, xs0)) => {
-      var xs = xs0
-      let r = self.write_into(&mut xs[i], proj, k + 1, idx, ki, val, span)
-      v = Value.Variant(tag, xs)
-      return r
-    }
-    (Index(_, _), List(xs0)) => {
-      var xs = xs0
-      let i = idx[ki]
-      if i < 0 || i >= xs.len() {
-        v = Value.List(xs)
-        return Err(self.panic(oob(i, xs.len()), span))
-      }
-      let r = self.write_into(&mut xs[i], proj, k + 1, idx, ki + 1, val, span)
-      v = Value.List(xs)
-      return r
-    }
-    _ => {
-      v = whole
-      return Err(self.panic("internal error: cannot write through a projection", span))
-    }
+  let shape = match (proj[k], whole) {
+    (Field(_), Tuple(_)) => -1
+    (VariantField(_, _), Variant(t, _)) => t
+    (Index(_, _), List(_)) => -2
+    _ => -3
+  }
+  if shape == -3 {
+    v = whole
+    return Err(self.panic("internal error: cannot write through a projection", span))
+  }
+  // The parts, moved out so that the write happens in place.
+  var xs = items_of(whole)
+  let i = match proj[k] {
+    Field(f) => f
+    VariantField(_, f) => f
+    Index(_, _) => idx[ki]
+  }
+  if shape == -2 && (i < 0 || i >= xs.len()) {
+    let n = xs.len()
+    v = rebuilt(shape, xs)
+    return Err(self.panic(oob(i, n), span))
+  }
+  let next = if shape == -2 { ki + 1 } else { ki }
+  let r = self.write_into(&mut xs[i], proj, k + 1, idx, next, val, span)
+  v = rebuilt(shape, xs)
+  return r
+}
+
+/// A tuple or struct (shape -1), list (-2) or variant `shape` of these parts.
+fn rebuilt(shape: Int, xs: List<Value>) -> Value {
+  return if shape == -1 {
+    Value.Tuple(xs)
+  } else if shape == -2 {
+    Value.List(xs)
+  } else {
+    Value.Variant(shape, xs)
+  }
+}
+
+/// The parts of a tuple, struct, variant or list, which `v` gives up.
+fn items_of(v: Value) -> List<Value> {
+  return match v {
+    Tuple(xs) | List(xs) => xs
+    Variant(_, xs) => xs
+    _ => []
   }
 }
 
@@ -693,18 +710,18 @@ fn Interp.rvalue(
         }
       }
       let (r, outs) = match callee {
-        Fn(f) => self.call(f, vals)?
-        Intrinsic(i) => self.intrinsic(i, vals, span)?
+        Fn(f) => self.call(f, &mut vals)?
+        Intrinsic(i) => self.intrinsic(i, &mut vals, span)?
         Ffi(name) => {
           let _ = ret
           return Err(self.panic("C functions cannot run in the test runner: `" + name + "`", span))
         }
         Value(op) => match self.operand(op, locals, span)? {
-          Fn(f) => self.call(f, vals)?
+          Fn(f) => self.call(f, &mut vals)?
           Closure(f, env) => {
             var all = env
             all.extend(vals)
-            self.call(f, all)?
+            self.call(f, &mut all)?
           }
           _ => {
             return Err(self.panic("internal error: calling a value that is not a function", span))
@@ -887,6 +904,27 @@ fn Interp.overflow(self, expr: Str, v: Str, k: IntTy, span: syntax.Span) -> Trap
   )
 }
 
+/// `x op y` as an overflow or division error shows it.
+fn op_text(x: Value, op: syntax.BinOp, y: Value) -> Str {
+  return int_text(x) + " " + op.text() + " " + int_text(y)
+}
+
+/// The value `w` of `x op y` as type `k`, or the overflow error.
+fn Interp.fit_op(
+  self,
+  w: (Bool, U64),
+  k: IntTy,
+  span: syntax.Span,
+  x: Value,
+  op: syntax.BinOp,
+  y: Value,
+) -> Result<Value, Trap> {
+  if !wide_fits(w, k) {
+    return Err(self.overflow(op_text(x, op, y), wide_text(w), k, span))
+  }
+  return Ok(wide_value(w, k))
+}
+
 /// The value `w` as type `k`, or the overflow error for `expr`.
 fn Interp.fit(self, w: (Bool, U64), k: IntTy, span: syntax.Span, expr: Str) -> Result<Value, Trap> {
   if !wide_fits(w, k) {
@@ -967,9 +1005,8 @@ fn Interp.binary(
     _ => {}
   }
   let k = self.int_kind(ty)
-  let expr = int_text(x) + " " + op.text() + " " + int_text(y)
   if k == IntTy.U64 {
-    return self.binary_u64(op, wide_of(x).1, wide_of(y).1, wide_of(x), wide_of(y), expr, span)
+    return self.binary_u64(op, wide_of(x).1, wide_of(y).1, x, y, span)
   }
   let a = match x {
     Int(i) => i
@@ -988,17 +1025,17 @@ fn Interp.binary(
       let r = a.wrapping_add(b)
       if (a >= 0) == (b >= 0) && (r >= 0) != (a >= 0) {
         let d = dec_add((a < 0, wide_of(x).1.str()), (b < 0, wide_of(y).1.str()), false)
-        return Err(self.overflow(expr, dec_text(d), k, span))
+        return Err(self.overflow(op_text(x, op, y), dec_text(d), k, span))
       }
-      return self.fit(wide_of(Value.Int(r)), k, span, expr)
+      return self.fit_op(wide_of(Value.Int(r)), k, span, x, op, y)
     }
     Sub => {
       let r = a.wrapping_sub(b)
       if (a >= 0) != (b >= 0) && (r >= 0) != (a >= 0) {
         let d = dec_add((a < 0, wide_of(x).1.str()), (b < 0, wide_of(y).1.str()), true)
-        return Err(self.overflow(expr, dec_text(d), k, span))
+        return Err(self.overflow(op_text(x, op, y), dec_text(d), k, span))
       }
-      return self.fit(wide_of(Value.Int(r)), k, span, expr)
+      return self.fit_op(wide_of(Value.Int(r)), k, span, x, op, y)
     }
     Mul => {
       let r = a.wrapping_mul(b)
@@ -1006,28 +1043,30 @@ fn Interp.binary(
       let over = if a == -1 { b == min } else if b == -1 { a == min } else { a != 0 && r / a != b }
       if over {
         let m = dec_mul_mag(wide_of(x).1.str(), wide_of(y).1.str())
-        return Err(self.overflow(expr, dec_text(((a < 0) != (b < 0), m)), k, span))
+        return Err(self.overflow(op_text(x, op, y), dec_text(((a < 0) != (b < 0), m)), k, span))
       }
-      return self.fit(wide_of(Value.Int(r)), k, span, expr)
+      return self.fit_op(wide_of(Value.Int(r)), k, span, x, op, y)
     }
     Div | Rem => {
       if b == 0 {
-        return Err(self.panic("division by zero: " + expr, span))
+        return Err(self.panic("division by zero: " + op_text(x, op, y), span))
       }
       if b == -1 {
         if op == syntax.BinOp.Rem {
           return Ok(Value.Int(0))
         }
         if a == -9223372036854775807 - 1 {
-          return Err(self.overflow(expr, "9223372036854775808", k, span))
+          return Err(self.overflow(op_text(x, op, y), "9223372036854775808", k, span))
         }
-        return self.fit(wide_of(Value.Int(0 - a)), k, span, expr)
+        return self.fit_op(wide_of(Value.Int(0 - a)), k, span, x, op, y)
       }
-      return self.fit(
+      return self.fit_op(
         wide_of(Value.Int(if op == syntax.BinOp.Div { a / b } else { a % b })),
         k,
         span,
-        expr,
+        x,
+        op,
+        y,
       )
     }
     BitAnd => {
@@ -1049,7 +1088,7 @@ fn Interp.binary(
         // Shifts wrap within the type's bits (no overflow check).
         return Ok(wrap_int(a << b, k))
       }
-      return self.fit(wide_of(Value.Int(a >> b)), k, span, expr)
+      return self.fit_op(wide_of(Value.Int(a >> b)), k, span, x, op, y)
     }
     _ => {
       return Err(self.panic("internal error: bad int op", span))
@@ -1062,9 +1101,8 @@ fn Interp.binary_u64(
   op: syntax.BinOp,
   a: U64,
   b: U64,
-  wa: (Bool, U64),
-  wb: (Bool, U64),
-  expr: Str,
+  x: Value,
+  y: Value,
   span: syntax.Span,
 ) -> Result<Value, Trap> {
   let k = IntTy.U64
@@ -1072,26 +1110,26 @@ fn Interp.binary_u64(
     Add => {
       let r = a.wrapping_add(b)
       if r < a {
-        return Err(self.overflow(expr, dec_add_mag(a.str(), b.str()), k, span))
+        return Err(self.overflow(op_text(x, op, y), dec_add_mag(a.str(), b.str()), k, span))
       }
       return Ok(Value.UInt(r))
     }
     Sub => {
       if b > a {
-        return Err(self.overflow(expr, "-" + (b - a).str(), k, span))
+        return Err(self.overflow(op_text(x, op, y), "-" + (b - a).str(), k, span))
       }
       return Ok(Value.UInt(a - b))
     }
     Mul => {
       let r = a.wrapping_mul(b)
       if a != 0 && r / a != b {
-        return Err(self.overflow(expr, dec_mul_mag(a.str(), b.str()), k, span))
+        return Err(self.overflow(op_text(x, op, y), dec_mul_mag(a.str(), b.str()), k, span))
       }
       return Ok(Value.UInt(r))
     }
     Div | Rem => {
       if b == 0 {
-        return Err(self.panic("division by zero: " + expr, span))
+        return Err(self.panic("division by zero: " + op_text(x, op, y), span))
       }
       return Ok(Value.UInt(if op == syntax.BinOp.Div { a / b } else { a % b }))
     }
@@ -1105,7 +1143,6 @@ fn Interp.binary_u64(
       return Ok(Value.UInt(a ^ b))
     }
     Shl | Shr => {
-      let _ = (wa, wb)
       if b >= 64 {
         return Err(self.panic("shift amount " + b.str() + " is out of range for `U64`", span))
       }
@@ -1329,7 +1366,8 @@ fn Interp.show_adt(&mut self, v: Value, a: Int, args: List<Int>) -> Result<Str, 
   match self.lw.s.defs.methods.get((TyKey.Adt(a), "str")) {
     Some(f) => {
       let m = self.lw.instance(f, args)
-      let (r, _) = self.call(m, [v])?
+      var one = [v]
+      let (r, _) = self.call(m, &mut one)?
       match r {
         Str(s) => {
           return Ok(s)

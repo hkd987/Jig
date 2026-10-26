@@ -109,6 +109,14 @@ fn unbias(u: U64) -> Int {
   }
 }
 
+/// Element `i`, moved out of the list (leaving `()`), so it holds the only reference to what
+/// it owns and changes to it happen in place.
+fn take_at(xs: &mut List<Value>, i: Int) -> Value {
+  let v = xs[i]
+  xs[i] = Value.Unit
+  return v
+}
+
 fn ret_v(v: Value) -> Result<(Value, List<Value>), Trap> {
   return Ok((v, []))
 }
@@ -165,7 +173,7 @@ fn pow_wide(x: Int, y: Int) -> (Bool, Str) {
 fn Interp.intrinsic(
   &mut self,
   intr: Intrinsic,
-  a: List<Value>,
+  a: &mut List<Value>,
   span: syntax.Span,
 ) -> Result<(Value, List<Value>), Trap> {
   match intr.op {
@@ -438,17 +446,17 @@ fn Interp.intrinsic(
       return ret_v(if i >= 0 && i < xs.len() { some_v(xs[i]) } else { none_v() })
     }
     Push => {
-      var xs = list_v(a[0])
+      var xs = list_v(take_at(&mut a, 0))
       xs.push(a[1])
       return Ok((Value.Unit, [Value.List(xs)]))
     }
     Pop => {
-      var xs = list_v(a[0])
+      var xs = list_v(take_at(&mut a, 0))
       let v = option_v(xs.pop())
       return Ok((v, [Value.List(xs)]))
     }
     Insert => {
-      var xs = list_v(a[0])
+      var xs = list_v(take_at(&mut a, 0))
       let i = int_v(a[1])
       if i < 0 || i > xs.len() {
         return Err(
@@ -462,7 +470,7 @@ fn Interp.intrinsic(
       return Ok((Value.Unit, [Value.List(xs)]))
     }
     Remove => {
-      var xs = list_v(a[0])
+      var xs = list_v(take_at(&mut a, 0))
       let i = int_v(a[1])
       if i < 0 || i >= xs.len() {
         return Err(
@@ -479,17 +487,17 @@ fn Interp.intrinsic(
       return Ok((Value.Unit, [Value.List([])]))
     }
     Extend => {
-      var xs = list_v(a[0])
+      var xs = list_v(take_at(&mut a, 0))
       xs.extend(list_v(a[1]))
       return Ok((Value.Unit, [Value.List(xs)]))
     }
     Reverse => {
-      var xs = list_v(a[0])
+      var xs = list_v(take_at(&mut a, 0))
       xs.reverse()
       return Ok((Value.Unit, [Value.List(xs)]))
     }
     Swap => {
-      var xs = list_v(a[0])
+      var xs = list_v(take_at(&mut a, 0))
       let i = int_v(a[1])
       let j = int_v(a[2])
       let n = xs.len()
@@ -505,7 +513,7 @@ fn Interp.intrinsic(
       return Ok((Value.Unit, [Value.List(xs)]))
     }
     Truncate => {
-      var xs = list_v(a[0])
+      var xs = list_v(take_at(&mut a, 0))
       let n = int_v(a[1])
       if n < 0 {
         return Err(self.panic("truncate length " + n.str() + " is negative", span))
@@ -516,7 +524,7 @@ fn Interp.intrinsic(
       return Ok((Value.Unit, [Value.List(xs)]))
     }
     Sort => {
-      var xs = list_v(a[0])
+      var xs = list_v(take_at(&mut a, 0))
       sort_values(&mut xs)
       return Ok((Value.Unit, [Value.List(xs)]))
     }
@@ -542,7 +550,7 @@ fn Interp.intrinsic(
       return ret_v(Value.Tuple([x, y]))
     }
     SortBy => {
-      var xs = list_v(a[0])
+      var xs = list_v(take_at(&mut a, 0))
       self.merge_sort(&mut xs, a[1], span)?
       return Ok((Value.Unit, [Value.List(xs)]))
     }
@@ -565,22 +573,22 @@ fn Interp.intrinsic(
       return ret_v(Value.Bool(omap_v(a[0]).contains(a[1])))
     }
     MapInsert => {
-      var m = omap_v(a[0])
+      var m = omap_v(take_at(&mut a, 0))
       m.insert(a[1], a[2])
       return Ok((Value.Unit, [Value.Map(m)]))
     }
     SetInsert => {
-      var m = omap_v(a[0])
+      var m = omap_v(take_at(&mut a, 0))
       m.insert(a[1], Value.Unit)
       return Ok((Value.Unit, [Value.Set(m)]))
     }
     MapRemove => {
-      var m = omap_v(a[0])
+      var m = omap_v(take_at(&mut a, 0))
       let r = option_v(m.remove(a[1]))
       return Ok((r, [Value.Map(m)]))
     }
     SetRemove => {
-      var m = omap_v(a[0])
+      var m = omap_v(take_at(&mut a, 0))
       let r = m.remove(a[1]).is_some()
       return Ok((Value.Bool(r), [Value.Set(m)]))
     }
@@ -977,12 +985,13 @@ fn Interp.call_value(
 ) -> Result<Value, Trap> {
   match f {
     Fn(m) => {
-      return Ok(self.call(m, args)?.0)
+      var a = args
+      return Ok(self.call(m, &mut a)?.0)
     }
     Closure(m, env) => {
       var all = env
       all.extend(args)
-      return Ok(self.call(m, all)?.0)
+      return Ok(self.call(m, &mut all)?.0)
     }
     _ => {
       return Err(self.panic("internal error: calling a value that is not a function", span))

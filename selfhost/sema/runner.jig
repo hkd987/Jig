@@ -482,7 +482,8 @@ fn Interp.run_case(
   self.fx = fake_effects(seed)
   self.stack = []
   self.fuel = 200000000
-  let r = self.call(m, args)
+  var a = args
+  let r = self.call(m, &mut a)
   let stdout = self.fx.stdout
   match r {
     Ok(_) => {
@@ -694,7 +695,8 @@ fn run_main_sim(lw: Lw, cwd: Str) -> Result<Str, Str> {
   }
   var it = new_interp(lw, fake_effects(42), cwd)
   let m = it.lw.instance(main, [])
-  let r = it.call(m, [])
+  var none: List<Value> = []
+  let r = it.call(m, &mut none)
   var out = it.fx.stdout
   match r {
     Ok(_) => {}
