@@ -52,6 +52,7 @@ jig prove examples/bank                     # contracts and safety, with counter
 jig trace uncovered examples/bank           # code no scenario exercises
 jig run examples/hello                      # run main on the interpreter
 jig build examples/hello --release          # native binary through C
+jig run examples/http -- :8080              # a web server in 30 lines: curl localhost:8080
 jig fmt examples                            # the one formatting
 ```
 
