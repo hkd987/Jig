@@ -53,31 +53,38 @@ The PRD's proposed targets, measured on `main` (4-core Xeon, clang 18):
 
 | Metric | Target | Now | |
 | --- | --- | --- | --- |
-| Check after one edit, 100k-line project | under 100 ms | 70 ms for a full `jig check` of 98k lines | met |
+| Check after one edit, 100k-line project | under 100 ms | 70 ms for a full check of 98k lines by the Rust compiler, on four threads; 209 ms by jigc, which `jig` now runs, on one thread | Rust compiler only |
 | Re-proof after changing one function | under 1 s, warm cache | 0.2 s (`bench/reprove.py`, CI) | met |
 | Bootstrap compiler regression per change | under 2% or sign-off | gated in CI (`bench/compare.py`) | met |
 | Runtime vs Rust, shared suite | within 10% | 0.89 by instructions, 0.97 wall clock ([phase 3](phase3.md)) | met |
 | Hello-world release binary | under 100 KB | 84 KB (72 KB stripped) | met |
-| Self-hosted vs bootstrap compiler, same corpus | equal or faster | 0.94 by instructions (CI gate 1.05); 1.36 by wall time | instructions only |
+| Self-hosted vs bootstrap compiler, same corpus | equal or faster | 0.92 by instructions (CI gate 1.05); 1.21 by wall time | instructions only |
 | Agent tasks reaching a verified build, vs Rust | equal or better | harness and tasks ready (`bench/agents`); no agent runs yet | not measured |
 | Agent iterations per task, vs Rust and TypeScript | equal or fewer | as above | not measured |
-| Std and compiler functions with proven contracts | over 80% | std 91%; jigc 39% (493 of 1,209 functions state contracts and 477 of them (97%) prove completely, every safety obligation included: the lexer, nearly all of the parser, the JSON reader, and helpers across every pass, among them those that index an arena by a parameter, which now require the index; most of the rest read an index out of a tree node or a table, so proving it needs an invariant over every node's payload, which contracts cannot yet state) | std only |
+| Std and compiler functions with proven contracts | over 80% | std 91%; jigc 39% (491 of 1,209 functions state contracts and 475 of them (97%) prove completely, every safety obligation included: the lexer, nearly all of the parser, the JSON reader, and helpers across every pass, among them those that index an arena by a parameter, which now require the index; most of the rest read an index out of a tree node or a table, so proving it needs an invariant over every node's payload, which contracts cannot yet state) | std only |
 | Language reference size | fits in 10k tokens | about 6,000 | met |
 
 **Self-hosted speed.** By pass (`bench/selfhost.py --instructions --prove`, with jigc built
 as a real build is, after `jig prove`, so the checks its proofs discharge are gone): lexer
-0.92, parser 0.61, checker 1.33, checker through C 1.03; geometric mean 0.94. Most of the closing came
+0.93, parser 0.69, checker 1.10, checker through C 1.02; geometric mean 0.92. Most of the closing came
 from the language's implementation: a copy of a place now aliases it, with no reference
 count, while nothing can write, drop or move the place's root, so reading a type's or
 expression's kind out of a list no longer retains and releases its payload. The checker's
 remaining gap is jigc's own: it slices every identifier into a new string and hashes
-strings where the bootstrap compiler compares interned symbols. Values now also die at
+strings where the bootstrap compiler compares interned symbols. Profiling the checker found
+three costs of jigc's own, now gone: binding `.feature` scenarios scanned every function once
+per package (8% of a check without features); `zonk` rebuilt and re-interned every compound
+type, now skipped when a type has no inference variables (a flag set when it is interned,
+which also makes `has_infer` and `has_vars` one lookup); and finding a project's `main`
+packages split every line of every file into characters. Values now also die at
 their last use (an owned local is released after the statement that last reads it, counting
 reads of what borrows from it), and a function's return releases only the locals that may
 still hold a value, which removed most of the release calls in large functions. Wall time
-is further behind (1.36; 1.29 for the build before the lexer's contracts, on the same
-machine), because jigc's nodes use 64-bit fields and the bootstrap compiler parses on a
-second thread.
+is further behind (1.21, the checker 1.71), because jigc touches about twice the memory
+(64-bit node fields, reference counts) and the bootstrap compiler parses on other threads.
+That also decides a full `jig check`, which the Rust compiler runs on four threads and jigc
+on one: 209 ms against 70 ms on 98k lines, so the 100 ms target is met only by the Rust
+compiler.
 
 **Agent measures.** `bench/agents/run.py --agent CMD` runs an agent per task and language
 and reports tasks solved and turns. Its six tasks have reference solutions in all three

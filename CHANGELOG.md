@@ -23,7 +23,8 @@ the code they exercise.
 **Toolchain.** One command: `check`, `test`, `prove`, `run`, `build`, `trace`, `fmt`, `get`,
 `explain`, `search`, `reference`, `mcp`. Structured JSON diagnostics with stable codes.
 Native code through C (release builds as one unit at `-O2`), within 10% of Rust on the
-shared benchmark suite; a 100k-line project checks in about 70 ms.
+shared benchmark suite; a 100k-line project checks in about 70 ms with the Rust compiler on
+four threads (jigc, which `jig` now runs, takes about 210 ms on one).
 
 **Standard library.** `std/io`, `fs`, `net` (TCP request/response and a simulator),
 `time`, `rand`, `os`, `task` (fork-join), `math`, `lists`, `strings`; 91% of its functions
@@ -40,5 +41,7 @@ trace collection.
 the Rust compiler that bootstrapped it prints, which is now frozen as the reference the
 tests compare with (D6).
 
-**Not yet.** Agent benchmark results, contracts on most of the compiler (its lexer and nearly
-all of its parser prove), and self-hosted speed parity are open (`docs/gates/phase4.md`).
+**Not yet.** Agent benchmark results, contracts on most of the compiler (475 of its 1,209
+functions prove completely, the lexer and nearly all of the parser among them), self-hosted
+speed parity, and checking 100k lines in under 100 ms with jigc (209 ms on one thread; the
+Rust compiler's 70 ms uses four) are open (`docs/gates/phase4.md`).

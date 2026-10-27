@@ -165,6 +165,10 @@ struct Factor {
 
 struct TyCtx {
   kinds: List<TyKind>
+  /// Per type: whether it contains an inference variable, and whether it contains an
+  /// inference variable or a generic parameter (set once, when the type is interned).
+  infer_flags: List<Bool>
+  var_flags: List<Bool>
   map: Map<TyKind, Int>
   units: List<List<Factor>>
   unit_map: Map<List<Factor>, Int>
@@ -184,6 +188,8 @@ struct TyCtx {
 fn new_tys() -> TyCtx {
   var t = TyCtx {
     kinds: []
+    infer_flags: []
+    var_flags: []
     map: Map.new()
     units: []
     unit_map: Map.new()
@@ -224,9 +230,39 @@ fn TyCtx.intern(&mut self, k: TyKind) -> Int
     None => {}
   }
   let t = self.kinds.len()
+  let (infer, vars) = self.kind_flags(k)
   self.kinds.push(k)
+  self.infer_flags.push(infer)
+  self.var_flags.push(vars)
   self.map.insert(k, t)
   return t
+}
+
+/// Whether a type of kind `k` contains an inference variable, and whether it contains one or
+/// a generic parameter: its own, or its parts' (interned before it).
+fn TyCtx.kind_flags(self, k: TyKind) -> (Bool, Bool) {
+  return match k {
+    Infer(_) => (true, true)
+    Param(_, _) => (false, true)
+    Tuple(ts) | Adt(_, ts) => self.list_flags(ts, false, false)
+    List(x) | Set(x) => (self.infer_flags[x], self.var_flags[x])
+    Map(a, b) => (
+      self.infer_flags[a] || self.infer_flags[b],
+      self.var_flags[a] || self.var_flags[b],
+    )
+    Fn(ps, r, _) => self.list_flags(ps, self.infer_flags[r], self.var_flags[r])
+    _ => (false, false)
+  }
+}
+
+fn TyCtx.list_flags(self, ts: List<Int>, infer: Bool, vars: Bool) -> (Bool, Bool) {
+  var i = infer
+  var v = vars
+  for x in ts {
+    i = i || self.infer_flags[x]
+    v = v || self.var_flags[x]
+  }
+  return (i, v)
 }
 
 fn TyCtx.int_ty(&mut self, k: IntTy, u: Int) -> Int
@@ -462,47 +498,11 @@ fn TyCtx.subst_all(&mut self, ts: List<Int>, args: List<Int>) -> List<Int>
 
 /// Does the type mention an inference variable or a generic parameter?
 fn TyCtx.has_vars(self, t: Int) -> Bool {
-  return match self.kinds[t] {
-    Infer(_) | Param(_, _) => true
-    Tuple(ts) | Adt(_, ts) => self.any_vars(ts)
-    List(x) | Set(x) => self.has_vars(x)
-    Map(k, v) => self.has_vars(k) || self.has_vars(v)
-    Fn(ps, r, _) => self.any_vars(ps) || self.has_vars(r)
-    _ => false
-  }
-}
-
-fn TyCtx.any_vars(self, ts: List<Int>) -> Bool
-  ensures !result || !ts.is_empty()
-{
-  for x in ts {
-    if self.has_vars(x) {
-      return true
-    }
-  }
-  return false
+  return self.var_flags[t]
 }
 
 fn TyCtx.has_infer(self, t: Int) -> Bool {
-  return match self.kinds[t] {
-    Infer(_) => true
-    Tuple(ts) | Adt(_, ts) => self.any_infer(ts)
-    List(x) | Set(x) => self.has_infer(x)
-    Map(k, v) => self.has_infer(k) || self.has_infer(v)
-    Fn(ps, r, _) => self.any_infer(ps) || self.has_infer(r)
-    _ => false
-  }
-}
-
-fn TyCtx.any_infer(self, ts: List<Int>) -> Bool
-  ensures !result || !ts.is_empty()
-{
-  for x in ts {
-    if self.has_infer(x) {
-      return true
-    }
-  }
-  return false
+  return self.infer_flags[t]
 }
 
 fn TyCtx.display(self, t: Int) -> Str {

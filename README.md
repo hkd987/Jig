@@ -73,11 +73,11 @@ Measured in CI on every push (see `bench/` and `docs/gates/`):
 
 | Metric | Target | Now |
 | --- | --- | --- |
-| `jig check` on a 100k-line project | under 100 ms | about 70 ms (4 cores) |
+| `jig check` on a 100k-line project | under 100 ms | about 210 ms (jigc, one thread; the Rust compiler takes 70 ms on 4 cores) |
 | Re-proof after changing one function | under 1 s | 0.2 s |
 | Runtime vs Rust, 8 benchmarks (instructions) | within 10% | 0.89 |
 | Hello-world release binary | under 100 KB | 84 KB |
-| Self-hosted compiler vs bootstrap (instructions) | equal or faster | 0.94 |
+| Self-hosted compiler vs bootstrap (instructions) | equal or faster | 0.92 |
 | Standard library functions with proven contracts | over 80% | 91% |
 
 ## Self-hosted

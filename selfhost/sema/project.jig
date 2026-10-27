@@ -91,9 +91,12 @@ fn has_main(dir: Str) -> Bool effects {fs} {
     }
     match fs.read(join_path(dir, name)) {
       Ok(text) => {
-        for line in text.split("\n") {
-          if trim_start_space(line).starts_with("fn main(") {
-            return true
+        // Only a line that contains it can start with it.
+        if text.contains("fn main(") {
+          for line in text.split("\n") {
+            if line.contains("fn main(") && trim_start_space(line).starts_with("fn main(") {
+              return true
+            }
           }
         }
       }

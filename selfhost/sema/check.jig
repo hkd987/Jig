@@ -405,6 +405,10 @@ fn Sema.kind_of(self, t: Int) -> TyKind {
 /// Deep-resolve inference variables.
 fn Sema.zonk(&mut self, t: Int) -> Int {
   let r = self.resolve(t)
+  // Without inference variables, zonking rebuilds the same type.
+  if !self.tys.has_infer(r) {
+    return r
+  }
   return match self.tys.kinds[r] {
     Tuple(ts) => {
       let v = self.zonk_all(ts)

@@ -156,9 +156,10 @@ fn Sema.place(self, root: Str, lo: Int, hi: Int) -> Str {
 /// `jigc check DIR STD`: the same lines as `jig debug check DIR`.
 fn check_dump(dir: Str, std_dir: Str) -> Str effects {fs, env} {
   let (s, root) = analyze(dir, std_dir)
-  var out: List<Str> = []
+  // One string, appended to in place.
+  var out = ""
   for d in s.diags {
-    out.push("error " + d.code + " " + s.place(root, d.lo, d.hi) + " " + d.msg + "\n")
+    out += "error " + d.code + " " + s.place(root, d.lo, d.hi) + " " + d.msg + "\n"
   }
   // Types render once each.
   var shown = [""].repeat(s.tys.kinds.len())
@@ -178,17 +179,15 @@ fn check_dump(dir: Str, std_dir: Str) -> Str effects {fs, env} {
         if shown[t].is_empty() {
           shown[t] = s.tys.display(t)
         }
-        out.push(
-          "expr " +
-            name +
-            " " +
-            (sp.lo - base).str() +
-            " " +
-            (sp.hi - base).str() +
-            " " +
-            shown[t] +
-            "\n",
-        )
+        out += "expr "
+        out += name
+        out += " "
+        out += (sp.lo - base).str()
+        out += " "
+        out += (sp.hi - base).str()
+        out += " "
+        out += shown[t]
+        out += "\n"
       }
       for i in 0..ast.pats.len() {
         let sp = ast.pats[i].span
@@ -196,21 +195,19 @@ fn check_dump(dir: Str, std_dir: Str) -> Str effects {fs, env} {
         if shown[t].is_empty() {
           shown[t] = s.tys.display(t)
         }
-        out.push(
-          "pat " +
-            name +
-            " " +
-            (sp.lo - base).str() +
-            " " +
-            (sp.hi - base).str() +
-            " " +
-            shown[t] +
-            "\n",
-        )
+        out += "pat "
+        out += name
+        out += " "
+        out += (sp.lo - base).str()
+        out += " "
+        out += (sp.hi - base).str()
+        out += " "
+        out += shown[t]
+        out += "\n"
       }
     }
   }
-  return out.join("")
+  return out
 }
 
 /// `jigc c DIR STD`: the C program for the package in DIR, the same text as `jig debug c DIR`.

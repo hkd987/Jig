@@ -683,11 +683,19 @@ fn expand(sc: ScenarioAst) -> List<(Str, List<StepLine>)>
 /// Check every package's step functions and bind its feature files; the steps and world
 /// constructors scenarios use become roots of the dead-code check.
 fn Sema.bind_features(&mut self) {
+  // Each package's step functions, in id order, from one pass over the functions.
+  let none: List<Int> = []
+  var step_fns = [none].repeat(self.pkgs.len())
+  for f in 0..self.defs.fns.len() {
+    if self.defs.fns[f].step_attr.is_some() {
+      step_fns[self.defs.fns[f].pkg].push(f)
+    }
+  }
   for p in 0..self.pkgs.len() {
     if self.pkgs[p].is_std {
       continue
     }
-    let steps = self.step_defs(p)
+    let steps = self.step_defs(step_fns[p])
     for f in self.pkgs[p].features {
       let (feature, scenarios, ds) = parse_feature(f.text, f.base)
       self.diags.extend(ds)
@@ -706,13 +714,11 @@ fn Sema.bind_features(&mut self) {
   }
 }
 
-fn Sema.step_defs(&mut self, p: Int) -> List<StepDef> {
+/// The step definitions among functions `fns`, reporting the malformed ones.
+fn Sema.step_defs(&mut self, fns: List<Int>) -> List<StepDef> {
   var out: List<StepDef> = []
-  for f in 0..self.defs.fns.len() {
+  for f in fns {
     let fd = self.defs.fns[f]
-    if fd.pkg != p {
-      continue
-    }
     let st = match fd.step_attr {
       Some(s) => s
       None => {
