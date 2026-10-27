@@ -13,6 +13,7 @@ bootstrap compiler on every `.jig` file in the repository plus a few hundred mut
 | Lexer | `compiler/src/syntax/lexer.rs` | `syntax/lexer.jig` | `jigc tokens FILE` = `jig debug tokens FILE` |
 | Parser | `compiler/src/syntax/parser.rs` | `syntax/ast.jig`, `syntax/parser.jig` | `jigc ast FILE` = `jig debug ast FILE` |
 | Checker: loading, collection, types, effects, exhaustiveness, lints, dead code, feature binding | `compiler/src/sema/`, `compiler/src/feature/` | `sema/` | `jigc check DIR STD` = `jig debug check DIR` |
+| `jig check`: project analysis, diagnostics as text and JSON | `compiler/src/tools/project.rs`, `compiler/src/diag/` | `sema/project.jig`, `sema/render.jig` | `jigc check [PATH] [--json]` = `jig check [PATH] [--json]` |
 | MIR lowering, ownership analyses, C back end | `compiler/src/mir/lower.rs`, `compiler/src/codegen/` | `sema/mir.jig`, `sema/lower*.jig`, `sema/own.jig`, `sema/cgen*.jig` | `jigc c DIR STD` = `jig debug c DIR` |
 | Formatter | `compiler/src/fmt/` | `syntax/fmt.jig`, `syntax/fmt_expr.jig` | `jigc fmt FILE` = `jig fmt FILE` |
 | Interpreter, test runner, property tests | `compiler/src/mir/interp.rs`, `compiler/src/runner.rs`, `compiler/src/proptest.rs` | `sema/interp.jig`, `sema/intrinsics.jig`, `sema/runner.jig` | `jigc test DIR STD` = `jig test --json DIR` |

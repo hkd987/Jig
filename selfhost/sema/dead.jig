@@ -142,10 +142,12 @@ fn Sema.check_dead_code(&mut self) {
     let fd = self.defs.fns[f]
     for r in body.refs {
       if self.pkgs[self.defs.fns[r].pkg].path == "std/sim" && self.is_user(fd.pkg) {
-        self.err(
-          "E0607",
-          fd.name_span,
-          "`" + fd.name + "` uses `sim." + self.defs.fns[r].name + "`, but `main` reaches it",
+        self.push(
+          diag(
+            "E0607",
+            fd.name_span,
+            "`" + fd.name + "` uses `sim." + self.defs.fns[r].name + "`, but `main` reaches it",
+          ).note("`std/sim` is for tests, steps and test helpers"),
         )
       }
       work.push(r)
@@ -187,7 +189,11 @@ fn Sema.check_dead_code(&mut self) {
     }
     match fd.step_attr {
       Some(st) => {
-        self.err("E0605", st.span, "no scenario uses the step \"" + st.pattern + "\"")
+        self.push(
+          diag("E0605", st.span, "no scenario uses the step \"" + st.pattern + "\"").note(
+            "delete it, or write a scenario that needs it",
+          ),
+        )
         continue
       }
       None => {}
@@ -196,10 +202,19 @@ fn Sema.check_dead_code(&mut self) {
       self.pkgs[fd.pkg].files[fd.file].path.ends_with("_test.jig") {
       continue
     }
-    self.err(
-      "E0601",
-      fd.name_span,
-      "`" + self.fn_display_name(fid) + "` is never reached from an entrypoint",
+    let note = if test_refs.contains(fid) {
+      "only tests use it; tests do not justify code. Move it to a `_test.jig` file to make it a test helper"
+    } else if library {
+      "in a library, only `pub` functions of the root package and what they call are entrypoints"
+    } else {
+      "delete it, or call it from code reachable from `main`"
+    }
+    self.push(
+      diag(
+        "E0601",
+        fd.name_span,
+        "`" + self.fn_display_name(fid) + "` is never reached from an entrypoint",
+      ).note(note),
     )
   }
   // Unused exports: `pub` functions of non-root packages used only inside their package.
@@ -215,10 +230,12 @@ fn Sema.check_dead_code(&mut self) {
     if cross_pkg.contains(fid) || dyn_names.contains(fd.name) {
       continue
     }
-    self.err(
-      "E0603",
-      fd.name_span,
-      "`" + self.fn_display_name(fid) + "` is exported but no other package uses it",
+    self.push(
+      diag(
+        "E0603",
+        fd.name_span,
+        "`" + self.fn_display_name(fid) + "` is exported but no other package uses it",
+      ).note("remove `pub`"),
     )
   }
   // Unused exports of types, interfaces and constants.
@@ -229,20 +246,24 @@ fn Sema.check_dead_code(&mut self) {
     let ad = self.defs.adts[aid]
     if self.exported(ad.pkg, ad.is_pub) && !adts_cross.contains(aid) {
       let what = if ad.is_enum { "enum" } else { "struct" }
-      self.err(
-        "E0603",
-        self.item_name_span(ad.pkg, ad.file, ad.item),
-        what + " `" + ad.name + "` is exported but no other package uses it",
+      self.push(
+        diag(
+          "E0603",
+          self.item_name_span(ad.pkg, ad.file, ad.item),
+          what + " `" + ad.name + "` is exported but no other package uses it",
+        ).note("remove `pub`"),
       )
     }
   }
   for iid in 0..self.defs.ifaces.len() {
     let d = self.defs.ifaces[iid]
     if self.exported(d.pkg, d.is_pub) && !ifaces_cross.contains(iid) {
-      self.err(
-        "E0603",
-        self.item_name_span(d.pkg, d.file, d.item),
-        "interface `" + d.name + "` is exported but no other package uses it",
+      self.push(
+        diag(
+          "E0603",
+          self.item_name_span(d.pkg, d.file, d.item),
+          "interface `" + d.name + "` is exported but no other package uses it",
+        ).note("remove `pub`"),
       )
     }
   }
@@ -251,10 +272,12 @@ fn Sema.check_dead_code(&mut self) {
     if self.exported(cd.pkg, cd.is_pub) &&
       consts_used.contains(cid) &&
       !consts_cross.contains(cid) {
-      self.err(
-        "E0603",
-        self.item_name_span(cd.pkg, cd.file, cd.item),
-        "constant `" + cd.name + "` is exported but no other package uses it",
+      self.push(
+        diag(
+          "E0603",
+          self.item_name_span(cd.pkg, cd.file, cd.item),
+          "constant `" + cd.name + "` is exported but no other package uses it",
+        ).note("remove `pub`"),
       )
     }
   }
@@ -272,17 +295,23 @@ fn Sema.check_dead_code(&mut self) {
         self.struct_invariant_mentions(ad, f.name) {
         continue
       }
-      self.err("E0602", f.span, "field `" + f.name + "` of `" + ad.name + "` is never read")
+      self.push(
+        diag("E0602", f.span, "field `" + f.name + "` of `" + ad.name + "` is never read").note(
+          "remove it",
+        ),
+      )
     }
     for i in 0..ad.variants.len() {
       if variants_built.contains((aid, i)) || api {
         continue
       }
       let v = ad.variants[i]
-      self.err(
-        "E0604",
-        v.span,
-        "variant `" + v.name + "` of `" + ad.name + "` is never constructed",
+      self.push(
+        diag(
+          "E0604",
+          v.span,
+          "variant `" + v.name + "` of `" + ad.name + "` is never constructed",
+        ).note("remove it; matches on it can never succeed"),
       )
     }
   }
@@ -294,10 +323,12 @@ fn Sema.check_dead_code(&mut self) {
       (library && cd.pkg == self.root && cd.is_pub) {
       continue
     }
-    self.err(
-      "E0606",
-      self.item_name_span(cd.pkg, cd.file, cd.item),
-      "constant `" + cd.name + "` is never used",
+    self.push(
+      diag(
+        "E0606",
+        self.item_name_span(cd.pkg, cd.file, cd.item),
+        "constant `" + cd.name + "` is never used",
+      ).note("remove it"),
     )
   }
   self.sort_diags()

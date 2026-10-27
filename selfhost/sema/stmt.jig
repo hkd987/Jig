@@ -67,10 +67,12 @@ fn Sema.check_block_value(&mut self, block: Int, expected: Option<Int>) -> Int {
           _ => false
         }
         if r != self.tys.unit_ty && !open {
-          self.err(
-            "E0301",
-            self.expr_span(block),
-            "this block has no value, but `" + self.show(exp) + "` is expected",
+          self.push(
+            diag(
+              "E0301",
+              self.expr_span(block),
+              "this block has no value, but `" + self.show(exp) + "` is expected",
+            ).note("end the block with an expression"),
           )
           return exp
         }
@@ -84,7 +86,11 @@ fn Sema.check_block_value(&mut self, block: Int, expected: Option<Int>) -> Int {
 fn Sema.unreachable_check(&mut self, s: Int, reported: &mut Bool) {
   if self.diverges && !reported {
     reported = true
-    self.err("E0506", self.ast.stmts[s].span, "unreachable code")
+    self.push(
+      diag("E0506", self.ast.stmts[s].span, "unreachable code").note(
+        "it comes after a `return`, `break`, `continue` or `panic`",
+      ),
+    )
   }
 }
 
@@ -104,10 +110,12 @@ fn Sema.check_stmt(&mut self, s: Int) {
       }
       if r == self.tys.unit_ty {
         match self.ast.pats[pat].kind {
-          Bind(_) => self.err(
-            "E0301",
-            self.expr_span(init),
-            "this expression has no value (its type is `()`)",
+          Bind(_) => self.push(
+            diag(
+              "E0301",
+              self.expr_span(init),
+              "this expression has no value (its type is `()`)",
+            ).note("call it as a statement instead of binding its result"),
           )
           _ => {}
         }
@@ -267,7 +275,13 @@ fn Sema.check_for(&mut self, head: syntax.ForHead, invariants: List<Int>, body: 
     While(c) => {
       self.check_bool(c)
       match self.ast.exprs[c].kind {
-        Bool(v) => self.err("E0509", self.expr_span(c), "condition is always `" + v.str() + "`")
+        Bool(v) => {
+          var d = diag("E0509", self.expr_span(c), "condition is always `" + v.str() + "`")
+          if v {
+            d = d.note("write `for { ... }` for an infinite loop")
+          }
+          self.push(d)
+        }
         _ => {}
       }
     }
@@ -327,7 +341,11 @@ fn Sema.check_iterable(&mut self, iter: Int) -> Int {
       return self.tys.error
     }
     Str => {
-      self.err("E0306", span, "a `Str` is not directly iterable")
+      self.push(
+        diag("E0306", span, "a `Str` is not directly iterable").note(
+          "iterate over `s.chars()` or `s.bytes()`",
+        ),
+      )
       return self.tys.error
     }
     _ => {
@@ -397,19 +415,21 @@ fn Sema.check_pat_irrefutable(&mut self, p: Int, t: Int, kind: LocalKind) {
         let id = self.declare_local(name.text, t, kind, pat.span)
         self.tab.pat_local.insert(p, id)
       } else {
-        self.err(
-          "E0323",
-          pat.span,
-          "this pattern can fail to match; `let` and `for` need irrefutable patterns",
-        )
+        self.refutable(pat.span)
       }
     }
-    _ => self.err(
-      "E0323",
-      pat.span,
-      "this pattern can fail to match; `let` and `for` need irrefutable patterns",
-    )
+    _ => self.refutable(pat.span)
   }
+}
+
+fn Sema.refutable(&mut self, span: syntax.Span) {
+  self.push(
+    diag(
+      "E0323",
+      span,
+      "this pattern can fail to match; `let` and `for` need irrefutable patterns",
+    ).note("use `match` to handle each case"),
+  )
 }
 
 /// Check a `match` pattern against the scrutinee type, declaring its bindings. With
@@ -512,20 +532,32 @@ fn Sema.check_pat(&mut self, p: Int, t: Int, rebind: Bool, binds: &mut List<(Str
         }
       }
       if vi < 0 {
-        self.err(
+        var names: List<Str> = []
+        for v in variants {
+          names.push(v.name)
+        }
+        var d = diag(
           "E0208",
           name.span,
           "`" + self.defs.adts[adt].name + "` has no variant `" + name.text + "`",
         )
+        match closest(name.text, names) {
+          Some(b) => d = d.fix("did you mean `" + b + "`?", name.span, b)
+          None => {}
+        }
+        self.push(d)
         return
       }
       self.tab.pat_variant.insert(p, (adt, vi))
       let ftys = self.variant_field_tys(adt, vi)
       if !has_parens && !ftys.is_empty() {
-        self.err(
-          "E0323",
-          pat.span,
-          "variant `" + name.text + "` has " + ftys.len().str() + " field" + plural(ftys.len()),
+        let wild = ["_"].repeat(ftys.len()).join(", ")
+        self.push(
+          diag(
+            "E0323",
+            pat.span,
+            "variant `" + name.text + "` has " + ftys.len().str() + " field" + plural(ftys.len()),
+          ).fix("match its fields", pat.span, name.text + "(" + wild + ")"),
         )
         return
       }
@@ -629,11 +661,19 @@ fn Sema.check_match(
   }
   let report = self.exhaust(st_z, pats)
   match report.missing {
-    Some(m) => self.err("E0451", span, "non-exhaustive match: `" + m + "` is not handled")
+    Some(m) => self.push(
+      diag("E0451", span, "non-exhaustive match: `" + m + "` is not handled").note(
+        "add an arm for it, or a final `_ => ...` arm",
+      ),
+    )
     None => {}
   }
   for i in report.unreachable {
-    self.err("E0452", arms[i].span, "this match arm can never match")
+    self.push(
+      diag("E0452", arms[i].span, "this match arm can never match").note(
+        "earlier arms already cover every value it matches",
+      ),
+    )
   }
   if !as_value || all_diverge {
     return if all_diverge { self.tys.never } else { self.tys.unit_ty }

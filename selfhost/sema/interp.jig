@@ -342,16 +342,6 @@ fn Interp.location(self, lo: Int) -> Str {
   }
 }
 
-/// A path relative to the working directory when it is inside it.
-fn display_path(path: Str, cwd: Str) -> Str {
-  let prefix = join_path(cwd, "")
-  return if !cwd.is_empty() && path.starts_with(prefix) {
-    path[prefix.len()..path.len()]
-  } else {
-    path
-  }
-}
-
 fn Interp.panic(self, msg: Str, span: syntax.Span) -> Trap {
   var bt: List<Str> = []
   var i = self.stack.len()

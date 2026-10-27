@@ -1,0 +1,296 @@
+// Checking a whole project, ported from the bootstrap compiler's `tools/project.rs`: every
+// program package (one with `main`) is analyzed as a root, then every library package no
+// program imports. Dead-code findings in a shared package are kept only if every analysis
+// that loaded the package agrees. `jigc check` prints the result as `jig check` does.
+
+import "std/fs"
+
+/// One finding of `jig check`: where it is and both renderings.
+struct ProjectDiag {
+  file: Str
+  line: Int
+  col: Int
+  code: Str
+  msg: Str
+  json: Str
+  text: Str
+}
+
+/// One analysis: its root package's directory, the package directories it loaded, and its
+/// findings, each with the directory of the package it is in.
+struct Analysis {
+  root: Str
+  loaded: Set<Str>
+  diags: List<(ProjectDiag, Str)>
+}
+
+fn is_dir(path: Str) -> Bool effects {fs} {
+  return fs.list(path).is_ok()
+}
+
+/// Directories under `root` that hold `.jig` files (hidden directories, `target` and
+/// `node_modules` skipped), in path order.
+fn package_dirs(root: Str) -> List<Str> effects {fs} {
+  var out: List<Str> = []
+  walk_dirs(root, &mut out)
+  out.sort_by(path_less)
+  return out
+}
+
+fn walk_dirs(dir: Str, out: &mut List<Str>) effects {fs} {
+  let names = match fs.list(dir) {
+    Ok(ns) => ns
+    Err(_) => {
+      return
+    }
+  }
+  var has_jig = false
+  var subdirs: List<Str> = []
+  for name in names {
+    let p = join_path(dir, name)
+    if is_dir(p) {
+      if !name.starts_with(".") && name != "target" && name != "node_modules" {
+        subdirs.push(p)
+      }
+    } else if name.ends_with(".jig") && name != ".jig" {
+      has_jig = true
+    }
+  }
+  if has_jig {
+    out.push(dir)
+  }
+  subdirs.sort_by(path_less)
+  for s in subdirs {
+    walk_dirs(s, &mut out)
+  }
+}
+
+/// Paths ordered component by component, as the bootstrap compiler's `PathBuf`s are.
+fn path_less(a: Str, b: Str) -> Bool {
+  let xs = a.split("/")
+  let ys = b.split("/")
+  for i in 0..min(xs.len(), ys.len()) {
+    if xs[i] != ys[i] {
+      return xs[i] < ys[i]
+    }
+  }
+  return xs.len() < ys.len()
+}
+
+/// Does a `.jig` file in `dir` declare `main`?
+fn has_main(dir: Str) -> Bool effects {fs} {
+  let names = match fs.list(dir) {
+    Ok(ns) => ns
+    Err(_) => {
+      return false
+    }
+  }
+  for name in names {
+    if !name.ends_with(".jig") || name == ".jig" {
+      continue
+    }
+    match fs.read(join_path(dir, name)) {
+      Ok(text) => {
+        for line in text.split("\n") {
+          if trim_start_space(line).starts_with("fn main(") {
+            return true
+          }
+        }
+      }
+      Err(_) => {}
+    }
+  }
+  return false
+}
+
+fn trim_start_space(s: Str) -> Str {
+  let cs = s.chars()
+  var i = 0
+  for i < cs.len() && is_space_char(cs[i]) {
+    i += 1
+  }
+  return Str.from_chars(cs[i..cs.len()])
+}
+
+/// An analysis's findings, each with the directory of the package it is in ("" if none).
+fn Sema.project_diags(self, cwd: Str) -> List<(ProjectDiag, Str)> {
+  var out: List<(ProjectDiag, Str)> = []
+  for d in self.diags {
+    var file = ""
+    var line = 0
+    var col = 0
+    var dir = ""
+    match self.line_col(d.lo) {
+      Some(lc) => {
+        file = display_path(lc.file.path, cwd)
+        line = lc.line
+        col = lc.col
+        dir = parent_dir(lc.file.path).unwrap_or("")
+      }
+      None => {}
+    }
+    out.push(
+      (
+        ProjectDiag {
+          file: file
+          line: line
+          col: col
+          code: d.code
+          msg: d.msg
+          json: self.diag_json(d, cwd)
+          text: self.render_diag(d, cwd)
+        },
+        dir,
+      ),
+    )
+  }
+  return out
+}
+
+/// The directories of the program's packages, the standard library's aside.
+fn Sema.loaded_dirs(self) -> Set<Str> {
+  var out: Set<Str> = Set.new()
+  for p in self.pkgs {
+    if p.is_std {
+      continue
+    }
+    for f in p.files {
+      match parent_dir(f.path) {
+        Some(d) => out.insert(d)
+        None => {}
+      }
+    }
+  }
+  return out
+}
+
+fn analysis_of(dir: Str, std_dir: Str, cwd: Str) -> Analysis effects {fs, env} {
+  let (s, _) = analyze(dir, std_dir)
+  return Analysis { root: dir, loaded: s.loaded_dirs(), diags: s.project_diags(cwd) }
+}
+
+/// `start` as an absolute path without `.` or `..` segments.
+fn absolute_path(start: Str, cwd: Str) -> Str {
+  let full = if start.starts_with("/") { start } else { join_path(cwd, start) }
+  var parts: List<Str> = []
+  for seg in full.split("/") {
+    if seg.is_empty() || seg == "." {
+      continue
+    }
+    if seg == ".." {
+      let _ = parts.pop()
+      continue
+    }
+    parts.push(seg)
+  }
+  return "/" + parts.join("/")
+}
+
+/// Check the project containing `start` (or just the package at `start` if there is no
+/// `jig.mod`), as `jig check` does.
+fn check_project(start: Str, std_dir: Str, cwd: Str) -> List<ProjectDiag> effects {fs, env} {
+  let abs = absolute_path(start, cwd)
+  let start_dir = if !is_dir(abs) && fs.exists(abs) { parent_dir(abs).unwrap_or(abs) } else { abs }
+  let root = match find_project_root(start_dir) {
+    Some(r) => r
+    None => {
+      var out: List<ProjectDiag> = []
+      for (d, _) in analysis_of(start_dir, std_dir, cwd).diags {
+        out.push(d)
+      }
+      return out
+    }
+  }
+  let dirs = package_dirs(root)
+  var analyses: List<Analysis> = []
+  var covered: Set<Str> = Set.new()
+  for d in dirs {
+    if has_main(d) {
+      let a = analysis_of(d, std_dir, cwd)
+      for x in a.loaded.items() {
+        covered.insert(x)
+      }
+      analyses.push(a)
+    }
+  }
+  for d in dirs {
+    if covered.contains(d) {
+      continue
+    }
+    let a = analysis_of(d, std_dir, cwd)
+    for x in a.loaded.items() {
+      covered.insert(x)
+    }
+    analyses.push(a)
+  }
+  // Merge.
+  var seen: Set<(Str, Int, Int, Str, Str)> = Set.new()
+  var keep: List<ProjectDiag> = []
+  for a in analyses {
+    for (d, pkg_dir) in a.diags {
+      let key = (d.file, d.line, d.col, d.code, d.msg)
+      if seen.contains(key) {
+        continue
+      }
+      if d.code.starts_with("E06") && pkg_dir != a.root {
+        // Only if every analysis that loaded this package reports it.
+        var agree = true
+        for b in analyses {
+          if !b.loaded.contains(pkg_dir) {
+            continue
+          }
+          var found = false
+          for (o, _) in b.diags {
+            if o.file == d.file && o.line == d.line && o.code == d.code {
+              found = true
+            }
+          }
+          if !found {
+            agree = false
+          }
+        }
+        if !agree {
+          continue
+        }
+      }
+      seen.insert(key)
+      keep.push(d)
+    }
+  }
+  // Stable: findings at one place keep their order.
+  var keyed: List<(ProjectDiag, Int)> = []
+  for i in 0..keep.len() {
+    keyed.push((keep[i], i))
+  }
+  keyed.sort_by(fn(x, y) {
+    x.0.file < y.0.file ||
+      (x.0.file == y.0.file &&
+        (x.0.line < y.0.line ||
+          (x.0.line == y.0.line && (x.0.col < y.0.col || (x.0.col == y.0.col && x.1 < y.1)))))
+  })
+  var out: List<ProjectDiag> = []
+  for (d, _) in keyed {
+    out.push(d)
+  }
+  return out
+}
+
+/// `jigc check [PATH] [--json]`: what `jig check` prints, and its exit code.
+pub fn check_cmd(start: Str, std_dir: Str, cwd: Str, json: Bool) -> (Str, Str, Int)
+  effects {fs, env}
+{
+  let diags = check_project(start, std_dir, cwd)
+  var out = ""
+  for d in diags {
+    out += if json { d.json + "\n" } else { d.text + "\n" }
+  }
+  let n = diags.len()
+  let summary = if json {
+    ""
+  } else if n == 0 {
+    "ok: no errors"
+  } else {
+    n.str() + " error" + (if n == 1 { "" } else { "s" })
+  }
+  return (out, summary, if n == 0 { 0 } else { 1 })
+}

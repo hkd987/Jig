@@ -106,8 +106,9 @@ Release notes are in [`CHANGELOG.md`](../../CHANGELOG.md).
 
 ## Open
 
-- `jigc`: a full command line (human diagnostics, `run` with real effects, `get`, `trace`,
-  `mcp`); its checker, back end, formatter, test runner, prover and builds are done. Until `jigc` passes every test suite the Rust
+- `jigc`: a full command line (`run` with real effects, `get`, `trace`, `mcp`, the standard
+  library built in); its checker (with `jig check`'s diagnostics, text and JSON), back end,
+  formatter, test runner, prover and builds are done. Until `jigc` passes every test suite the Rust
   compiler stays the `jig` command (D6).
 - Self-hosted speed: identifiers interned instead of sliced, and wall time (memory).
 - Contracts on the compiler's passes.

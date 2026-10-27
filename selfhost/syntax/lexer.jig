@@ -11,12 +11,74 @@ struct Comment {
   trailing: Bool
 }
 
-/// An error: its diagnostic code, span and message.
+/// An error: its diagnostic code, span and message, and what `jig check` shows with it: text
+/// under the span (`primary`, empty for none), other spans, notes and suggested fixes.
 pub struct Diag {
   pub code: Str
   pub lo: Int
   pub hi: Int
   pub msg: Str
+  pub primary: Str
+  pub labels: List<Label>
+  pub notes: List<Str>
+  pub fixes: List<Fix>
+}
+
+/// Another span of a diagnostic, with its text.
+pub struct Label {
+  pub lo: Int
+  pub hi: Int
+  pub msg: Str
+}
+
+/// A suggested fix: replace each edit's span by its text.
+pub struct Fix {
+  pub msg: Str
+  pub edits: List<Edit>
+}
+
+pub struct Edit {
+  pub lo: Int
+  pub hi: Int
+  pub text: Str
+}
+
+/// A diagnostic with nothing attached.
+pub fn new_diag(code: Str, lo: Int, hi: Int, msg: Str) -> Diag {
+  return Diag {
+    code: code
+    lo: lo
+    hi: hi
+    msg: msg
+    primary: ""
+    labels: []
+    notes: []
+    fixes: []
+  }
+}
+
+pub fn Diag.note(self, text: Str) -> Diag {
+  var d = self
+  d.notes.push(text)
+  return d
+}
+
+pub fn Diag.label(self, span: Span, msg: Str) -> Diag {
+  var d = self
+  d.labels.push(Label { lo: span.lo, hi: span.hi, msg: msg })
+  return d
+}
+
+pub fn Diag.fix(self, msg: Str, span: Span, text: Str) -> Diag {
+  var d = self
+  d.fixes.push(Fix { msg: msg, edits: [Edit { lo: span.lo, hi: span.hi, text: text }] })
+  return d
+}
+
+pub fn Diag.with_primary(self, msg: Str) -> Diag {
+  var d = self
+  d.primary = msg
+  return d
 }
 
 struct Lexed {
@@ -183,7 +245,7 @@ fn Lexer.push_semi(&mut self, at: Int)
 fn Lexer.err(&mut self, code: Str, lo: Int, hi: Int, msg: Str)
   requires lo >= 0 && lo <= hi && hi <= self.n
 {
-  self.errors.push(Diag { code: code, lo: self.base + lo, hi: self.base + hi, msg: msg })
+  self.errors.push(new_diag(code, self.base + lo, self.base + hi, msg))
 }
 
 fn Lexer.newlines_significant(self) -> Bool
@@ -592,7 +654,14 @@ fn Lexer.punct(&mut self)
       } else if kind == Kind.RParen || kind == Kind.RBracket || kind == Kind.RBrace {
         let _ = self.stack.pop()
       } else if kind == Kind.Semi {
-        self.err("E0107", start, self.i, "semicolons are not used in Jig")
+        let span = Span { lo: self.base + start, hi: self.base + self.i }
+        self.errors.push(
+          new_diag("E0107", span.lo, span.hi, "semicolons are not used in Jig").fix(
+            "remove the `;` and put the next statement on its own line",
+            span,
+            "",
+          ),
+        )
       }
       self.push(kind, start, self.i)
     }

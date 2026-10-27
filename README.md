@@ -95,8 +95,9 @@ It binds `.feature` scenarios, loads required modules, formats, and runs tests a
 on its own interpreter (`jigc test`, the lines of `jig test --json`), and proves contracts with
 Z3 (`jigc prove`, the same results as `jig prove`, sharing its proof cache), and builds
 executables with the checks those proofs discharge removed (`jigc build`, the same C as
-`jig build`). It has no full command line of its own yet (human diagnostics, `run` with real
-effects, `get`, `trace`, `mcp`); until it does,
+`jig build`). `jigc check [PATH] [--json]` prints what `jig check` prints, every note and
+suggested fix included (with the standard library at `$JIG_STD`). It has no full command line
+of its own yet (`run` with real effects, `get`, `trace`, `mcp`); until it does,
 the Rust compiler (`compiler/`) is the one `jig` command and is kept passing the same tests.
 
 ## License

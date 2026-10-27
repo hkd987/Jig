@@ -370,6 +370,45 @@ fn compare_check(exe: &Path, std_dir: &Path, dir: &Path) -> Option<String> {
     ))
 }
 
+/// `jigc check` printed against `jig check`, as a person (text) and an agent (JSON) read
+/// it: every diagnostic with its notes, fixes and labels, the summary and the exit code. Both
+/// run in `cwd`, which file names are relative to.
+fn compare_check_cli(exe: &Path, std_dir: &Path, cwd: &Path, entry: &Path) -> Option<String> {
+    for json in [false, true] {
+        let run = |bin: &Path| {
+            let mut cmd = Command::new(bin);
+            cmd.arg("check").arg(entry).current_dir(cwd).env("PWD", cwd).env("JIG_STD", std_dir);
+            if json {
+                cmd.arg("--json");
+            }
+            let out = cmd.output().unwrap();
+            (
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout).to_string(),
+                String::from_utf8_lossy(&out.stderr).to_string(),
+            )
+        };
+        let expected = run(Path::new(env!("CARGO_BIN_EXE_jig")));
+        let actual = run(exe);
+        if expected != actual {
+            let (e, a) = (&expected.1, &actual.1);
+            let at =
+                e.lines().zip(a.lines()).position(|(x, y)| x != y).unwrap_or(e.lines().count().min(a.lines().count()));
+            return Some(format!(
+                "{} (json: {json}): exit {:?} vs {:?}; first difference at line {at}:\n  jig:  {}\n  jigc: {}\n  stderr {:?} vs {:?}",
+                entry.display(),
+                expected.0,
+                actual.0,
+                e.lines().nth(at).unwrap_or("<end>"),
+                a.lines().nth(at).unwrap_or("<end>"),
+                expected.2,
+                actual.2
+            ));
+        }
+    }
+    None
+}
+
 #[test]
 fn jigc_checker_matches_bootstrap() {
     if !have_cc() {
@@ -415,8 +454,9 @@ fn jigc_checker_matches_bootstrap() {
     }
     let originals = cases.len();
     let mut failures: Vec<String> = Vec::new();
-    for (_, entry) in &cases {
+    for (proj, entry) in &cases {
         failures.extend(compare_check(exe, &std_dir, entry));
+        failures.extend(compare_check_cli(exe, &std_dir, proj, entry));
     }
     let mut rng = Rng(0x2545_f491_4f6c_dd1d);
     for k in 0..300 {
@@ -433,6 +473,9 @@ fn jigc_checker_matches_bootstrap() {
         }
         std::fs::write(f, src).unwrap();
         failures.extend(compare_check(exe, &std_dir, &entry).map(|m| format!("mutation {k} of {}: {m}", f.display())));
+        failures.extend(
+            compare_check_cli(exe, &std_dir, &copy, &entry).map(|m| format!("mutation {k} of {}: {m}", f.display())),
+        );
     }
     assert!(failures.is_empty(), "{} cases differ:\n{}", failures.len(), failures.join("\n"));
 }

@@ -192,7 +192,11 @@ fn parse_feature(src: Str, base: Int) -> (Bool, List<ScenarioAst>, List<syntax.D
         Some(i) => trimmed[0..i]
         None => trimmed
       }
-      diags.push(diag("E0801", span, "`" + what + "` is not supported"))
+      diags.push(
+        diag("E0801", span, "`" + what + "` is not supported").note(
+          "put shared setup in the world's `new()` or in an explicit first step",
+        ),
+      )
       continue
     }
     let outline = trimmed.starts_with("Scenario Outline:")
@@ -251,9 +255,9 @@ fn parse_feature(src: Str, base: Int) -> (Bool, List<ScenarioAst>, List<syntax.D
           }
           cur = Some(t)
         } else {
-          diags.push(diag("E0801", span, "data tables on steps are not supported"))
+          diags.push(data_table_diag(span))
         }
-        None => diags.push(diag("E0801", span, "data tables on steps are not supported"))
+        None => diags.push(data_table_diag(span))
       }
       continue
     }
@@ -299,7 +303,11 @@ fn parse_feature(src: Str, base: Int) -> (Bool, List<ScenarioAst>, List<syntax.D
     if feature && cur.is_none() {
       continue
     }
-    diags.push(diag("E0801", span, "expected a step, found `" + trimmed + "`"))
+    diags.push(
+      diag("E0801", span, "expected a step, found `" + trimmed + "`").note(
+        "steps start with `Given`, `When`, `Then`, `And` or `But`",
+      ),
+    )
   }
   finish_scenario(cur, &mut scenarios, &mut diags)
   if !feature {
@@ -737,7 +745,7 @@ fn Sema.step_defs(&mut self, p: Int) -> List<StepDef> {
       }
     }
     let holes = holes_of(pieces)
-    var mismatch = false
+    var problems: List<Str> = []
     for h in holes {
       var named = false
       for (n, _) in params {
@@ -746,7 +754,7 @@ fn Sema.step_defs(&mut self, p: Int) -> List<StepDef> {
         }
       }
       if !named {
-        mismatch = true
+        problems.push("placeholder `{" + h + "}` names no parameter")
       }
     }
     for (n, _) in params {
@@ -757,11 +765,15 @@ fn Sema.step_defs(&mut self, p: Int) -> List<StepDef> {
         }
       }
       if count != 1 {
-        mismatch = true
+        problems.push("parameter `" + n + "` must appear exactly once, as `{" + n + "}`")
       }
     }
-    if mismatch {
-      self.diags.push(diag("E0805", st.span, "the step's placeholders and parameters do not match"))
+    if !problems.is_empty() {
+      var d = diag("E0805", st.span, "the step's placeholders and parameters do not match")
+      for pr in problems {
+        d = d.note(pr)
+      }
+      self.diags.push(d)
       ok = false
     }
     if ok {
@@ -791,14 +803,45 @@ fn Sema.bind_scenario(
       }
     }
     if matched.is_empty() {
-      self.diags.push(diag("E0802", line.text_span, "no step matches `" + line.text + "`"))
+      let (pat, ps) = suggest_pattern(line.text)
+      var sig = ["w: &mut World"]
+      for (n, t) in ps {
+        sig.push(n + ": " + t)
+      }
+      var words: List<Str> = []
+      for w in ascii_words(line.text) {
+        if words.len() < 4 && !is_float_text(w) {
+          words.push(w.to_lower())
+        }
+      }
+      let note = "add one:\nstep \"" +
+        pat +
+        "\"\nfn " +
+        line.keyword.to_lower() +
+        "_" +
+        words.join("_") +
+        "(" +
+        sig.join(", ") +
+        ") { ... }"
+      self.diags.push(
+        diag("E0802", line.text_span, "no step matches `" + line.text + "`").note(note),
+      )
       ok = false
       continue
     }
     if matched.len() > 1 {
-      self.diags.push(
-        diag("E0803", line.text_span, matched.len().str() + " steps match `" + line.text + "`"),
+      var d = diag(
+        "E0803",
+        line.text_span,
+        matched.len().str() + " steps match `" + line.text + "`",
       )
+      for (sd, _) in matched {
+        match self.defs.fns[sd.f].step_attr {
+          Some(st) => d = d.label(st.span, "matches")
+          None => {}
+        }
+      }
+      self.diags.push(d)
       ok = false
       continue
     }
@@ -936,4 +979,101 @@ fn unquote(s: Str) -> Str {
     }
   }
   return Str.from_chars(out)
+}
+
+fn data_table_diag(span: syntax.Span) -> syntax.Diag {
+  return diag("E0801", span, "data tables on steps are not supported").note(
+    "pass values in the step text, or use a `Scenario Outline` with `Examples`",
+  )
+}
+
+/// A suggested pattern for unmatched step text: quoted strings and numbers become
+/// placeholders, named and typed.
+fn suggest_pattern(text: Str) -> (Str, List<(Str, Str)>) {
+  var pat = ""
+  var params: List<(Str, Str)> = []
+  let cs = text.chars()
+  var i = 0
+  for i < cs.len() {
+    if cs[i] == '"' {
+      var j = i + 1
+      for j < cs.len() && cs[j] != '"' {
+        j += 1
+      }
+      if j < cs.len() {
+        let name = "s" + (params.len() + 1).str()
+        pat += "{" + name + "}"
+        params.push((name, "Str"))
+        i = j + 1
+        continue
+      }
+    }
+    var end = i
+    for end < cs.len() && !is_space_char(cs[end]) {
+      end += 1
+    }
+    let word = Str.from_chars(cs[i..end])
+    if !word.is_empty() && (is_int_text(word) || is_float_text(word)) {
+      let name = "n" + (params.len() + 1).str()
+      pat += "{" + name + "}"
+      params.push((name, if is_int_text(word) { "Int" } else { "Float" }))
+      i = end
+      continue
+    }
+    pat += cs[i].str()
+    i += 1
+  }
+  return (pat, params)
+}
+
+/// Unicode whitespace, as the bootstrap compiler splits words.
+fn is_space_char(c: Char) -> Bool {
+  let v = c as Int
+  return c == ' ' ||
+    (v >= 9 && v <= 13) ||
+    v == 133 ||
+    v == 160 ||
+    v == 5760 ||
+    (v >= 8192 && v <= 8202) ||
+    v == 8232 ||
+    v == 8233 ||
+    v == 8239 ||
+    v == 8287 ||
+    v == 12288
+}
+
+/// The maximal runs of ASCII letters and digits.
+fn ascii_words(s: Str) -> List<Str> {
+  var out: List<Str> = []
+  var cur = ""
+  for c in s.chars() {
+    if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+      cur += c.str()
+    } else if !cur.is_empty() {
+      out.push(cur)
+      cur = ""
+    }
+  }
+  if !cur.is_empty() {
+    out.push(cur)
+  }
+  return out
+}
+
+/// Text Rust's `i64` parser accepts: a sign, then digits, in range.
+fn is_int_text(s: Str) -> Bool {
+  var t = s
+  if t.starts_with("+") || t.starts_with("-") {
+    t = t[1..t.len()]
+  }
+  if t.is_empty() {
+    return false
+  }
+  for b in t.bytes() {
+    if b < 48 || b > 57 {
+      return false
+    }
+  }
+  let signed = if s.starts_with("-") { "-" + t } else { t }
+  return signed.to_int().is_some()
 }

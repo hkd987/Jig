@@ -24,6 +24,14 @@ fn std_packages() -> List<(Str, Str)> {
   ]
 }
 
+fn std_package_paths() -> List<Str> {
+  var out: List<Str> = []
+  for (p, _) in std_packages() {
+    out.push(p)
+  }
+  return out
+}
+
 fn join_path(a: Str, b: Str) -> Str {
   if a.ends_with("/") {
     return a + b
@@ -344,7 +352,7 @@ struct Loaded {
 }
 
 fn diag(code: Str, span: syntax.Span, msg: Str) -> syntax.Diag {
-  return syntax.Diag { code: code, lo: span.lo, hi: span.hi, msg: msg }
+  return syntax.new_diag(code, span.lo, span.hi, msg)
 }
 
 fn dummy_span() -> syntax.Span {
@@ -544,12 +552,14 @@ fn Loader.resolve_imports(&mut self, p: Int) effects {fs} {
                 self.diags.push(diag("E0204", path_span, "a package cannot import itself"))
               } else {
                 self.edges[p].push((target, path_span))
-                if m.contains(item.name.text) {
-                  self.diags.push(
-                    diag("E0209", item.span, "`" + item.name.text + "` is imported twice"),
+                match m.get(item.name.text) {
+                  Some((_, prev)) => self.diags.push(
+                    diag("E0209", item.span, "`" + item.name.text + "` is imported twice").label(
+                      ast.items[prev].span,
+                      "first imported here",
+                    ),
                   )
-                } else {
-                  m.insert(item.name.text, (target, item_id))
+                  None => m.insert(item.name.text, (target, item_id))
                 }
               }
             }
@@ -598,7 +608,11 @@ fn Loader.report_cycles(&mut self, roots: List<Int>) {
           }
         }
         chain.push(self.pkgs[target].path)
-        self.diags.push(diag("E0204", span, "import cycle: " + chain.join(" -> ")))
+        self.diags.push(
+          diag("E0204", span, "import cycle: " + chain.join(" -> ")).note(
+            "move the shared code into a package that both can import",
+          ),
+        )
         continue
       }
       stack.push(target)
@@ -625,7 +639,11 @@ fn Loader.import_pkg(&mut self, path: Str, span: syntax.Span, from: Option<Int>)
     }
   }
   if path.starts_with("std/") || path == "std" {
-    self.diags.push(diag("E0203", span, "no standard library package `" + path + "`"))
+    self.diags.push(
+      diag("E0203", span, "no standard library package `" + path + "`").note(
+        "standard packages: " + std_package_paths().join(", "),
+      ),
+    )
     return None
   }
   for seg in path.split("/") {
@@ -643,7 +661,9 @@ fn Loader.import_pkg(&mut self, path: Str, span: syntax.Span, from: Option<Int>)
       let m = self.modules[mi]
       if m.missing {
         self.diags.push(
-          diag("E0211", span, "module `" + m.path + "` " + m.version + " is not downloaded"),
+          diag("E0211", span, "module `" + m.path + "` " + m.version + " is not downloaded").note(
+            "run `jig get` to download the modules `jig.mod` requires",
+          ),
         )
         return None
       }
@@ -662,7 +682,11 @@ fn Loader.import_pkg(&mut self, path: Str, span: syntax.Span, from: Option<Int>)
           Some(r) => r
           None => {
             let msg = "cannot import `" + path + "`: no project root (a directory with `jig.mod`)"
-            self.diags.push(diag("E0210", span, msg))
+            self.diags.push(
+              diag("E0210", span, msg).note(
+                "create `jig.mod` containing `module <name>` in the project's top directory",
+              ),
+            )
             return None
           }
         }

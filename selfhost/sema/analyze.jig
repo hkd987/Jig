@@ -66,8 +66,13 @@ fn Sema.sort_diags(&mut self) {
   })
   var out: List<syntax.Diag> = []
   for (d, _) in keyed {
+    // Duplicates: the same place, code and message (what is attached may differ).
     let n = out.len()
-    if n > 0 && out[n - 1] == d {
+    if n > 0 &&
+      out[n - 1].lo == d.lo &&
+      out[n - 1].hi == d.hi &&
+      out[n - 1].code == d.code &&
+      out[n - 1].msg == d.msg {
       continue
     }
     out.push(d)

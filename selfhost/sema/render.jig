@@ -1,0 +1,237 @@
+// Diagnostics as `jig check` shows them, ported from the bootstrap compiler's `diag/mod.rs`:
+// the text a person reads (the message, each span's line with markers under it, notes and
+// suggested fixes) and the JSON line an agent reads. Files are named relative to the current
+// directory (`$PWD`) when under it.
+
+import "syntax"
+
+/// A global offset's file, 1-based line and 1-based column (in characters).
+struct LineCol {
+  file: SrcFile
+  line: Int
+  col: Int
+}
+
+fn Sema.line_col(self, pos: Int) -> Option<LineCol> {
+  let f = self.src_file_at(pos)?
+  let bs = f.text.bytes()
+  let off = pos - f.base
+  var line = 1
+  var start = 0
+  for i in 0..off {
+    if bs[i] == 10 {
+      line += 1
+      start = i + 1
+    }
+  }
+  var col = 1
+  for i in start..off {
+    // Count characters: every byte but UTF-8 continuation bytes.
+    if bs[i] < 128 || bs[i] >= 192 {
+      col += 1
+    }
+  }
+  return Some(LineCol { file: f, line: line, col: col })
+}
+
+/// The text of a file's 1-based line, without its line break.
+fn line_text(f: SrcFile, line: Int) -> Str {
+  let bs = f.text.bytes()
+  var n = 1
+  var start = 0
+  var i = 0
+  for i < bs.len() && n < line {
+    if bs[i] == 10 {
+      n += 1
+      start = i + 1
+    }
+    i += 1
+  }
+  var end = start
+  for end < bs.len() && bs[end] != 10 {
+    end += 1
+  }
+  for end > start && bs[end - 1] == 13 {
+    end -= 1
+  }
+  return f.text[start..end]
+}
+
+fn char_count(s: Str) -> Int {
+  var n = 0
+  for b in s.bytes() {
+    if b < 128 || b >= 192 {
+      n += 1
+    }
+  }
+  return n
+}
+
+/// A path as diagnostics show it: relative to the current directory when under it.
+fn display_path(path: Str, cwd: Str) -> Str {
+  if cwd.is_empty() {
+    return path
+  }
+  if path == cwd {
+    return ""
+  }
+  let prefix = if cwd.ends_with("/") { cwd } else { cwd + "/" }
+  if path.starts_with(prefix) {
+    return path[prefix.len()..path.len()]
+  }
+  return path
+}
+
+fn spaces(n: Int) -> Str {
+  return " ".repeat(max(n, 0))
+}
+
+fn is_dummy(lo: Int, hi: Int) -> Bool {
+  return lo == 0 && hi == 0
+}
+
+/// A span to show: where, its text, and whether it is the primary one.
+struct Shown {
+  lo: Int
+  hi: Int
+  label: Str
+  primary: Bool
+}
+
+/// The diagnostic as `jig check` prints it (no colors).
+fn Sema.render_diag(self, d: syntax.Diag, cwd: Str) -> Str {
+  var out = "error[" + d.code + "]: " + d.msg + "\n"
+  var shown: List<Shown> = []
+  if !is_dummy(d.lo, d.hi) {
+    shown.push(Shown { lo: d.lo, hi: d.hi, label: d.primary, primary: true })
+  }
+  for l in d.labels {
+    shown.push(Shown { lo: l.lo, hi: l.hi, label: l.msg, primary: false })
+  }
+  var gutter = 2
+  for s in shown {
+    match self.line_col(s.lo) {
+      Some(lc) => gutter = max(gutter, lc.line.str().len() + 1)
+      None => {}
+    }
+  }
+  let primary_file = match self.line_col(d.lo) {
+    Some(lc) => lc.file.path
+    None => ""
+  }
+  var first = true
+  for s in shown {
+    let lc = match self.line_col(s.lo) {
+      Some(x) => x
+      None => {
+        continue
+      }
+    }
+    let at = display_path(lc.file.path, cwd) + ":" + lc.line.str() + ":" + lc.col.str()
+    if first {
+      out += spaces(gutter - 1) + "--> " + at + "\n"
+      out += spaces(gutter) + "|\n"
+      first = false
+    } else if lc.file.path != primary_file {
+      out += spaces(gutter - 1) + ":: " + at + "\n"
+    }
+    let text = line_text(lc.file, lc.line)
+    let num = lc.line.str()
+    out += spaces(gutter - 1 - num.len()) + num + " | " + text + "\n"
+    let end = match self.line_col(s.hi) {
+      Some(e) => e
+      None => lc
+    }
+    let width = if end.line == lc.line {
+      max(end.col - lc.col, 1)
+    } else {
+      max(char_count(text) + 1 - lc.col, 1)
+    }
+    let marker = if s.primary { "^" } else { "-" }
+    let label = if s.label.is_empty() { "" } else { " " + s.label }
+    out += spaces(gutter) + "| " + spaces(lc.col - 1) + marker.repeat(width) + label + "\n"
+  }
+  for n in d.notes {
+    out += spaces(gutter) + "= note: " + n + "\n"
+  }
+  for f in d.fixes {
+    var detail = ""
+    if f.edits.len() == 1 && !f.edits[0].text.is_empty() && !f.edits[0].text.contains("\n") {
+      detail = ": `" + f.edits[0].text + "`"
+    }
+    out += spaces(gutter) + "= fix: " + f.msg + detail + "\n"
+  }
+  return out
+}
+
+/// `"file":...,"span":{...}` for a span, with a leading comma; nothing for none.
+fn Sema.span_json(self, lo: Int, hi: Int, cwd: Str) -> Str {
+  if is_dummy(lo, hi) {
+    return ""
+  }
+  let a = match self.line_col(lo) {
+    Some(x) => x
+    None => {
+      return ""
+    }
+  }
+  let b = match self.line_col(hi) {
+    Some(x) => x
+    None => {
+      return ""
+    }
+  }
+  return ",\"file\":" +
+    json_str(display_path(a.file.path, cwd)) +
+    ",\"span\":{\"line\":" +
+    a.line.str() +
+    ",\"col\":" +
+    a.col.str() +
+    ",\"end_line\":" +
+    b.line.str() +
+    ",\"end_col\":" +
+    b.col.str() +
+    ",\"byte_start\":" +
+    (lo - a.file.base).str() +
+    ",\"byte_end\":" +
+    (hi - a.file.base).str() +
+    "}"
+}
+
+/// The diagnostic as `jig check --json` prints it.
+fn Sema.diag_json(self, d: syntax.Diag, cwd: Str) -> Str {
+  var out = "{\"code\":" +
+    json_str(d.code) +
+    ",\"severity\":\"error\",\"message\":" +
+    json_str(d.msg) +
+    self.span_json(d.lo, d.hi, cwd)
+  if !d.primary.is_empty() {
+    out += ",\"label\":" + json_str(d.primary)
+  }
+  if !d.labels.is_empty() {
+    var ls: List<Str> = []
+    for l in d.labels {
+      ls.push("{\"message\":" + json_str(l.msg) + self.span_json(l.lo, l.hi, cwd) + "}")
+    }
+    out += ",\"labels\":[" + ls.join(",") + "]"
+  }
+  if !d.notes.is_empty() {
+    var ns: List<Str> = []
+    for n in d.notes {
+      ns.push(json_str(n))
+    }
+    out += ",\"notes\":[" + ns.join(",") + "]"
+  }
+  if !d.fixes.is_empty() {
+    var fs: List<Str> = []
+    for f in d.fixes {
+      var es: List<Str> = []
+      for e in f.edits {
+        es.push("{\"replacement\":" + json_str(e.text) + self.span_json(e.lo, e.hi, cwd) + "}")
+      }
+      fs.push("{\"message\":" + json_str(f.msg) + ",\"edits\":[" + es.join(",") + "]}")
+    }
+    out += ",\"fixes\":[" + fs.join(",") + "]"
+  }
+  return out + "}"
+}

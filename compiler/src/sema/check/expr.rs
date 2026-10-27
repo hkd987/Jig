@@ -1119,7 +1119,8 @@ impl Cx<'_> {
     }
 }
 
-/// The closest candidate by edit distance, if reasonably close.
+/// The candidate nearest to `name` by edit distance, if near enough. Ties go to the first in
+/// alphabetical order, so the answer does not depend on the candidates' (hash) order.
 pub fn closest<'a>(name: &str, cands: impl Iterator<Item = &'a str>) -> Option<String> {
     let mut best: Option<(usize, &str)> = None;
     for c in cands {
@@ -1128,7 +1129,7 @@ pub fn closest<'a>(name: &str, cands: impl Iterator<Item = &'a str>) -> Option<S
         }
         let d = edit_distance(name, c);
         let limit = (name.len().max(c.len()) / 3).max(1);
-        if d <= limit && best.is_none_or(|(bd, _)| d < bd) {
+        if d <= limit && best.is_none_or(|(bd, bc)| d < bd || (d == bd && c < bc)) {
             best = Some((d, c));
         }
     }

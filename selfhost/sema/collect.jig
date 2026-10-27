@@ -159,11 +159,19 @@ fn Sema.declare_all(&mut self) {
                 name.span,
                 "`" + name.text + "` is defined by the prelude and cannot be redefined",
               )
-            } else if spans.contains(name.text) {
-              self.err("E0202", name.span, "`" + name.text + "` is defined more than once")
             } else {
-              spans.insert(name.text, name.span)
-              scope.insert(name.text, d)
+              match spans.get(name.text) {
+                Some(prev) => self.push(
+                  diag("E0202", name.span, "`" + name.text + "` is defined more than once").label(
+                    prev,
+                    "first defined here",
+                  ),
+                )
+                None => {
+                  spans.insert(name.text, name.span)
+                  scope.insert(name.text, d)
+                }
+              }
             }
           }
           None => {}
@@ -173,13 +181,18 @@ fn Sema.declare_all(&mut self) {
     // Imports conflict with package-level names.
     for fi in 0..files.len() {
       for (name, imp) in self.pkgs[pid].imports[fi] {
-        if spans.contains(name) {
-          let span = files[fi].ast.items[imp.1].span
-          self.err(
-            "E0209",
-            span,
-            "import `" + name + "` conflicts with a declaration of the same name",
-          )
+        match spans.get(name) {
+          Some(decl) => {
+            let span = files[fi].ast.items[imp.1].span
+            self.push(
+              diag(
+                "E0209",
+                span,
+                "import `" + name + "` conflicts with a declaration of the same name",
+              ).label(decl, "declared here"),
+            )
+          }
+          None => {}
         }
       }
     }
@@ -207,7 +220,11 @@ fn Sema.declare_adt(
 ) -> Def {
   for g in generics {
     if !g.bounds.is_empty() {
-      self.err("E0312", g.name.span, "type parameters of structs and enums cannot have bounds")
+      self.push(
+        diag("E0312", g.name.span, "type parameters of structs and enums cannot have bounds").note(
+          "put the bound on the functions and methods that need it",
+        ),
+      )
     }
   }
   let aid = self.defs.adts.len()
@@ -286,7 +303,11 @@ fn new_fn(
 }
 
 fn Sema.err(&mut self, code: Str, span: syntax.Span, msg: Str) {
-  self.diags.push(syntax.Diag { code: code, lo: span.lo, hi: span.hi, msg: msg })
+  self.diags.push(diag(code, span, msg))
+}
+
+fn Sema.push(&mut self, d: syntax.Diag) {
+  self.diags.push(d)
 }
 
 fn Sema.def_is_pub(self, def: Def) -> Bool {
@@ -569,7 +590,11 @@ fn Sema.type_from_def(
       return self.tys.subst(t, args)
     }
     Iface(_) => {
-      self.err("E0325", name.span, "interface `" + name.text + "` is not a type")
+      self.push(
+        diag("E0325", name.span, "interface `" + name.text + "` is not a type").note(
+          "use it as a bound on a type parameter: `fn f<T: Shape>(x: T)`",
+        ),
+      )
       return self.tys.error
     }
     _ => {
@@ -589,7 +614,11 @@ fn Sema.resolve_effects(&mut self, names: List<syntax.Name>) -> Int {
       }
       set = set | e
     } else {
-      self.err("E0402", n.span, "unknown effect `" + n.text + "`")
+      self.push(
+        diag("E0402", n.span, "unknown effect `" + n.text + "`").note(
+          "effects are io, fs, net, clock, rand, env, spawn and ffi",
+        ),
+      )
     }
   }
   return set
@@ -939,14 +968,18 @@ fn Sema.resolve_fn(&mut self, fid: Int) {
         self.defs.fns[fid].recv = Some(key)
         self.defs.fns[fid].self_ty = Some(self_ty)
         let mk = (key, item.name.text)
-        if self.defs.methods.contains(mk) {
-          self.err(
-            "E0202",
-            item.name.span,
-            "method `" + item.name.text + "` is defined more than once",
-          )
-        } else {
-          self.defs.methods.insert(mk, fid)
+        match self.defs.methods.get(mk) {
+          Some(prev) => {
+            let prev_span = self.defs.fns[prev].name_span
+            self.push(
+              diag(
+                "E0202",
+                item.name.span,
+                "method `" + item.name.text + "` is defined more than once",
+              ).label(prev_span, "first defined here"),
+            )
+          }
+          None => self.defs.methods.insert(mk, fid)
         }
       }
       None => {
@@ -1045,10 +1078,14 @@ fn Sema.check_ffi_signature(&mut self, fid: Int) {
     problems.push("it takes more than 6 integer or 8 `Float` arguments")
   }
   if !problems.is_empty() {
-    self.err(
-      "E0331",
-      fd.name_span,
-      "`" + fd.name + "` cannot be a C function: " + problems.join(", "),
+    self.push(
+      diag(
+        "E0331",
+        fd.name_span,
+        "`" + fd.name + "` cannot be a C function: " + problems.join(", "),
+      ).note(
+        "C functions take and return `Int`, `I32`, `U8`, `U32`, `U64`, `Float`, `Bool` and `Str`, or return nothing",
+      ),
     )
   }
 }

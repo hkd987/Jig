@@ -361,11 +361,16 @@ fn Sema.check_field(&mut self, e: Int, base: Int, name: syntax.Name, expected: O
                 return self.value_of_def(e, def, name.text, span, None)
               }
               None => {
-                self.err(
+                var d = diag(
                   "E0201",
                   name.span,
                   "package `" + self.pkgs[target].path + "` has no item `" + name.text + "`",
                 )
+                match closest(name.text, self.pkgs[target].scope.keys()) {
+                  Some(b) => d = d.fix("did you mean `" + b + "`?", name.span, b)
+                  None => {}
+                }
+                self.push(d)
                 return self.tys.error
               }
             }
@@ -463,7 +468,29 @@ fn Sema.check_field(&mut self, e: Int, base: Int, name: syntax.Name, expected: O
 }
 
 fn Sema.no_field(&mut self, t: Int, name: syntax.Name) -> Int {
-  self.err("E0206", name.span, "`" + self.show(t) + "` has no field `" + name.text + "`")
+  let is_method = match ty_key(self.tys, t) {
+    Some(k) => self.defs.method(k, name.text).is_some()
+    None => false
+  }
+  var d = diag("E0206", name.span, "`" + self.show(t) + "` has no field `" + name.text + "`")
+  if is_method {
+    d = d.note("`" + name.text + "` is a method; call it: `" + name.text + "()`")
+  } else {
+    match self.tys.kinds[t] {
+      Adt(a, _) => {
+        var names: List<Str> = []
+        for f in self.defs.adts[a].fields {
+          names.push(f.name)
+        }
+        match closest(name.text, names) {
+          Some(b) => d = d.fix("did you mean `" + b + "`?", name.span, b)
+          None => {}
+        }
+      }
+      _ => {}
+    }
+  }
+  self.push(d)
   return self.tys.error
 }
 
@@ -503,7 +530,11 @@ fn Sema.check_call(&mut self, e: Int, callee: Int, args: List<Int>, expected: Op
               return self.call_fn(e, callee, f, [], None, args, None, expected)
             }
             Some(Adt(_)) | Some(Alias(_)) => {
-              self.err("E0326", span, "`" + n + "` is a type and cannot be called")
+              self.push(
+                diag("E0326", span, "`" + n + "` is a type and cannot be called").note(
+                  "construct a struct with `" + n + " { field: value }`",
+                ),
+              )
               self.check_args_untyped(args)
               return self.tys.error
             }
@@ -539,10 +570,11 @@ fn Sema.check_call(&mut self, e: Int, callee: Int, args: List<Int>, expected: Op
     _ => {}
   }
   let ct = self.check_expr(callee, None)
-  return self.call_value(ct, args, span)
+  return self.call_value(callee, ct, args, span)
 }
 
-fn Sema.call_value(&mut self, ct: Int, args: List<Int>, span: syntax.Span) -> Int {
+/// A call of a value of type `ct`; `callee` is the called expression.
+fn Sema.call_value(&mut self, callee: Int, ct: Int, args: List<Int>, span: syntax.Span) -> Int {
   let r = self.resolve(ct)
   match self.tys.kinds[r] {
     Fn(ps, ret, eff) => {
@@ -581,7 +613,21 @@ fn Sema.call_value(&mut self, ct: Int, args: List<Int>, span: syntax.Span) -> In
       return self.tys.error
     }
     _ => {
-      self.err("E0303", span, "`" + self.show(ct) + "` is not a function")
+      var d = diag("E0303", span, "`" + self.show(ct) + "` is not a function")
+      // `max(a, b)` where a parameter or variable named `max` hides the prelude.
+      match self.ast.exprs[callee].kind {
+        Name(n) => if self.pkgs[self.prelude].scope.contains(n) {
+          d = d.note(
+            "the local `" +
+              n +
+              "` hides the prelude function `" +
+              n +
+              "`; rename the local to call it",
+          )
+        }
+        _ => {}
+      }
+      self.push(d)
       self.check_args_untyped(args)
       return self.tys.error
     }
@@ -673,11 +719,16 @@ fn Sema.check_field_call(
               }
               Some(_) => {}
               None => {
-                self.err(
+                var d = diag(
                   "E0201",
                   name.span,
                   "package `" + self.pkgs[target].path + "` has no function `" + name.text + "`",
                 )
+                match closest(name.text, self.pkgs[target].scope.keys()) {
+                  Some(b) => d = d.fix("did you mean `" + b + "`?", name.span, b)
+                  None => {}
+                }
+                self.push(d)
                 self.check_args_untyped(args)
                 return self.tys.error
               }
@@ -728,11 +779,25 @@ fn Sema.check_field_call(
         }
         None => {}
       }
-      self.err(
+      var d = diag(
         "E0207",
         name.span,
         "`" + self.show(t) + "` has no variant or associated function `" + name.text + "`",
       )
+      match self.tys.kinds[r] {
+        Adt(a, _) => {
+          var names: List<Str> = []
+          for v in self.defs.adts[a].variants {
+            names.push(v.name)
+          }
+          match closest(name.text, names) {
+            Some(b) => d = d.fix("did you mean `" + b + "`?", name.span, b)
+            None => {}
+          }
+        }
+        _ => {}
+      }
+      self.push(d)
       self.check_args_untyped(args)
       return self.tys.error
     }
@@ -763,10 +828,12 @@ fn Sema.check_field_call(
   r = self.resolve(r)
   match kind {
     Infer(_) => {
-      self.err(
-        "E0305",
-        self.expr_span(base),
-        "type annotations needed before calling `." + name.text + "()`",
+      self.push(
+        diag(
+          "E0305",
+          self.expr_span(base),
+          "type annotations needed before calling `." + name.text + "()`",
+        ).note("annotate the variable, e.g. `let xs: List<Int> = []`"),
       )
       self.check_args_untyped(args)
       return self.tys.error
@@ -851,10 +918,17 @@ fn Sema.check_field_call(
         }
         return self.tys.str
       }
-      self.err(
-        "E0207",
-        name.span,
-        "type parameter `" + pname + "` has no method `" + name.text + "`",
+      let note = if name.text == "str" {
+        "add a bound: `" + pname + ": Show`"
+      } else {
+        "add an interface bound that declares `" + name.text + "`"
+      }
+      self.push(
+        diag(
+          "E0207",
+          name.span,
+          "type parameter `" + pname + "` has no method `" + name.text + "`",
+        ).note(note),
       )
       return self.tys.error
     }
@@ -866,8 +940,11 @@ fn Sema.check_field_call(
       self.err("E0302", span, "`str` takes no arguments")
     }
     var seen: Set<(Int, Bound)> = Set.new()
-    if !self.satisfies(r, Bound.Show, &mut seen) {
-      self.err("E0312", span, "`" + self.show(r) + "` cannot be shown")
+    match self.satisfies(r, Bound.Show, &mut seen) {
+      Some(why) => self.push(
+        diag("E0312", span, "`" + self.show(r) + "` cannot be shown").note(why),
+      )
+      None => {}
     }
     self.set_res(callee, Res.BoundMethod(Bound.Show))
     self.body.derived_exprs.push(base)
@@ -885,7 +962,7 @@ fn Sema.check_field_call(
               self.set_res(callee, Res.Field(i))
               self.note_field_read(a, i)
               let _ = self.record(callee, ft)
-              return self.call_value(ft, args, span)
+              return self.call_value(callee, ft, args, span)
             }
             _ => {}
           }
@@ -894,7 +971,23 @@ fn Sema.check_field_call(
     }
     _ => {}
   }
-  self.err("E0207", name.span, "`" + self.show(r) + "` has no method `" + name.text + "`")
+  var d = diag("E0207", name.span, "`" + self.show(r) + "` has no method `" + name.text + "`")
+  match ty_key(self.tys, lookup_ty) {
+    Some(key) => {
+      var names: List<Str> = []
+      for (k, n) in self.defs.methods.keys() {
+        if k == key {
+          names.push(n)
+        }
+      }
+      match closest(name.text, names) {
+        Some(b) => d = d.fix("did you mean `" + b + "`?", name.span, b)
+        None => {}
+      }
+    }
+    None => {}
+  }
+  self.push(d)
   self.check_args_untyped(args)
   return self.tys.error
 }
@@ -959,13 +1052,23 @@ fn Sema.check_arg(&mut self, a: Int, pt: Int, mode: Mode, places: &mut List<Int>
         places.push(place)
       }
       _ => {
-        self.err("E0314", asp, "this parameter is `&mut`: pass a mutable place with `&mut`")
+        let snippet = self.fix_snippet(asp)
+        var d = diag("E0314", asp, "this parameter is `&mut`: pass a mutable place with `&mut`")
+        if !snippet.is_empty() {
+          d = d.fix("add `&mut`", asp, "&mut " + snippet)
+        }
+        self.push(d)
         let _ = self.check_expr(a, Some(pt))
       }
     }
     Value => match kind {
       MutArg(inner) => {
-        self.err("E0314", asp, "this parameter takes its argument by value; remove `&mut`")
+        let snippet = self.fix_snippet(self.expr_span(inner))
+        var d = diag("E0314", asp, "this parameter takes its argument by value; remove `&mut`")
+        if !snippet.is_empty() {
+          d = d.fix("remove `&mut`", asp, snippet)
+        }
+        self.push(d)
         let t = self.check_expr(inner, Some(pt))
         let _ = self.record(a, t)
       }
@@ -1044,7 +1147,12 @@ fn Sema.call_fn(
       args.len().str() +
       (if args.len() == 1 { " was" } else { " were" }) +
       " given"
-    self.err("E0302", span, msg)
+    var sig: List<Str> = []
+    for p in fd.params {
+      let ts = self.show(self.tys.subst(p.ty, inst))
+      sig.push(p.name + ": " + (if p.mode == Mode.MutRef { "&mut " } else { "" }) + ts)
+    }
+    self.push(diag("E0302", span, msg).note("signature: " + display + "(" + sig.join(", ") + ")"))
   }
   var places: List<Int> = []
   match recv_place {
@@ -1147,11 +1255,23 @@ fn Sema.require_mut_place(&mut self, e: Int, what: Str) {
   }
   let l = self.body.locals[root]
   if l.depth < self.closures.len() {
-    self.err("E0307", span, "cannot mutate `" + l.name + "` inside a closure")
+    self.push(
+      diag("E0307", span, "cannot mutate `" + l.name + "` inside a closure").note(
+        "closures capture copies of variables; return a new value instead",
+      ),
+    )
     return
   }
   if !l.is_mutable() {
-    self.err("E0307", span, "cannot " + what + " `" + l.name + "`, which is not mutable")
+    var d = diag("E0307", span, "cannot " + what + " `" + l.name + "`, which is not mutable")
+    match l.kind {
+      Let => d = d.label(l.span, "declared with `let`").note("declare it with `var` instead of `let`")
+      Param => d = d.note("parameters are immutable; take it as `&mut` or copy it into a `var`")
+      SelfValue => d = d.note("declare the method with `&mut self` to mutate the receiver")
+      Pattern | Quant => d = d.note("pattern bindings are immutable; copy into a `var` to modify")
+      _ => {}
+    }
+    self.push(d)
     return
   }
   self.body.locals[root].mutated = true
@@ -1199,7 +1319,13 @@ fn Sema.check_disjoint(&mut self, places: List<Int>) {
         }
       }
       if overlap {
-        self.err("E0315", self.expr_span(places[i]), "this `&mut` argument overlaps another one")
+        self.push(
+          diag("E0315", self.expr_span(places[i]), "this `&mut` argument overlaps another one")
+            .label(self.expr_span(places[j]), "overlapping `&mut` argument")
+            .note(
+              "pass non-overlapping places, or restructure so one function call mutates one place",
+            ),
+        )
       }
     }
   }

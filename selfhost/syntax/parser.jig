@@ -392,7 +392,7 @@ fn Parser.error_at(&mut self, span: Span, msg: Str)
     }
     None => {}
   }
-  self.errors.push(Diag { code: "E0105", lo: span.lo, hi: span.hi, msg: msg })
+  self.errors.push(new_diag("E0105", span.lo, span.hi, msg))
 }
 
 /// How an error names the token `t`.
@@ -733,7 +733,11 @@ fn Parser.parse_item(&mut self) -> Result<Int, ()>
     _ => {
       let t = self.tok()
       let msg = "expected an item, found " + self.found(t)
-      self.errors.push(Diag { code: "E0108", lo: t.lo, hi: t.hi, msg: msg })
+      self.errors.push(
+        new_diag("E0108", t.lo, t.hi, msg).note(
+          "top-level declarations are `import`, `fn`, `struct`, `enum`, `interface`, `type`, `const`, `unit`, `test` and `step`",
+        ),
+      )
       return Err(())
     }
   }
@@ -1223,12 +1227,9 @@ fn Parser.parse_type(&mut self) -> Result<Int, ()>
     Amp => {
       let t = self.tok()
       self.errors.push(
-        Diag {
-          code: "E0314"
-          lo: t.lo
-          hi: t.hi
-          msg: "`&mut` is only allowed on function parameters"
-        },
+        new_diag("E0314", t.lo, t.hi, "`&mut` is only allowed on function parameters").note(
+          "Jig has no reference types; values are copied, and `&mut` parameters mutate the caller's variable",
+        ),
       )
       self.advance()
       if self.tok_is_ident("mut") {
@@ -2054,9 +2055,7 @@ fn Parser.parse_primary(&mut self) -> Result<Int, ()>
           return Ok(self.mk_expr(ExprKind.Int(v), token_span(t)))
         }
         None => {
-          self.errors.push(
-            Diag { code: "E0104", lo: t.lo, hi: t.hi, msg: "integer literal is too large" },
-          )
+          self.errors.push(new_diag("E0104", t.lo, t.hi, "integer literal is too large"))
           return Ok(self.mk_expr(ExprKind.Int(0), token_span(t)))
         }
       }
@@ -2132,9 +2131,7 @@ fn Parser.parse_primary(&mut self) -> Result<Int, ()>
       return self.parse_block()
     }
     Amp => {
-      self.errors.push(
-        Diag { code: "E0314", lo: t.lo, hi: t.hi, msg: "`&mut` is only allowed in call arguments" },
-      )
+      self.errors.push(new_diag("E0314", t.lo, t.hi, "`&mut` is only allowed in call arguments"))
       self.advance()
       if self.tok_is_ident("mut") {
         self.advance()

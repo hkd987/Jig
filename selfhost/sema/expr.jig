@@ -54,7 +54,12 @@ fn Sema.check_expr_stmt(&mut self, e: Int) {
         Call(_, _) => "unused result of type `" + ts + "`"
         _ => "unused value of type `" + ts + "`"
       }
-      self.err("E0507", ex.span, msg)
+      let snippet = self.fix_snippet(ex.span)
+      var d = diag("E0507", ex.span, msg)
+      if !snippet.is_empty() {
+        d = d.fix("discard it explicitly", ex.span, "let _ = " + snippet)
+      }
+      self.push(d)
     }
   }
 }
@@ -197,7 +202,11 @@ fn Sema.check_expr_inner(&mut self, e: Int, expected: Option<Int>) -> Int {
       return self.check_index(e, base, index)
     }
     Range(_, _) => {
-      self.err("E0306", ex.span, "a range is only allowed in `for`, slices and quantifiers")
+      self.push(
+        diag("E0306", ex.span, "a range is only allowed in `for`, slices and quantifiers").note(
+          "build a list with a loop, e.g. `for i in 0..n { xs.push(i) }`",
+        ),
+      )
       return self.tys.error
     }
     Unary(op, inner) => {
@@ -265,10 +274,14 @@ fn Sema.check_int_lit(&mut self, e: Int, v: U64, neg: Bool, expected: Option<Int
           return r
         }
         Float(_) => {
-          self.err(
-            "E0301",
-            self.expr_span(e),
-            "mismatched types: expected `" + self.show(r) + "`, found an integer literal",
+          let span = self.expr_span(e)
+          let text = (if neg { "-" } else { "" }) + v.str() + ".0"
+          self.push(
+            diag(
+              "E0301",
+              span,
+              "mismatched types: expected `" + self.show(r) + "`, found an integer literal",
+            ).fix("write a float literal", span, text),
           )
           return r
         }
@@ -331,8 +344,73 @@ fn Sema.check_name(&mut self, e: Int, name: Str, expected: Option<Int>) -> Int {
     self.err("E0326", span, "package `" + name + "` is not a value; use `" + name + ".<item>`")
     return self.tys.error
   }
-  self.err("E0201", span, "cannot find `" + name + "` in this scope")
+  self.unresolved(span, name)
   return self.tys.error
+}
+
+fn Sema.unresolved(&mut self, span: syntax.Span, name: Str) {
+  var cands: List<Str> = []
+  for (n, _) in self.scope {
+    cands.push(n)
+  }
+  cands.extend(self.pkgs[self.pkg].scope.keys())
+  cands.extend(self.pkgs[self.prelude].scope.keys())
+  cands.extend(self.pkgs[self.pkg].imports[self.file].keys())
+  var d = diag("E0201", span, "cannot find `" + name + "` in this scope")
+  match closest(name, cands) {
+    Some(best) => d = d.fix("did you mean `" + best + "`?", span, best)
+    None => if std_package_paths().contains("std/" + name) {
+      d = d.note("add `import \"std/" + name + "\"`")
+    }
+  }
+  self.push(d)
+}
+
+/// The candidate nearest to `name` by edit distance, if near enough (ties go to the first in
+/// alphabetical order, so the answer does not depend on the candidates' order).
+fn closest(name: Str, cands: List<Str>) -> Option<Str> {
+  var best: Option<(Int, Str)> = None
+  for c in cands {
+    if c == name || c.is_empty() {
+      continue
+    }
+    let d = edit_distance(name, c)
+    let limit = max(max(name.len(), c.len()) / 3, 1)
+    if d <= limit {
+      let better = match best {
+        Some((bd, bc)) => d < bd || (d == bd && c < bc)
+        None => true
+      }
+      if better {
+        best = Some((d, c))
+      }
+    }
+  }
+  return match best {
+    Some((_, c)) => Some(c)
+    None => None
+  }
+}
+
+fn edit_distance(a: Str, b: Str) -> Int {
+  let xs = a.chars()
+  let ys = b.chars()
+  var prev: List<Int> = []
+  for j in 0..ys.len() + 1 {
+    prev.push(j)
+  }
+  var cur = [0].repeat(ys.len() + 1)
+  for i in 1..xs.len() + 1 {
+    cur[0] = i
+    for j in 1..ys.len() + 1 {
+      let cost = if xs[i - 1] == ys[j - 1] { 0 } else { 1 }
+      cur[j] = min(min(prev[j] + 1, cur[j - 1] + 1), prev[j - 1] + cost)
+    }
+    let t = prev
+    prev = cur
+    cur = t
+  }
+  return prev[ys.len()]
 }
 
 /// The value a package-level definition denotes when used as an expression.
@@ -356,7 +434,15 @@ fn Sema.value_of_def(
       return self.defs.consts[c].ty
     }
     Adt(_) | Alias(_) => {
-      self.err("E0326", span, "`" + name + "` is a type, not a value")
+      self.push(
+        diag("E0326", span, "`" + name + "` is a type, not a value").note(
+          "construct a struct with `" +
+            name +
+            " { field: value }`, or call an associated function with `" +
+            name +
+            ".function()`",
+        ),
+      )
       return self.tys.error
     }
     Iface(_) | Unit => {
@@ -671,9 +757,23 @@ fn Sema.operand_mismatch(&mut self, span: syntax.Span, op: syntax.BinOp, lt: Int
     _ => false
   }
   if same_kind {
-    self.err("E0317", span, "mismatched units: `" + a + "` " + op.text() + " `" + b + "`")
+    self.push(
+      diag("E0317", span, "mismatched units: `" + a + "` " + op.text() + " `" + b + "`").note(
+        "add and compare values with the same unit; convert with `as` if needed",
+      ),
+    )
   } else {
-    self.err("E0306", span, "`" + op.text() + "` cannot combine `" + a + "` and `" + b + "`")
+    var d = diag("E0306", span, "`" + op.text() + "` cannot combine `" + a + "` and `" + b + "`")
+    if self.tys.is_numeric(self.resolve(lt)) && self.tys.is_numeric(self.resolve(rt)) {
+      d = d.note(
+        "Jig has no implicit numeric conversions; convert one side with `as " +
+          a +
+          "` or `as " +
+          b +
+          "`",
+      )
+    }
+    self.push(d)
   }
 }
 
@@ -710,7 +810,18 @@ fn Sema.check_arith(
   // String concatenation.
   if op == syntax.BinOp.Add && (ka == TyKind.Str || kb == TyKind.Str) {
     if !(ka == TyKind.Str && kb == TyKind.Str) {
-      self.err("E0306", span, "`+` cannot join `" + self.show(lt) + "` and `" + self.show(rt) + "`")
+      let other = if ka == TyKind.Str { rhs } else { lhs }
+      let osp = self.ast.exprs[other].span
+      let snippet = self.fix_snippet(osp)
+      var d = diag(
+        "E0306",
+        span,
+        "`+` cannot join `" + self.show(lt) + "` and `" + self.show(rt) + "`",
+      )
+      if !snippet.is_empty() {
+        d = d.fix("convert to a string with `.str()`", osp, snippet + ".str()")
+      }
+      self.push(d)
     }
     return self.tys.str
   }
@@ -799,7 +910,15 @@ fn Sema.check_cast(&mut self, inner: Int, ty: Int, span: syntax.Span) -> Int {
     _ => false
   }
   if !ok {
-    self.err("E0310", span, "cannot cast `" + self.show(src) + "` to `" + self.show(target) + "`")
+    self.push(
+      diag(
+        "E0310",
+        span,
+        "cannot cast `" + self.show(src) + "` to `" + self.show(target) + "`",
+      ).note(
+        "`as` converts between numbers and between `Char` and integers; use methods such as `.str()` or `.to_int()` for other conversions",
+      ),
+    )
   }
   return target
 }
@@ -828,7 +947,7 @@ fn Sema.check_try(&mut self, inner: Int, span: syntax.Span) -> Int {
             ">`, but it returns `" +
             rs +
             "`"
-          self.err("E0309", span, msg)
+          self.push(diag("E0309", span, msg).note("convert the error first with `.map_err(...)`"))
         }
         return args[0]
       }
@@ -839,7 +958,11 @@ fn Sema.check_try(&mut self, inner: Int, span: syntax.Span) -> Int {
           let msg = "`?` on an `Option` needs the function to return an `Option`, but it returns `" +
             self.show(ret) +
             "`"
-          self.err("E0309", span, msg)
+          self.push(
+            diag("E0309", span, msg).note(
+              "convert with `.ok_or(error)` to use `?` in a function returning `Result`",
+            ),
+          )
         }
         return args[0]
       }
@@ -894,7 +1017,11 @@ fn Sema.check_index(&mut self, e: Int, base: Int, index: Int) -> Int {
       return self.tys.u8
     }
     Map(_, _) => {
-      self.err("E0311", span, "maps cannot be indexed")
+      self.push(
+        diag("E0311", span, "maps cannot be indexed").note(
+          "use `m.get(key)`, which returns an `Option`",
+        ),
+      )
       return self.tys.error
     }
     Error => {
@@ -961,7 +1088,11 @@ fn Sema.check_if(
     None => {
       let rt = self.resolve(t1)
       if as_value && rt != self.tys.unit_ty && rt != self.tys.never && rt != self.tys.error {
-        self.err("E0301", span, "`if` without `else` has no value on the false path")
+        self.push(
+          diag("E0301", span, "`if` without `else` has no value on the false path").note(
+            "add an `else` branch",
+          ),
+        )
         self.diverges = false
         return self.tys.error
       }
@@ -1013,7 +1144,11 @@ fn Sema.check_struct_lit(
     _ => {}
   }
   if adt < 0 {
-    self.err("E0324", span, "`" + self.show(t) + "` is not a struct")
+    self.push(
+      diag("E0324", span, "`" + self.show(t) + "` is not a struct").note(
+        "enum variants are constructed with `Enum.Variant(args)`",
+      ),
+    )
     return self.tys.error
   }
   let ad = self.defs.adts[adt]
@@ -1042,7 +1177,20 @@ fn Sema.check_struct_lit(
       let ft = self.tys.subst(ad.fields[found].ty, args)
       let _ = self.check_expr(init.value, Some(ft))
     } else {
-      self.err("E0206", init.name.span, "`" + ad.name + "` has no field `" + init.name.text + "`")
+      var names: List<Str> = []
+      for f in ad.fields {
+        names.push(f.name)
+      }
+      var d = diag(
+        "E0206",
+        init.name.span,
+        "`" + ad.name + "` has no field `" + init.name.text + "`",
+      )
+      match closest(init.name.text, names) {
+        Some(best) => d = d.fix("did you mean `" + best + "`?", init.name.span, best)
+        None => {}
+      }
+      self.push(d)
       let _ = self.check_expr(init.value, None)
     }
   }
@@ -1053,10 +1201,18 @@ fn Sema.check_struct_lit(
     }
   }
   if !missing.is_empty() {
-    self.err(
-      "E0304",
-      span,
-      "missing field" + plural(missing.len()) + " " + missing.join(", ") + " in `" + ad.name + "`",
+    self.push(
+      diag(
+        "E0304",
+        span,
+        "missing field" +
+          plural(missing.len()) +
+          " " +
+          missing.join(", ") +
+          " in `" +
+          ad.name +
+          "`",
+      ).note("Jig has no default values: every field needs a value"),
     )
   }
   return r

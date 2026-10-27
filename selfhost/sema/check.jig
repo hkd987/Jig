@@ -260,7 +260,13 @@ fn Sema.check_bodies(&mut self) {
         if !self.imports_used[pi].contains((fi, name)) &&
           !self.defs.sig_imports_used.contains((pi, fi, name)) {
           let item = pkg.files[fi].ast.items[imp.1]
-          self.err("E0502", item.span, "unused import `" + item.name.text + "`")
+          self.push(
+            diag("E0502", item.span, "unused import `" + item.name.text + "`").fix(
+              "remove the import",
+              item.span,
+              "",
+            ),
+          )
         }
       }
     }
@@ -277,7 +283,50 @@ fn Sema.show(&mut self, t: Int) -> Str {
 fn Sema.mismatch(&mut self, span: syntax.Span, expected: Int, found: Int) {
   let e = self.show(expected)
   let f = self.show(found)
-  self.err("E0301", span, "mismatched types: expected `" + e + "`, found `" + f + "`")
+  var d = diag(
+    "E0301",
+    span,
+    "mismatched types: expected `" + e + "`, found `" + f + "`",
+  ).with_primary("expected `" + e + "`")
+  // Suggestions for common conversions.
+  let ek = self.tys.kinds[self.resolve(expected)]
+  let fk = self.tys.kinds[self.resolve(found)]
+  let snippet = self.fix_snippet(span)
+  let numeric = match (ek, fk) {
+    (Float(_), Int(_, _)) | (Int(_, _), Float(_)) | (Int(_, _), Int(_, _)) => true
+    _ => false
+  }
+  let found_error = match fk {
+    Error => true
+    _ => false
+  }
+  if numeric {
+    if !snippet.is_empty() {
+      d = d.fix("convert with `as " + e + "`", span, "(" + snippet + ") as " + e)
+    }
+  } else {
+    match ek {
+      Str => if !snippet.is_empty() && !found_error {
+        d = d.fix("convert to a string with `.str()`", span, snippet + ".str()")
+      }
+      Adt(a, _) => if a == self.defs.option && !snippet.is_empty() {
+        d = d.fix("wrap the value in `Some(...)`", span, "Some(" + snippet + ")")
+      } else if a == self.defs.result && !snippet.is_empty() {
+        d = d.fix("wrap the value in `Ok(...)`", span, "Ok(" + snippet + ")")
+      }
+      _ => {}
+    }
+  }
+  self.push(d)
+}
+
+/// The source text at `span` for a suggested fix (none if long or on several lines).
+fn Sema.fix_snippet(self, span: syntax.Span) -> Str {
+  let s = self.snippet(span.lo, span.hi)
+  if s.len() > 80 || s.contains("\n") {
+    return ""
+  }
+  return s
 }
 
 fn Sema.expr_span(self, e: Int) -> syntax.Span {
@@ -541,8 +590,13 @@ fn Sema.pop_scope(&mut self) {
 
 fn Sema.declare_local(&mut self, name: Str, ty: Int, kind: LocalKind, span: syntax.Span) -> Int {
   if name != "_" && kind != LocalKind.SelfValue && kind != LocalKind.SelfMut {
-    if self.lookup_local(name).is_some() {
-      self.err("E0505", span, "`" + name + "` shadows another variable")
+    match self.lookup_local(name) {
+      Some(prev) => self.push(
+        diag("E0505", span, "`" + name + "` shadows another variable")
+          .label(self.body.locals[prev].span, "first declared here")
+          .note("choose a different name"),
+      )
+      None => {}
     }
     self.check_snake(name, span, "variable")
   }
@@ -613,7 +667,9 @@ fn Sema.use_effects(&mut self, eff: Int, span: syntax.Span, what: Str) {
             effects_render(missing) +
             " but the closure's type allows only " +
             effects_render(allowed)
-          self.err("E0401", span, msg)
+          self.push(
+            diag("E0401", span, msg).note("a function value's effects are part of its type"),
+          )
         }
       }
       None => {}
@@ -630,7 +686,8 @@ fn Sema.use_effects(&mut self, eff: Int, span: syntax.Span, what: Str) {
       " `" +
       names.join("`, `") +
       "`, which this function does not declare"
-    self.err("E0401", span, msg)
+    let want = effect_list(self.declared_effects | missing)
+    self.push(diag("E0401", span, msg).note("declare it: `effects {" + want.join(", ") + "}`"))
   }
 }
 
@@ -649,9 +706,16 @@ fn Sema.check_pending_bounds(&mut self) {
       continue
     }
     var seen: Set<(Int, Bound)> = Set.new()
-    if !self.satisfies(t, pb.bound, &mut seen) {
-      let msg = "`" + self.tys.display(t) + "` does not satisfy `" + self.bound_name(pb.bound) + "`"
-      self.err("E0312", pb.span, msg)
+    match self.satisfies(t, pb.bound, &mut seen) {
+      Some(why) => {
+        let msg = "`" +
+          self.tys.display(t) +
+          "` does not satisfy `" +
+          self.bound_name(pb.bound) +
+          "`"
+        self.push(diag("E0312", pb.span, msg).note(why))
+      }
+      None => {}
     }
   }
 }
@@ -667,24 +731,28 @@ fn Sema.bound_name(self, b: Bound) -> Str {
 }
 
 /// Does `t` satisfy bound `b`?
-fn Sema.satisfies(&mut self, t: Int, b: Bound, seen: &mut Set<(Int, Bound)>) -> Bool {
+/// Why `t` does not satisfy `b`, if it does not.
+fn Sema.satisfies(&mut self, t: Int, b: Bound, seen: &mut Set<(Int, Bound)>) -> Option<Str> {
   if seen.contains((t, b)) {
-    return true
+    return None
   }
   seen.insert((t, b))
   let k = self.tys.kinds[t]
   match k {
     Error | Never => {
-      return true
+      return None
     }
-    Param(i, _) => {
+    Param(i, name) => {
       let bounds = if i < self.generics.len() { self.generics[i].bounds } else { [] }
       // Every ordered or hashable type can be compared for equality.
       let implied = b == Bound.Eq && (bounds.contains(Bound.Ord) || bounds.contains(Bound.Hash))
-      return bounds.contains(b) || implied
+      if bounds.contains(b) || implied {
+        return None
+      }
+      return Some("add the bound to the type parameter: `" + name + ": " + self.bound_name(b) + "`")
     }
     Fn(_, _, _) => {
-      return false
+      return Some("functions cannot be compared, hashed, shown or used as interface values")
     }
     _ => {}
   }
@@ -694,35 +762,49 @@ fn Sema.satisfies(&mut self, t: Int, b: Bound, seen: &mut Set<(Int, Bound)>) -> 
     }
     _ => {}
   }
-  return match k {
-    Float(_) => b != Bound.Ord && b != Bound.Hash
-    Int(_, _) | Bool | Char | Str => true
-    Tuple(ts) => self.satisfies_all(ts, b, &mut seen)
-    List(x) | Set(x) => self.satisfies(x, b, &mut seen)
-    Map(kk, v) => self.satisfies(kk, b, &mut seen) && self.satisfies(v, b, &mut seen)
+  match k {
+    Float(_) => if b == Bound.Ord || b == Bound.Hash {
+      return Some("`Float` is not totally ordered; use `sort_by` with an explicit comparison")
+    }
+    Tuple(ts) => {
+      for x in ts {
+        match self.satisfies(x, b, &mut seen) {
+          Some(why) => {
+            return Some(why)
+          }
+          None => {}
+        }
+      }
+    }
+    List(x) | Set(x) => {
+      return self.satisfies(x, b, &mut seen)
+    }
+    Map(kk, v) => {
+      match self.satisfies(kk, b, &mut seen) {
+        Some(why) => {
+          return Some(why)
+        }
+        None => {}
+      }
+      return self.satisfies(v, b, &mut seen)
+    }
     Adt(a, args) => {
       if b == Bound.Show && self.defs.method(TyKey.Adt(a), "str").is_some() {
-        return true
+        return None
       }
       for ft in self.adt_payload_tys(a) {
         let st = self.tys.subst(ft, args)
-        if !self.satisfies(st, b, &mut seen) {
-          return false
+        match self.satisfies(st, b, &mut seen) {
+          Some(why) => {
+            return Some("a field of `" + self.defs.adts[a].name + "` does not: " + why)
+          }
+          None => {}
         }
       }
-      true
     }
-    _ => true
+    _ => {}
   }
-}
-
-fn Sema.satisfies_all(&mut self, ts: List<Int>, b: Bound, seen: &mut Set<(Int, Bound)>) -> Bool {
-  for x in ts {
-    if !self.satisfies(x, b, &mut seen) {
-      return false
-    }
-  }
-  return true
+  return None
 }
 
 /// The type arguments of a type constructor.
@@ -735,11 +817,13 @@ fn Sema.type_args_of(self, t: Int) -> List<Int> {
   }
 }
 
-fn Sema.satisfies_iface(&mut self, t: Int, iid: Int) -> Bool {
+/// Why `t` does not implement interface `iid`, if it does not.
+fn Sema.satisfies_iface(&mut self, t: Int, iid: Int) -> Option<Str> {
+  let iname = self.defs.ifaces[iid].name
   let key = match ty_key(self.tys, t) {
     Some(k) => k
     None => {
-      return false
+      return Some("`" + self.tys.display(t) + "` has no methods")
     }
   }
   let targs = self.type_args_of(t)
@@ -748,32 +832,48 @@ fn Sema.satisfies_iface(&mut self, t: Int, iid: Int) -> Bool {
     let cf = match self.defs.method(key, md.name) {
       Some(c) => c
       None => {
-        return false
+        return Some("missing method `" + md.name + "` required by `" + iname + "`")
       }
     }
     let cd = self.defs.fns[cf]
     if cd.self_mode != md.self_mode ||
       cd.params.len() != md.params.len() ||
       cd.generics.len() != cd.n_recv_generics {
-      return false
+      return Some(
+        "method `" + md.name + "` does not match the signature required by `" + iname + "`",
+      )
     }
     if targs.len() != cd.n_recv_generics {
-      return false
+      return Some("method `" + md.name + "` does not match `" + iname + "`")
     }
     for i in 0..cd.params.len() {
       let a = self.tys.subst(cd.params[i].ty, targs)
       let b = self.tys.subst(md.params[i].ty, [t])
       if a != b || cd.params[i].mode != md.params[i].mode {
-        return false
+        return Some(
+          "parameter `" +
+            cd.params[i].name +
+            "` of `" +
+            md.name +
+            "` does not match `" +
+            iname +
+            "`",
+        )
       }
     }
     let ra = self.tys.subst(cd.ret, targs)
     let rb = self.tys.subst(md.ret, [t])
     if ra != rb || !effects_contain(md.eff, cd.eff) {
-      return false
+      return Some(
+        "method `" +
+          md.name +
+          "` does not match the return type or effects required by `" +
+          iname +
+          "`",
+      )
     }
   }
-  return true
+  return None
 }
 
 // ---------- finishing ----------
@@ -789,7 +889,11 @@ fn Sema.finish(&mut self) {
         Infer(v) => {
           if !self.reported_vars.contains(v) {
             self.reported_vars.insert(v)
-            self.err("E0305", self.ast.exprs[e].span, "type annotations needed")
+            self.push(
+              diag("E0305", self.ast.exprs[e].span, "type annotations needed").note(
+                "add a type annotation, e.g. `let xs: List<Int> = []`",
+              ),
+            )
           }
         }
         _ => {}
@@ -902,7 +1006,17 @@ fn Sema.lint_locals(&mut self) {
     }
     match l.kind {
       SelfValue => {}
-      SelfMut => { if !l.mutated { self.err("E0510", l.span, "`&mut self` is never mutated") } }
+      SelfMut => {
+        if !l.mutated {
+          self.push(
+            diag("E0510", l.span, "`&mut self` is never mutated").fix(
+              "take `self` by value",
+              l.span,
+              "self",
+            ),
+          )
+        }
+      }
       _ => {
         if !l.used {
           let what = if l.kind == LocalKind.Param || l.kind == LocalKind.MutParam {
@@ -910,11 +1024,23 @@ fn Sema.lint_locals(&mut self) {
           } else {
             "variable"
           }
-          self.err("E0501", l.span, "unused " + what + " `" + l.name + "`")
+          self.push(
+            diag("E0501", l.span, "unused " + what + " `" + l.name + "`").note(
+              "remove it, or rename it to `_" + l.name + "` if it must exist",
+            ),
+          )
         } else if l.kind == LocalKind.Var && !l.mutated {
-          self.err("E0503", l.span, "`" + l.name + "` is declared `var` but never mutated")
+          self.push(
+            diag("E0503", l.span, "`" + l.name + "` is declared `var` but never mutated").note(
+              "use `let`",
+            ),
+          )
         } else if l.kind == LocalKind.MutParam && !l.mutated {
-          self.err("E0510", l.span, "parameter `" + l.name + "` is `&mut` but never mutated")
+          self.push(
+            diag("E0510", l.span, "parameter `" + l.name + "` is `&mut` but never mutated").note(
+              "take it by value",
+            ),
+          )
         }
       }
     }
@@ -989,10 +1115,12 @@ fn Sema.check_fn(&mut self, fid: Int) {
         let span = self.ast.exprs[body].span
         let close = syntax.Span { lo: if span.hi > 0 { span.hi - 1 } else { 0 }, hi: span.hi }
         let rt = self.show(self.ret_ty)
-        self.err(
-          "E0308",
-          close,
-          "missing `return`: this function must return `" + rt + "` on every path",
+        self.push(
+          diag(
+            "E0308",
+            close,
+            "missing `return`: this function must return `" + rt + "` on every path",
+          ).note("Jig function bodies do not return their last expression; write `return <value>`"),
         )
       }
     }
@@ -1019,7 +1147,11 @@ fn Sema.check_fn(&mut self, fid: Int) {
         quoted.push("`" + n + "`")
       }
       let msg = "declared effect" + plural(quoted.len()) + " " + quoted.join(", ") + " never used"
-      self.err("E0403", span, msg)
+      self.push(
+        diag("E0403", span, msg).note(
+          "remove unused effects so callers do not have to declare them",
+        ),
+      )
     }
   }
 }
@@ -1202,12 +1334,43 @@ fn Sema.check_snake(&mut self, name: Str, span: syntax.Span, what: Str) {
   if t.is_empty() || is_snake(t) {
     return
   }
-  self.err("E0504", span, what + " `" + name + "` should be snake_case")
+  let fixed = to_snake(name)
+  self.push(
+    diag("E0504", span, what + " `" + name + "` should be snake_case").fix(
+      "rename to `" + fixed + "`",
+      span,
+      fixed,
+    ),
+  )
+}
+
+fn to_snake(s: Str) -> Str {
+  var out = ""
+  var i = 0
+  for c in s.chars() {
+    if c >= 'A' && c <= 'Z' {
+      if i > 0 && !out.ends_with("_") {
+        out += "_"
+      }
+      out += ((c as Int + 32) as Char).str()
+    } else {
+      out += c.str()
+    }
+    i += 1
+  }
+  return out
 }
 
 fn Sema.check_camel(&mut self, name: Str, span: syntax.Span, what: Str) {
   if is_camel(name) || to_camel(name) == name {
     return
   }
-  self.err("E0504", span, what + " `" + name + "` should be UpperCamel")
+  let fixed = to_camel(name)
+  self.push(
+    diag("E0504", span, what + " `" + name + "` should be UpperCamel").fix(
+      "rename to `" + fixed + "`",
+      span,
+      fixed,
+    ),
+  )
 }
