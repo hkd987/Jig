@@ -1,0 +1,36 @@
+// Steps for cart.feature. Each scenario starts from `Shop.new()`.
+
+struct Shop {
+  cart: Cart
+}
+
+fn Shop.new() -> Shop {
+  return Shop { cart: Cart { lines: [] } }
+}
+
+step "an empty cart"
+fn given_empty(w: &mut Shop) {
+  w.cart = Cart { lines: [] }
+}
+
+step "I add {count} {name} at {price} cents"
+fn when_add(w: &mut Shop, count: Int, name: Str, price: Cents) {
+  if count > 0 && count <= 1000000 && price <= 1000000 {
+    w.cart.add(name, count, price)
+  }
+}
+
+step "I remove {name}"
+fn when_remove(w: &mut Shop, name: Str) {
+  w.cart.remove(name)
+}
+
+step "the total is {cents} cents"
+fn then_total(w: Shop, cents: Int) {
+  assert(w.cart.total() == cents)
+}
+
+step "the cart holds {count} items"
+fn then_items(w: Shop, count: Int) {
+  assert(w.cart.items() == count)
+}

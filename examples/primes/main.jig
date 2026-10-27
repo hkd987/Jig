@@ -1,0 +1,58 @@
+import "std/io"
+import "std/lists"
+import "std/math"
+import "std/os"
+import "std/task"
+
+// `primes [N]` counts the primes below N (default 1,000,000) on every core: the range is
+// cut into chunks, `task.map` counts each chunk in parallel, and the counts add up. Task
+// functions have no effects but `spawn`, so the answer cannot depend on scheduling.
+
+/// The largest count this counts to.
+const LIMIT: Int = 1000000000000
+
+fn is_prime(n: Int) -> Bool {
+  if n < 2 {
+    return false
+  }
+  var d = 2
+  for d <= n / d invariant d >= 2 {
+    if n % d == 0 {
+      return false
+    }
+    d += 1
+  }
+  return true
+}
+
+/// The primes in `lo..hi`, one at a time.
+fn count_primes(lo: Int, hi: Int) -> Int {
+  var n = 0
+  for x in lo..hi {
+    if is_prime(x) {
+      n += 1
+    }
+  }
+  return n
+}
+
+/// The primes below `n`, counted in 64 chunks at once.
+fn count_parallel(n: Int) -> Int
+  requires n >= 0, n <= LIMIT
+  effects {spawn}
+{
+  let size = n / 64 + 1
+  var chunks: List<(Int, Int)> = []
+  var lo = 0
+  for lo < n {
+    chunks.push((lo, min(lo + size, n)))
+    lo += size
+  }
+  return lists.sum(task.map(chunks, fn(c) { count_primes(c.0, c.1) }))
+}
+
+fn main() effects {io, env, spawn} {
+  let args = os.args()
+  let n = if args.len() > 1 { math.clamp(args[1].to_int().unwrap_or(0), 0, LIMIT) } else { 1000000 }
+  io.println(count_parallel(n).str() + " primes below " + n.str())
+}

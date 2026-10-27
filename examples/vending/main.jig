@@ -1,0 +1,77 @@
+import "std/io"
+
+// A vending machine as a state machine: `next` matches every (state, event) pair, and the
+// compiler rejects the match if one is missing, so adding a state or an event shows every
+// place to handle it. Reads `coin N`, `select`, `refund` lines on standard input.
+
+const PRICE: Int = 150
+
+/// Coins inserted so far: some, but short of the price.
+type Credit = Int where self > 0 && self < PRICE
+
+enum State {
+  Idle
+  Paying(credit: Credit)
+}
+
+enum Event {
+  Coin(cents: Int)
+  Select
+  Refund
+}
+
+/// The next state and what the machine says.
+fn next(s: State, e: Event) -> (State, Str) {
+  return match (s, e) {
+    (Idle, Coin(c)) | (Paying(_), Coin(c)) if c <= 0 => (s, "coins only")
+    (Idle, Coin(c)) => insert(0, c)
+    (Paying(credit), Coin(c)) => insert(credit, c)
+    (Idle, Select) => (State.Idle, "insert " + PRICE.str())
+    (Paying(credit), Select) => (s, "insert " + (PRICE - credit).str() + " more")
+    (Idle, Refund) => (State.Idle, "nothing to refund")
+    (Paying(credit), Refund) => (State.Idle, "refund " + credit.str())
+  }
+}
+
+/// Add `c` cents to `credit`: vend once there is enough, with change.
+fn insert(credit: Int, c: Int) -> (State, Str)
+  requires credit >= 0, credit < PRICE, c > 0
+{
+  if c >= PRICE - credit {
+    return (State.Idle, "vend, change " + (c - (PRICE - credit)).str())
+  }
+  return (State.Paying(credit + c), "credit " + (credit + c).str())
+}
+
+fn parse(line: Str) -> Option<Event> {
+  if line == "select" {
+    return Some(Event.Select)
+  }
+  if line == "refund" {
+    return Some(Event.Refund)
+  }
+  if line.starts_with("coin ") {
+    return Some(Event.Coin(line[5..line.len()].to_int().unwrap_or(0)))
+  }
+  return None
+}
+
+fn main() effects {io} {
+  var s = State.Idle
+  for {
+    let line = match io.read_line() {
+      Some(l) => l.trim()
+      None => {
+        break
+      }
+    }
+    match parse(line) {
+      Some(e) => {
+        let (after, said) = next(s, e)
+        s = after
+        io.println(said)
+      }
+      None => io.println("? " + line)
+    }
+  }
+}

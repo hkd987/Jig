@@ -1,0 +1,23 @@
+import "std/sim"
+
+test "paying in two coins vends with change" {
+  sim.set_stdin("select\ncoin 100\nselect\ncoin 100\n")
+  main()
+  assert(sim.stdout() == "insert 150\ncredit 100\ninsert 50 more\nvend, change 50\n")
+}
+
+test "a refund returns the credit and starts over" {
+  sim.set_stdin("coin 20\ncoin 30\nrefund\nrefund\n")
+  main()
+  assert(sim.stdout() == "credit 20\ncredit 50\nrefund 50\nnothing to refund\n")
+}
+
+test "a refund always ends idle"(coins: List<Int>) {
+  var s = State.Idle
+  for c in coins {
+    let (after, _) = next(s, Event.Coin(c))
+    s = after
+  }
+  let (after, _) = next(s, Event.Refund)
+  assert(after == State.Idle)
+}

@@ -1,0 +1,62 @@
+import "std/io"
+
+// A stack of at most `cap` numbers whose contracts all prove: `jig prove` finds no
+// obligation it cannot discharge, so the release build keeps no checks for them.
+// Reads `push N` and `pop` lines on standard input.
+
+struct Stack {
+  items: List<Int>
+  cap: Int
+  invariant cap >= 0 && items.len() <= cap
+}
+
+fn new_stack(cap: Int) -> Stack
+  requires cap >= 0
+  ensures result.items.is_empty() && result.cap == cap
+{
+  return Stack { items: [], cap: cap }
+}
+
+/// Push `x` unless the stack is full; says whether it did.
+fn Stack.push(&mut self, x: Int) -> Bool
+  ensures result == (old(self.items.len()) < self.cap)
+  ensures !result || self.items.len() - old(self.items.len()) == 1
+  ensures result || self.items.len() == old(self.items.len())
+{
+  if self.items.len() >= self.cap {
+    return false
+  }
+  self.items.push(x)
+  return true
+}
+
+/// The top number, removed; `None` when the stack is empty.
+fn Stack.pop(&mut self) -> Option<Int>
+  ensures result.is_none() == old(self.items.is_empty())
+  ensures result.is_none() || old(self.items.len()) - self.items.len() == 1
+{
+  return self.items.pop()
+}
+
+fn main() effects {io} {
+  var s = new_stack(3)
+  for {
+    let line = match io.read_line() {
+      Some(l) => l.trim()
+      None => {
+        break
+      }
+    }
+    if line == "pop" {
+      match s.pop() {
+        Some(x) => io.println(x.str())
+        None => io.println("empty")
+      }
+    } else if line.starts_with("push ") {
+      let x = line[5..line.len()].to_int().unwrap_or(0)
+      if !s.push(x) {
+        io.println("full")
+      }
+    }
+  }
+}

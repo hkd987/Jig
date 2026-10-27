@@ -1,0 +1,65 @@
+import "std/io"
+import "std/net"
+import "std/os"
+import "std/strings"
+
+// `kv [ADDR [N]]`: a key-value store over HTTP (default :8080). `PUT /key` stores the
+// request's body, `GET /key` returns it, `DELETE /key` removes it. The store is the
+// server's state: each request gets it and returns the new one.
+
+struct Request {
+  method: Str
+  path: Str
+  body: Str
+}
+
+/// The method and path of the request line, and the body after the headers.
+fn parse(raw: Str) -> Request {
+  let (head, body) = strings.split_once(raw, "\r\n\r\n").unwrap_or((raw, ""))
+  let words = head.split(" ")
+  let path = if words.len() > 1 { words[1] } else { "" }
+  return Request { method: words[0], path: path, body: body }
+}
+
+fn reply(status: Str, body: Str) -> Str
+  ensures result.len() > body.len()
+{
+  return "HTTP/1.1 " +
+    status +
+    "\r\nContent-Length: " +
+    body.len().str() +
+    "\r\nConnection: close\r\n\r\n" +
+    body
+}
+
+fn handle(store: Map<Str, Str>, raw: Str) -> (Map<Str, Str>, Str) {
+  let r = parse(raw)
+  var s = store
+  return match r.method {
+    "GET" => match s.get(r.path) {
+      Some(v) => (s, reply("200 OK", v))
+      None => (s, reply("404 Not Found", "no such key\n"))
+    }
+    "PUT" => {
+      s.insert(r.path, r.body)
+      (s, reply("200 OK", "stored\n"))
+    }
+    "DELETE" => match s.remove(r.path) {
+      Some(_) => (s, reply("200 OK", "deleted\n"))
+      None => (s, reply("404 Not Found", "no such key\n"))
+    }
+    _ => (s, reply("405 Method Not Allowed", "use GET, PUT or DELETE\n"))
+  }
+}
+
+fn main() effects {io, env, net} {
+  let args = os.args()
+  let addr = if args.len() > 1 { args[1] } else { ":8080" }
+  let limit = if args.len() > 2 { max(args[2].to_int().unwrap_or(0), 0) } else { 0 }
+  io.println("listening on " + addr)
+  let empty: Map<Str, Str> = Map.new()
+  match net.serve_http(addr, empty, handle, limit) {
+    Ok(store) => io.println("kept " + store.len().str() + " keys")
+    Err(e) => io.eprintln(e)
+  }
+}

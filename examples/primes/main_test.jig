@@ -1,0 +1,11 @@
+import "std/sim"
+
+test "the primes below 100" {
+  sim.set_args(["primes", "100"])
+  main()
+  assert(sim.stdout() == "25 primes below 100\n")
+}
+
+test "counting in parallel gives the count one at a time"(n: Int) requires n >= 0, n < 3000 {
+  assert(count_parallel(n) == count_primes(0, n))
+}

@@ -1,0 +1,31 @@
+import "std/sim"
+
+test "items are added, finished and kept in the file" {
+  sim.set_file("todo.txt", "buy milk\n")
+  sim.set_args(["todo", "add", "write", "the", "report"])
+  main()
+  sim.set_args(["todo", "done", "1"])
+  main()
+  assert(sim.file("todo.txt") == Some("x buy milk\nwrite the report\n"))
+  assert(
+    sim.stdout() ==
+      "1. [ ] buy milk\n2. [ ] write the report\n1. [x] buy milk\n2. [ ] write the report\n",
+  )
+}
+
+test "an empty list says so" {
+  sim.set_args(["todo"])
+  main()
+  assert(sim.stdout() == "nothing to do\n")
+}
+
+test "a missing item is an error, and the file is untouched" {
+  sim.set_file("todo.txt", "a\n")
+  assert(run(["todo", "done", "5"]) == Err("no item 5"))
+  assert(sim.file("todo.txt") == Some("a\n"))
+}
+
+test "every item is shown once, numbered"(items: List<Str>) {
+  let shown = render(items)
+  assert(items.is_empty() || shown.starts_with("1. "))
+}

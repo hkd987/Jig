@@ -66,3 +66,28 @@ fn plugin_reference_is_current() {
     let b = std::fs::read_to_string(root.join("plugin/skills/jig/reference.md")).unwrap();
     assert!(a == b, "plugin/skills/jig/reference.md is stale: copy docs/reference.md over it");
 }
+
+#[test]
+fn examples_page_shows_current_code() {
+    // A block after `<!-- file: PATH -->` is that file, as it is.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let md = std::fs::read_to_string(root.join("docs/examples.md")).unwrap();
+    let mut checked = 0;
+    let mut lines = md.lines();
+    while let Some(line) = lines.next() {
+        let Some(path) = line.strip_prefix("<!-- file: ").and_then(|l| l.strip_suffix(" -->")) else { continue };
+        assert!(lines.next().is_some_and(|l| l.starts_with("```")), "docs/examples.md: no code after {path}");
+        let mut block = String::new();
+        for l in lines.by_ref() {
+            if l.starts_with("```") {
+                break;
+            }
+            block.push_str(l);
+            block.push('\n');
+        }
+        let file = std::fs::read_to_string(root.join(path)).unwrap();
+        assert!(block == file, "docs/examples.md shows a stale copy of {path}");
+        checked += 1;
+    }
+    assert!(checked >= 2);
+}

@@ -1,0 +1,33 @@
+import "std/io"
+
+// Units of measure: the compiler tracks metres, seconds and kilograms through arithmetic,
+// so `distance + duration` or passing seconds where metres go does not compile, and a
+// formula's result has the unit it should.
+
+unit m
+unit s
+unit kg
+
+fn speed(d: Float<m>, t: Float<s>) -> Float<m/s> {
+  return d / t
+}
+
+/// Kinetic energy, in joules (kg·m²/s²).
+fn kinetic_energy(mass: Float<kg>, v: Float<m/s>) -> Float<kg*m^2/s^2> {
+  return 0.5 * mass * v * v
+}
+
+/// How far something falls from rest in `t` seconds.
+fn fall_distance(t: Float<s>) -> Float<m> {
+  let g: Float<m/s^2> = 9.81
+  return 0.5 * g * t * t
+}
+
+fn main() effects {io} {
+  let v = speed(100.0, 9.58)
+  io.println("100 m in 9.58 s is " + (v as Float).str() + " m/s")
+  io.println(
+    "a 94 kg sprinter at that speed has " + (kinetic_energy(94.0, v) as Float).str() + " J",
+  )
+  io.println("in 2 s a stone falls " + (fall_distance(2.0) as Float).str() + " m")
+}

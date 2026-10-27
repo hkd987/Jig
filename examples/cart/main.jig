@@ -1,0 +1,50 @@
+import "std/io"
+
+// A shopping cart whose behaviour is written as scenarios first (cart.feature): `jig test`
+// runs them through the steps in steps.jig, and a step no scenario uses, or a scenario step
+// with no function, does not compile.
+
+type Cents = Int where self >= 0
+
+struct Line {
+  name: Str
+  count: Int
+  price: Cents
+}
+
+struct Cart {
+  lines: List<Line>
+}
+
+fn Cart.add(&mut self, name: Str, count: Int, price: Cents)
+  requires count > 0, count <= 1000000, price <= 1000000
+{
+  self.lines.push(Line { name: name, count: count, price: price })
+}
+
+fn Cart.remove(&mut self, name: Str) {
+  self.lines = self.lines.filter(fn(l) { l.name != name })
+}
+
+fn Cart.items(self) -> Int {
+  var n = 0
+  for l in self.lines {
+    n += l.count
+  }
+  return n
+}
+
+/// The sum of the lines, less 10% when it is 1000 cents or more.
+fn Cart.total(self) -> Int {
+  var sum = 0
+  for l in self.lines {
+    sum += l.count * l.price
+  }
+  return if sum >= 1000 { sum - sum / 10 } else { sum }
+}
+
+fn main() effects {io} {
+  var c = Cart { lines: [] }
+  c.add("widget", 4, 300)
+  io.println("4 widgets: " + c.total().str() + " cents")
+}

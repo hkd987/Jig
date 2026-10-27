@@ -1,0 +1,22 @@
+import "std/sim"
+
+test "the last number pushed comes off first" {
+  sim.set_stdin("push 1\npush 2\npop\npop\npop\n")
+  main()
+  assert(sim.stdout() == "2\n1\nempty\n")
+}
+
+test "a full stack refuses more" {
+  sim.set_stdin("push 1\npush 2\npush 3\npush 4\npop\n")
+  main()
+  assert(sim.stdout() == "full\n3\n")
+}
+
+test "a push then a pop gives the number back"(xs: List<Int>, x: Int) {
+  var s = new_stack(xs.len() + 1)
+  for v in xs {
+    let _ = s.push(v)
+  }
+  assert(s.push(x))
+  assert(s.pop() == Some(x))
+}

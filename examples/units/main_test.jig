@@ -1,0 +1,14 @@
+import "std/sim"
+
+test "the formulas print in their units" {
+  main()
+  assert(sim.stdout().contains("in 2 s a stone falls 19.62 m"))
+}
+
+test "speed times time is the distance again"(d: Float, t: Float)
+  requires d >= 0.0, d < 1000000.0, t > 0.001, t < 1000.0
+{
+  let v = speed(d as Float<m>, t as Float<s>)
+  let back = (v * (t as Float<s>)) as Float
+  assert((back - d).abs() < 0.000001 * (d + 1.0))
+}

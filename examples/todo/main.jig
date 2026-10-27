@@ -1,0 +1,63 @@
+import "std/fs"
+import "std/io"
+import "std/os"
+
+// `todo add TEXT...`, `todo done N`, `todo list`: a to-do list kept in todo.txt, one item a
+// line, finished ones marked "x ". Every effect is in the signatures: `load` and `save`
+// touch files, `run` also prints, and the parsing in between is pure.
+
+const FILE: Str = "todo.txt"
+
+fn load() -> List<Str> effects {fs} {
+  return match fs.read(FILE) {
+    Ok(text) => text.lines().filter(fn(l) { !l.is_empty() })
+    Err(_) => []
+  }
+}
+
+fn save(items: List<Str>) -> Result<(), Str> effects {fs} {
+  return fs.write(FILE, if items.is_empty() { "" } else { items.join("\n") + "\n" })
+}
+
+/// The list as it is shown: numbered from 1, finished items struck.
+fn render(items: List<Str>) -> Str {
+  var out = ""
+  for i in 0..items.len() {
+    let item = items[i]
+    let shown = if item.starts_with("x ") { "[x] " + item[2..item.len()] } else { "[ ] " + item }
+    out += (i + 1).str() + ". " + shown + "\n"
+  }
+  return if out.is_empty() { "nothing to do\n" } else { out }
+}
+
+fn run(args: List<Str>) -> Result<(), Str> effects {io, fs} {
+  var items = load()
+  let cmd = if args.len() > 1 { args[1] } else { "list" }
+  if cmd == "add" && args.len() > 2 {
+    items.push(args[2..args.len()].join(" "))
+    save(items)?
+  } else if cmd == "done" && args.len() > 2 {
+    let n = args[2].to_int().unwrap_or(0)
+    if n < 1 || n > items.len() {
+      return Err("no item " + args[2])
+    }
+    if !items[n - 1].starts_with("x ") {
+      items[n - 1] = "x " + items[n - 1]
+    }
+    save(items)?
+  } else if cmd != "list" {
+    return Err("usage: todo add TEXT... | todo done N | todo list")
+  }
+  io.print(render(items))
+  return Ok(())
+}
+
+fn main() effects {io, fs, env} {
+  match run(os.args()) {
+    Ok(_) => {}
+    Err(e) => {
+      io.eprintln(e)
+      os.exit(1)
+    }
+  }
+}

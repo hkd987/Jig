@@ -1,0 +1,45 @@
+import "std/sim"
+
+fn put(path: Str, body: Str) -> Str {
+  return "PUT " + path + " HTTP/1.1\r\nContent-Length: " + body.len().str() + "\r\n\r\n" + body
+}
+
+fn get(path: Str) -> Str {
+  return "GET " + path + " HTTP/1.1\r\n\r\n"
+}
+
+test "a stored value comes back, and is gone once deleted" {
+  sim.connect(":8080", put("/greeting", "hello"))
+  sim.connect(":8080", get("/greeting"))
+  sim.connect(":8080", "DELETE /greeting HTTP/1.1\r\n\r\n")
+  sim.connect(":8080", get("/greeting"))
+  sim.set_args(["kv", ":8080", "4"])
+  main()
+  let missing = reply("404 Not Found", "no such key\n")
+  assert(
+    sim.answers(":8080") ==
+      [
+        reply("200 OK", "stored\n"),
+        reply("200 OK", "hello"),
+        reply("200 OK", "deleted\n"),
+        missing,
+      ],
+  )
+  assert(sim.stdout() == "listening on :8080\nkept 0 keys\n")
+}
+
+test "other methods are refused" {
+  let empty: Map<Str, Str> = Map.new()
+  let (_, r) = handle(empty, "POST /x HTTP/1.1\r\n\r\n")
+  assert(r == reply("405 Method Not Allowed", "use GET, PUT or DELETE\n"))
+}
+
+// A key with a space or a carriage return would not survive the request line.
+test "any value stored under a key is what a GET returns"(key: Str, value: Str)
+  requires !key.contains(" "), !key.contains("\r")
+{
+  let empty: Map<Str, Str> = Map.new()
+  let (s, _) = handle(empty, put("/" + key, value))
+  let (_, r) = handle(s, get("/" + key))
+  assert(r == reply("200 OK", value))
+}
