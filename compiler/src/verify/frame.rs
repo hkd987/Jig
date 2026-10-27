@@ -9,7 +9,7 @@
 //! its cache key.
 
 use crate::sema::defs::{Mode, Program, Res};
-use crate::sema::ty::FnId;
+use crate::sema::ty::{EffectSet, FnId};
 use crate::syntax::ast::{self, ExprId, ExprKind, StmtKind};
 use crate::util::{FxHashMap, FxHashSet};
 
@@ -164,6 +164,134 @@ impl<'a> Frames<'a> {
         self.active.remove(&f);
         frame
     }
+}
+
+/// What a pure function's result can depend on: the parts of each parameter its body reads.
+/// A call is modeled as a function of those parts alone, so two calls that agree on them get
+/// the same result even where the rest of the arguments differ (a method reading two fields
+/// of a large struct, called before and after another field changes). Read off the body like
+/// a frame: a place rooted at the parameter is read whole, unless it is passed to a function,
+/// which reads what its own body reads. Recursion, and anything without a body, reads all.
+pub struct Reads<'a> {
+    prog: &'a Program,
+    done: FxHashMap<(FnId, usize), Frame>,
+    active: FxHashSet<FnId>,
+}
+
+impl<'a> Reads<'a> {
+    fn of(&mut self, f: FnId, i: usize) -> Frame {
+        if let Some(fr) = self.done.get(&(f, i)) {
+            return fr.clone();
+        }
+        let fr = self.compute(f, i);
+        self.done.insert((f, i), fr.clone());
+        fr
+    }
+
+    fn compute(&mut self, f: FnId, i: usize) -> Frame {
+        let prog = self.prog;
+        let fd = &prog.defs.fns[f];
+        let (Some(body), true) = (prog.bodies[f].as_ref(), fd.has_body) else { return Frame::Whole };
+        let Some(&param) = body.param_locals.get(i) else { return Frame::Whole };
+        let pkg = &prog.pkgs[fd.pkg];
+        let ast::ItemKind::Fn(decl) = pkg.ast.items[fd.item].kind else { return Frame::Whole };
+        let Some(root) = decl.body else { return Frame::Whole };
+        if !self.active.insert(f) {
+            return Frame::Whole;
+        }
+        let ast = &pkg.ast;
+        let res = &prog.tables[fd.pkg].expr_res;
+        let mut frame = Frame::Paths(Vec::new());
+        let mut stack = vec![root];
+        while let Some(x) = stack.pop() {
+            if frame == Frame::Whole {
+                break;
+            }
+            if let Some(p) = place_path(ast, res, x, param) {
+                frame.add(p);
+                index_exprs(ast, x, &mut stack);
+                continue;
+            }
+            if let ExprKind::Call { callee, args } = ast.exprs[x].kind {
+                let target = match res[callee.0 as usize] {
+                    Res::Fn(g) | Res::Method(g) => Some(g),
+                    _ => None,
+                };
+                let mut offset = 0;
+                let mut receiver = false;
+                if let ExprKind::Field { base, .. } = ast.exprs[callee].kind {
+                    let on_type = matches!(res[base.0 as usize], Res::Type(_));
+                    let method = !on_type && matches!(res[callee.0 as usize], Res::Method(_) | Res::IfaceMethod(..));
+                    if method && target.is_none_or(|g| prog.defs.fns[g].self_mode.is_some()) {
+                        offset = 1;
+                        if let Some(p) = place_path(ast, res, base, param) {
+                            self.passed(&mut frame, p, target, 0);
+                            index_exprs(ast, base, &mut stack);
+                            receiver = true;
+                        }
+                    }
+                }
+                if !receiver {
+                    stack.push(callee);
+                }
+                for (k, &a) in ast.expr_lists.get(args).iter().enumerate() {
+                    let inner = match ast.exprs[a].kind {
+                        ExprKind::MutArg(e) => e,
+                        _ => a,
+                    };
+                    match place_path(ast, res, inner, param) {
+                        Some(p) => {
+                            self.passed(&mut frame, p, target, k + offset);
+                            index_exprs(ast, inner, &mut stack);
+                        }
+                        None => stack.push(a),
+                    }
+                }
+                continue;
+            }
+            crate::mir::lower::visit_children(ast, x, &mut stack);
+        }
+        self.active.remove(&f);
+        frame
+    }
+
+    /// The place at `p` passed as parameter `k` of `target`: what that function reads of it.
+    fn passed(&mut self, frame: &mut Frame, p: Vec<u32>, target: Option<FnId>, k: usize) {
+        match target {
+            Some(g) => {
+                let gf = self.of(g, k);
+                frame.add_frame(&p, &gf);
+            }
+            None => frame.add(p),
+        }
+    }
+}
+
+/// The index expressions inside the place `e` (read like any other expression).
+fn index_exprs(ast: &ast::Ast, e: ExprId, stack: &mut Vec<ExprId>) {
+    match ast.exprs[e].kind {
+        ExprKind::Paren(x) => index_exprs(ast, x, stack),
+        ExprKind::Field { base, .. } | ExprKind::TupleField { base, .. } => index_exprs(ast, base, stack),
+        ExprKind::Index { base, index } => {
+            stack.push(index);
+            index_exprs(ast, base, stack);
+        }
+        _ => {}
+    }
+}
+
+/// Every pure function's reads, for each parameter (the receiver of a method is 0).
+pub fn compute_reads(prog: &Program) -> FxHashMap<(FnId, usize), Frame> {
+    let mut rd = Reads { prog, done: FxHashMap::default(), active: FxHashSet::default() };
+    for (f, fd) in prog.defs.fns.iter_enumerated() {
+        if fd.effects != EffectSet::PURE || !fd.has_body {
+            continue;
+        }
+        for i in 0..fd.params.len() + fd.self_mode.is_some() as usize {
+            rd.of(f, i);
+        }
+    }
+    rd.done
 }
 
 /// The field path from `param` to the place `e`, up to the first index (writing an element

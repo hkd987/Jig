@@ -159,6 +159,24 @@ fn sv_leaves(v: Sv, out: &mut List<Leaf>) {
   }
 }
 
+/// The part of `v` at a field path.
+fn sub_value(v: Sv, path: List<Int>) -> Option<Sv> {
+  var cur = v
+  for i in path {
+    cur = match cur {
+      Struct(_, xs) | Tuple(xs) => if i < xs.len() {
+        xs[i]
+      } else {
+        return None
+      }
+      _ => {
+        return None
+      }
+    }
+  }
+  return Some(cur)
+}
+
 fn leaves_of(v: Sv) -> List<Leaf> {
   var out: List<Leaf> = []
   sv_leaves(v, &mut out)
@@ -503,9 +521,11 @@ struct Gen {
   depth: Int
   /// What each function may change in each `&mut` parameter (see `frame.jig`).
   frames: Map<(Int, Int), MutFrame>
+  /// What each pure function reads of each parameter (see `frame.jig`).
+  reads: Map<(Int, Int), MutFrame>
 }
 
-fn new_gen(s: Sema, frames: Map<(Int, Int), MutFrame>) -> Gen {
+fn new_gen(s: Sema, frames: Map<(Int, Int), MutFrame>, reads: Map<(Int, Int), MutFrame>) -> Gen {
   var prelude = -1
   for p in 0..s.pkgs.len() {
     if s.pkgs[p].path == "<prelude>" {
@@ -538,6 +558,7 @@ fn new_gen(s: Sema, frames: Map<(Int, Int), MutFrame>) -> Gen {
     cur_ret: err
     depth: 0
     frames: frames
+    reads: reads
   }
 }
 

@@ -521,13 +521,14 @@ fn prove_program(
   let global = s.global_key(std_dir, solver)
   let fns = s.prove_fns(std, filter)
   let frames = compute_frames(s)
-  var g = new_gen(s, frames)
+  let reads = compute_reads(s)
+  var g = new_gen(s, frames, reads)
   var reports: List<FnReport> = []
   // The functions solved now: (report index, cache key, span base).
   var todo: List<(Int, Str, Int)> = []
   var all: List<FnVcs> = []
   for f in fns {
-    let key = g.s.cache_key(f, global, g.frames)
+    let key = g.s.cache_key(f, global, g.frames, g.reads)
     let fd = g.s.defs.fns[f]
     let base = g.s.pkgs[fd.pkg].files[fd.file].ast.items[fd.item].span.lo
     let name = g.s.fn_display_name(f)
@@ -581,7 +582,7 @@ fn prove_program(
 // ---------- the proof cache ----------
 
 /// Bump when the encoding changes, so stale cached proofs are not reused (the bootstrap's).
-const VC_VERSION: Str = "vc-6"
+const VC_VERSION: Str = "vc-7"
 
 /// The bootstrap compiler's version (its `CARGO_PKG_VERSION`), part of every key.
 const JIG_VERSION: Str = "0.1.0-alpha"
@@ -707,8 +708,14 @@ fn frame_summary(f: MutFrame) -> Str {
 
 /// Everything a function's proof depends on: its own text, the contracts of what it calls
 /// (transitively through contracts), what its direct callees may change in `&mut` arguments,
-/// and the global facts.
-fn Sema.cache_key(self, f: Int, global: Str, frames: Map<(Int, Int), MutFrame>) -> Str {
+/// what the pure functions among those read of theirs, and the global facts.
+fn Sema.cache_key(
+  self,
+  f: Int,
+  global: Str,
+  frames: Map<(Int, Int), MutFrame>,
+  reads: Map<(Int, Int), MutFrame>,
+) -> Str {
   let fd = self.defs.fns[f]
   let item = self.pkgs[fd.pkg].files[fd.file].ast.items[fd.item]
   var h = new_hasher()
@@ -737,6 +744,17 @@ fn Sema.cache_key(self, f: Int, global: Str, frames: Map<(Int, Int), MutFrame>) 
   var texts: List<Str> = []
   for g in deps {
     texts.push(self.contract_text(g))
+  }
+  // What the pure functions it calls, directly or in contracts, read of their arguments.
+  for g in deps {
+    for i in 0..self.defs.fns[g].params.len() + 1 {
+      match reads.get((g, i)) {
+        Some(fr) => texts.push(
+          "reads " + self.contract_text(g) + " " + i.str() + " " + frame_summary(fr),
+        )
+        None => {}
+      }
+    }
   }
   for g in refs {
     for i in 0..self.defs.fns[g].params.len() + 1 {
@@ -1627,9 +1645,10 @@ fn Sema.cached_proven(self, std_dir: Str, cache_dir: Str) -> Proven effects {fs,
   let solver = solver_version().unwrap_or("")
   let global = self.global_key(std_dir, solver)
   let frames = compute_frames(self)
+  let reads = compute_reads(self)
   var reports: List<FnReport> = []
   for f in self.prove_targets(false) {
-    let key = self.cache_key(f, global, frames)
+    let key = self.cache_key(f, global, frames, reads)
     let fd = self.defs.fns[f]
     let base = self.pkgs[fd.pkg].files[fd.file].ast.items[fd.item].span.lo
     match load_cached(join_path(cache_dir, key + ".json"), base) {

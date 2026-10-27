@@ -229,6 +229,178 @@ fn Frames.compute(&mut self, f: Int, i: Int) -> MutFrame {
   return frame
 }
 
+// ---------- reads ----------
+
+// What a pure function's result can depend on: the parts of each parameter its body reads.
+// A call is modeled as a function of those parts alone, so two calls that agree on them get
+// the same result even where the rest of the arguments differ (a method reading two fields of
+// a large struct, called before and after another field changes). Read off the body like a
+// frame: a place rooted at the parameter is read whole, unless it is passed to a function,
+// which reads what its own body reads. Recursion, and anything without a body, reads all.
+
+struct Reads {
+  s: Sema
+  done: Map<(Int, Int), MutFrame>
+  active: Set<Int>
+}
+
+fn Reads.of(&mut self, f: Int, i: Int) -> MutFrame {
+  match self.done.get((f, i)) {
+    Some(fr) => {
+      return fr
+    }
+    None => {}
+  }
+  let fr = self.compute(f, i)
+  self.done.insert((f, i), fr)
+  return fr
+}
+
+fn Reads.compute(&mut self, f: Int, i: Int) -> MutFrame {
+  let fd = self.s.defs.fns[f]
+  let body = match self.s.bodies[f] {
+    Some(b) => b
+    None => {
+      return MutFrame.Whole
+    }
+  }
+  if !fd.has_body || i >= body.param_locals.len() {
+    return MutFrame.Whole
+  }
+  let param = body.param_locals[i]
+  let ast = self.s.pkgs[fd.pkg].files[fd.file].ast
+  let root = match ast.items[fd.item].kind {
+    Fn(d) => match d.body {
+      Some(b) => b
+      None => {
+        return MutFrame.Whole
+      }
+    }
+    _ => {
+      return MutFrame.Whole
+    }
+  }
+  if self.active.contains(f) {
+    return MutFrame.Whole
+  }
+  self.active.insert(f)
+  let tab = self.s.tables[fd.pkg][fd.file]
+  var frame = MutFrame.Paths([])
+  var stack = [root]
+  for !stack.is_empty() {
+    if frame == MutFrame.Whole {
+      break
+    }
+    let x = stack.pop().unwrap_or(0)
+    match place_path(ast, tab, x, param) {
+      Some(p) => {
+        frame = frame_add(frame, p)
+        index_exprs(ast, x, &mut stack)
+        continue
+      }
+      None => {}
+    }
+    match ast.exprs[x].kind {
+      Call(callee, args) => {
+        let target = match tab.expr_res[callee] {
+          Fn(g) | Method(g) => Some(g)
+          _ => None
+        }
+        var offset = 0
+        var receiver = false
+        match ast.exprs[callee].kind {
+          Field(base, _) => {
+            let on_type = match tab.expr_res[base] {
+              Type(_) => true
+              _ => false
+            }
+            let method = !on_type &&
+              match tab.expr_res[callee] {
+                Method(_) | IfaceMethod(_, _) => true
+                _ => false
+              }
+            let has_self = match target {
+              Some(g) => self.s.defs.fns[g].self_mode.is_some()
+              None => true
+            }
+            if method && has_self {
+              offset = 1
+              match place_path(ast, tab, base, param) {
+                Some(p) => {
+                  frame = self.passed(frame, p, target, 0)
+                  index_exprs(ast, base, &mut stack)
+                  receiver = true
+                }
+                None => {}
+              }
+            }
+          }
+          _ => {}
+        }
+        if !receiver {
+          stack.push(callee)
+        }
+        for k in 0..args.len() {
+          let a = args[k]
+          let inner = match ast.exprs[a].kind {
+            MutArg(e) => e
+            _ => a
+          }
+          match place_path(ast, tab, inner, param) {
+            Some(p) => {
+              frame = self.passed(frame, p, target, k + offset)
+              index_exprs(ast, inner, &mut stack)
+            }
+            None => stack.push(a)
+          }
+        }
+        continue
+      }
+      _ => {}
+    }
+    visit_children(ast, x, &mut stack)
+  }
+  let _ = self.active.remove(f)
+  return frame
+}
+
+/// The place at `p` passed as parameter `k` of `target`: what that function reads of it.
+fn Reads.passed(&mut self, frame: MutFrame, p: List<Int>, target: Option<Int>, k: Int) -> MutFrame {
+  return match target {
+    Some(g) => frame_add_frame(frame, p, self.of(g, k))
+    None => frame_add(frame, p)
+  }
+}
+
+/// The index expressions inside the place `e` (read like any other expression).
+fn index_exprs(ast: syntax.Ast, e: Int, stack: &mut List<Int>) {
+  match ast.exprs[e].kind {
+    Paren(x) => index_exprs(ast, x, &mut stack)
+    Field(base, _) | TupleField(base, _, _) => index_exprs(ast, base, &mut stack)
+    Index(base, index) => {
+      stack.push(index)
+      index_exprs(ast, base, &mut stack)
+    }
+    _ => {}
+  }
+}
+
+/// Every pure function's reads, for each parameter (the receiver of a method is 0).
+fn compute_reads(s: Sema) -> Map<(Int, Int), MutFrame> {
+  var rd = Reads { s: s, done: Map.new(), active: Set.new() }
+  for f in 0..rd.s.defs.fns.len() {
+    let fd = rd.s.defs.fns[f]
+    if fd.eff != 0 || !fd.has_body {
+      continue
+    }
+    let recv = if fd.self_mode.is_some() { 1 } else { 0 }
+    for i in 0..fd.params.len() + recv {
+      let _ = rd.of(f, i)
+    }
+  }
+  return rd.done
+}
+
 /// The field path from `param` to the place `e`, up to the first index (writing an element
 /// may change everything under the list).
 fn place_path(ast: syntax.Ast, tab: Tables, e: Int, param: Int) -> Option<List<Int>> {

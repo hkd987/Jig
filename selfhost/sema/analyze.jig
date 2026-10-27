@@ -331,7 +331,8 @@ pub fn vc_dump(dir: Str, std_dir: Str, std: Bool) -> Result<Str, Str> effects {f
     titles.push("fn " + s.fn_display_name(f) + " " + s.place(root, sp.lo, sp.hi))
   }
   let frames = compute_frames(s)
-  var g = new_gen(s, frames)
+  let reads = compute_reads(s)
+  var g = new_gen(s, frames, reads)
   var out = ""
   for i in 0..fns.len() {
     let vcs = match g.function(fns[i]) {

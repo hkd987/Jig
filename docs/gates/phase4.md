@@ -48,14 +48,15 @@ The PRD's proposed targets, measured on `main` (4-core Xeon, clang 18):
 | Bootstrap compiler regression per change | under 2% or sign-off | gated in CI (`bench/compare.py`) | met |
 | Runtime vs Rust, shared suite | within 10% | 0.89 by instructions, 0.97 wall clock ([phase 3](phase3.md)) | met |
 | Hello-world release binary | under 100 KB | 84 KB (72 KB stripped) | met |
-| Self-hosted vs bootstrap compiler, same corpus | equal or faster | 0.96 by instructions (CI gate 1.05); 1.18 by wall time | instructions only |
+| Self-hosted vs bootstrap compiler, same corpus | equal or faster | 0.94 by instructions (CI gate 1.05); 1.36 by wall time | instructions only |
 | Agent tasks reaching a verified build, vs Rust | equal or better | harness and tasks ready (`bench/agents`); no agent runs yet | not measured |
 | Agent iterations per task, vs Rust and TypeScript | equal or fewer | as above | not measured |
-| Std and compiler functions with proven contracts | over 80% | std 91%; jigc 1% (8 of 605 functions state contracts, and all 136 of their obligations prove) | std only |
+| Std and compiler functions with proven contracts | over 80% | std 91%; jigc 3% (31 of 1,069 functions state contracts, and all 31 prove completely, every function of the lexer among them) | std only |
 | Language reference size | fits in 10k tokens | about 6,000 | met |
 
-**Self-hosted speed.** By pass (`bench/selfhost.py --instructions`): lexer 0.95, parser
-0.63, checker 1.37, checker through C 1.02; geometric mean 0.96. Most of the closing came
+**Self-hosted speed.** By pass (`bench/selfhost.py --instructions --prove`, with jigc built
+as a real build is, after `jig prove`, so the checks its proofs discharge are gone): lexer
+0.92, parser 0.61, checker 1.33, checker through C 1.03; geometric mean 0.94. Most of the closing came
 from the language's implementation: a copy of a place now aliases it, with no reference
 count, while nothing can write, drop or move the place's root, so reading a type's or
 expression's kind out of a list no longer retains and releases its payload. The checker's
@@ -64,8 +65,9 @@ strings where the bootstrap compiler compares interned symbols. Values now also 
 their last use (an owned local is released after the statement that last reads it, counting
 reads of what borrows from it), and a function's return releases only the locals that may
 still hold a value, which removed most of the release calls in large functions. Wall time
-is further behind (1.18), because jigc's nodes use 64-bit fields and the bootstrap compiler parses on
-a second thread.
+is further behind (1.36; 1.29 for the build before the lexer's contracts, on the same
+machine), because jigc's nodes use 64-bit fields and the bootstrap compiler parses on a
+second thread.
 
 **Agent measures.** `bench/agents/run.py --agent CMD` runs an agent per task and language
 and reports tasks solved and turns. Its six tasks have reference solutions in all three
@@ -73,9 +75,14 @@ languages, checked in CI, but the agent runs themselves are not part of CI and h
 been done.
 
 **Compiler contracts.** The standard library meets the target; the compiler does not. The
-contracts jigc states (token spans ordered, the cursor only moving forward, the lexer's
-state consistent, literal decoding in range) all prove, but most of its 605 functions state
-none.
+lexer is proved completely: each of its 26 functions states a contract and every
+obligation in it proves, its traps included (the cursor stays in the source and only moves
+forward, tokens lie inside it and end with `Eof`, global offsets cannot overflow, literal
+decoding stays in range). That took one prover change, in both compilers: a call to a pure
+function that reads only scalars is a function of what it reads (read off its body like a
+frame), so `self.at(i)` gives the same character twice even after other fields of the lexer
+changed. Most of jigc's 1,069 functions state no contract yet, and those in the checker and
+back end index the program's arenas, where proofs need invariants on the indices.
 
 ## The alpha
 

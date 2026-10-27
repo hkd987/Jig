@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use vc::{Base, ObKind};
 
 /// Bump when the encoding changes, so stale cached proofs are not reused.
-const VC_VERSION: &str = "vc-6";
+const VC_VERSION: &str = "vc-7";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
@@ -228,7 +228,7 @@ fn contract_refs(prog: &Program, f: FnId, out: &mut Vec<FnId>) {
 /// (transitively through contracts), every type predicate, the solver and the encoding.
 type FrameMap = FxHashMap<(FnId, usize), frame::Frame>;
 
-fn cache_key(prog: &Program, f: FnId, global: &str, frames: &FrameMap) -> String {
+fn cache_key(prog: &Program, f: FnId, global: &str, frames: &FrameMap, reads: &FrameMap) -> String {
     let fd = &prog.defs.fns[f];
     let pkg = &prog.pkgs[fd.pkg];
     let item = pkg.ast.items[fd.item];
@@ -244,7 +244,15 @@ fn cache_key(prog: &Program, f: FnId, global: &str, frames: &FrameMap) -> String
         deps.push(g);
         contract_refs(prog, g, &mut work);
     }
-    let mut texts: Vec<String> = deps.into_iter().map(|g| contract_text(prog, g)).collect();
+    let mut texts: Vec<String> = deps.iter().map(|&g| contract_text(prog, g)).collect();
+    // What the pure functions it calls, directly or in contracts, read of their arguments.
+    for &g in &deps {
+        for i in 0..=prog.defs.fns[g].params.len() {
+            if let Some(fr) = reads.get(&(g, i)) {
+                texts.push(format!("reads {} {i} {}", contract_text(prog, g), fr.summary()));
+            }
+        }
+    }
     // What direct callees may change in their `&mut` arguments (read off their bodies).
     for &g in prog.bodies[f].as_ref().map(|b| b.refs.as_slice()).unwrap_or(&[]) {
         for i in 0..=prog.defs.fns[g].params.len() {
@@ -373,9 +381,10 @@ pub fn cached_proven(prog: &Program, cache_dir: &std::path::Path) -> Proven {
     let solver = smt::solver_version().unwrap_or_default();
     let global = global_key(prog, &solver);
     let frames = frame::compute_all(prog);
+    let reads = frame::compute_reads(prog);
     let mut fns = Vec::new();
     for f in targets(prog, None, false) {
-        let key = cache_key(prog, f, &global, &frames);
+        let key = cache_key(prog, f, &global, &frames, &reads);
         let base = prog.pkgs[prog.defs.fns[f].pkg].ast.items[prog.defs.fns[f].item].span.lo;
         if let Some(obs) = load_cached(&cache_dir.join(format!("{key}.json")), base) {
             fns.push(FnReport { fid: f, name: String::new(), obligations: obs, cached: true });
@@ -452,10 +461,11 @@ pub fn prove(prog: &mut Program, opts: &ProveOpts) -> Result<Report, String> {
     let global = global_key(prog, &solver_name);
     let fns = targets(prog, opts.filter.as_deref(), opts.std);
     let frames = frame::compute_all(prog);
+    let reads = frame::compute_reads(prog);
     // Keys and cached results first (needs only shared access).
     let mut plan = Vec::new();
     for &f in &fns {
-        let key = cache_key(prog, f, &global, &frames);
+        let key = cache_key(prog, f, &global, &frames, &reads);
         let fd = &prog.defs.fns[f];
         let base = prog.pkgs[fd.pkg].ast.items[fd.item].span.lo;
         let name = fd.display_name(&prog.defs, &prog.tys);
@@ -470,6 +480,7 @@ pub fn prove(prog: &mut Program, opts: &ProveOpts) -> Result<Report, String> {
     {
         let mut gen = vc::Gen::new(prog);
         gen.frames = frames;
+        gen.reads = reads;
         for (f, key, base, name, cached) in plan {
             if let Some(obs) = cached {
                 reports.push(Some(FnReport { fid: f, name, obligations: obs, cached: true }));

@@ -107,7 +107,9 @@ tests; generated property and fuzz tests for whatever isn't proved.
 - [x] VC generation from the typed AST: `requires`, `ensures` (`result`, `old`), loop
       `invariant`, struct `invariant`, refinements, `assert`, safety obligations (overflow,
       bounds, division, `unwrap`, `panic` reachability). Encoding in D21.
-- [x] Modular proofs: callers see callees' contracts, never bodies.
+- [x] Modular proofs: callers see callees' contracts, and of their bodies only what they
+      can write and, for pure functions, which scalars they read (so a call is a function
+      of those).
 - [x] SMT-LIB backend over a pinned Z3 process (solver-agnostic text interface, so cvc5
       stays an option); timeouts; counterexamples mapped back to source values; one solver
       per core, reset per function so results are deterministic.
@@ -187,7 +189,7 @@ and 0.1.0-alpha is ready to tag (`.github/workflows/release.yml`).
       expression and pattern) matches on every example, UI and run test, `jigc` itself and
       300 semantic mutations raising over fifty error codes (`compiler/tests/selfhost.rs`).
       `bench/selfhost.py` compares speed on the same corpus (CI gate: instruction ratio at
-      most 1.05, now 0.96); jigc is at 0.95 (lexer), 0.63 (parser), 1.37 (checker) and 1.02
+      most 1.05, now 0.94); jigc is at 0.92 (lexer), 0.61 (parser), 1.33 (checker) and 1.03
       (checker through C) of the bootstrap compiler's instructions. MIR lowering, the ownership analyses and the C back
       end are done too: `jigc c` prints byte-identical C to `jig debug c` for every example,
       run test, agent benchmark solution and `jigc` itself, and `jigc` compiles itself to a

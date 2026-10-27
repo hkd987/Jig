@@ -12,7 +12,8 @@ declared effects, `Option` and `Result` with `?`, and mutable value semantics wi
 only on parameters. No nil, no zero values, no implicit conversions, no GC.
 
 **Verification.** Contracts and safety (overflow, bounds, division) proved per function by
-Z3 against callees' contracts, cached by content so one edit re-proves one function;
+Z3 against callees' contracts (and, read off their bodies, what they write and, for pure
+functions, what they read), cached by content so one edit re-proves one function;
 counterexamples are replayed to confirm them. Whatever does not prove stays a runtime
 check and becomes a generated property test with shrinking. Gherkin scenarios bind to
 typed step functions at compile time and run as tests. Unreachable functions, unread
@@ -39,5 +40,6 @@ C compiler and regenerates itself byte for byte. It runs tests and proves contra
 same results as the Rust compiler too.
 
 **Not yet.** `jigc` has no full command line, so
-the `jig` command is still the Rust compiler. Agent benchmark results, contracts on the
-compiler's own passes, and self-hosted speed parity are open (`docs/gates/phase4.md`).
+the `jig` command is still the Rust compiler. Agent benchmark results, contracts on most of
+the compiler (its lexer is proved completely), and self-hosted speed parity are open
+(`docs/gates/phase4.md`).

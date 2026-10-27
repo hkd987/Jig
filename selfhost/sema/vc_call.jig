@@ -301,8 +301,10 @@ fn Gen.contract_call_inner(
       None => {}
     }
   }
-  // The result: an uninterpreted function of the arguments when the callee is pure and
-  // everything is scalar (so equal arguments give equal results), else fresh.
+  // The result: when the callee is pure, returns a scalar and reads only scalars of its
+  // arguments, an uninterpreted function of what it reads (so equal arguments give equal
+  // results, a method on a struct included), else fresh. Lists stay out: a function of arrays
+  // is slow to solve.
   var has_mut = false
   for a in args {
     match a {
@@ -310,48 +312,78 @@ fn Gen.contract_call_inner(
       _ => {}
     }
   }
-  var sargs: List<(Str, Str)> = []
-  var all_scalar = true
-  for a in args {
-    match a.value() {
-      Leaf(l) => if l.depth == 0 {
-        sargs.push((l.t, self.sort(l.base, 0)))
-      } else {
-        all_scalar = false
-        break
-      }
-      _ => {
-        all_scalar = false
-        break
-      }
-    }
-  }
   let fresh_r = self.fresh_at(t, "r", 0)
   var result = Sv.Unit
   var modeled = false
-  if pure && !has_mut && all_scalar && inst.is_empty() {
+  if pure && !has_mut && inst.is_empty() {
     match fresh_r {
       Leaf(rl) => {
-        let rs = self.sort(rl.base, 0)
-        var sorts: List<Str> = []
-        var terms: List<Str> = []
-        for (tm, so) in sargs {
-          sorts.push(so)
-          terms.push(tm)
+        var ls: List<Leaf> = []
+        for k in 0..args.len() {
+          let v = args[k].value()
+          // Only the parts the callee reads; all of it if a path does not fit.
+          var parts: List<Sv> = []
+          var fits = false
+          match self.reads.get((f, k)) {
+            Some(Paths(ps)) => {
+              fits = true
+              for p in ps {
+                match sub_value(v, p) {
+                  Some(x) => parts.push(x)
+                  None => {
+                    fits = false
+                    break
+                  }
+                }
+              }
+            }
+            _ => {}
+          }
+          if fits {
+            for x in parts {
+              sv_leaves(x, &mut ls)
+            }
+          } else {
+            sv_leaves(v, &mut ls)
+          }
         }
-        let fnum = self.fn_num(f)
-        let fname_smt = self.fun("fn_" + fnum.str(), sorts, rs)
-        let app = if sargs.is_empty() {
-          fname_smt
-        } else {
-          "(" + fname_smt + " " + terms.join(" ") + ")"
+        var scalar = true
+        for l in ls {
+          if l.depth > 0 {
+            scalar = false
+            break
+          }
         }
-        let v = Sv.Leaf(Leaf { t: self.define(rs, app), base: rl.base, depth: 0 })
-        for fct in self.wf_facts(v) {
-          self.assume(&mut cst, fct)
+        if scalar {
+          var sorts: List<Str> = []
+          var terms: List<Str> = []
+          for l in ls {
+            sorts.push(self.sort(l.base, 0))
+            terms.push(l.t)
+          }
+          let rs = self.sort(rl.base, 0)
+          let name = "fn_" + self.fn_num(f).str()
+          // Values of one type have one shape, so one signature per function; a mismatch
+          // falls back to a fresh result rather than reach the solver.
+          let sig = "sig " + name + " (" + sorts.join(" ") + ") " + rs
+          if !self.declared.contains("fun " + name) {
+            self.declared.insert(sig)
+          }
+          if self.declared.contains(sig) {
+            let fname_smt = self.fun(name, sorts, rs)
+            let app = if ls.is_empty() {
+              fname_smt
+            } else {
+              "(" + fname_smt + " " + terms.join(" ") + ")"
+            }
+            let v = Sv.Leaf(Leaf { t: self.define(rs, app), base: rl.base, depth: 0 })
+            for fct in self.wf_facts(v) {
+              self.assume(&mut cst, fct)
+            }
+            result = v
+            modeled = true
+          }
         }
-        result = v
-        modeled = true
       }
       _ => {}
     }

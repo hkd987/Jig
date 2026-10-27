@@ -40,10 +40,18 @@ struct Lexer {
   stack: List<Char>
   line_has_code: Bool
   invariant n == s.len()
+  invariant i >= 0 && i <= n
+  invariant base >= 0 && base <= MAX_OFFSET - n
 }
 
-/// Lex `src`, whose first byte is at global offset `base`.
-fn lex(src: Str, base: Int) -> Lexed {
+/// Global source offsets stay below 2^62, so offset arithmetic cannot overflow.
+const MAX_OFFSET: Int = 4611686018427387904
+
+/// Lex `src`, whose first byte is at global offset `base`. The tokens end with `Eof`.
+fn lex(src: Str, base: Int) -> Lexed
+  requires base >= 0 && base <= MAX_OFFSET - src.len()
+  ensures result.tokens.len() > 0 && result.tokens[result.tokens.len() - 1].kind == Kind.Eof
+{
   var lx = Lexer {
     s: src
     n: src.len()
@@ -65,23 +73,33 @@ fn lex(src: Str, base: Int) -> Lexed {
   }
 }
 
-fn is_digit(c: Char) -> Bool {
+fn is_digit(c: Char) -> Bool
+  ensures result == (c >= '0' && c <= '9')
+{
   return c >= '0' && c <= '9'
 }
 
-fn is_alpha(c: Char) -> Bool {
+fn is_alpha(c: Char) -> Bool
+  ensures result == ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))
+{
   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
-fn is_word(c: Char) -> Bool {
+fn is_word(c: Char) -> Bool
+  ensures result == (is_alpha(c) || is_digit(c) || c == '_')
+{
   return is_alpha(c) || is_digit(c) || c == '_'
 }
 
-fn is_hex(c: Char) -> Bool {
+fn is_hex(c: Char) -> Bool
+  ensures result == ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))
+{
   return is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }
 
-fn is_blank(c: Char) -> Bool {
+fn is_blank(c: Char) -> Bool
+  ensures result == (c == ' ' || c == '\t' || c == '\r')
+{
   return c == ' ' || c == '\t' || c == '\r'
 }
 
@@ -104,7 +122,10 @@ fn utf8_len(b: Int) -> Int
   return 1
 }
 
-fn hex_value(c: Char) -> Int {
+fn hex_value(c: Char) -> Int
+  requires is_hex(c)
+  ensures result >= 0 && result < 16
+{
   if is_digit(c) {
     return c as Int - '0' as Int
   }
@@ -115,42 +136,68 @@ fn hex_value(c: Char) -> Int {
 }
 
 /// The byte at `i` as a character (`'\0'` past the end).
-fn Lexer.at(self, i: Int) -> Char {
+fn Lexer.at(self, i: Int) -> Char
+  ensures result == '\0' || (i >= 0 && i < self.n)
+{
   if i < 0 || i >= self.n {
     return '\0'
   }
   return self.s[i] as Char
 }
 
-fn Lexer.peek(self, k: Int) -> Char {
+fn Lexer.peek(self, k: Int) -> Char
+  requires k >= 0 && k <= 3
+  ensures result == '\0' || self.i + k < self.n
+{
   return self.at(self.i + k)
 }
 
+/// The end of the character at `i`: past its UTF-8 sequence, but not past the source.
+fn Lexer.char_end(self, i: Int) -> Int
+  requires i >= 0 && i < self.n
+  ensures result > i && result <= self.n
+{
+  let end = i + utf8_len(self.s[i] as Int)
+  if end > self.n {
+    return self.n
+  }
+  return end
+}
+
 fn Lexer.push(&mut self, kind: Kind, lo: Int, hi: Int)
-  requires lo <= hi
+  requires lo >= 0 && lo <= hi && hi <= self.n
+  ensures self.tokens.len() == old(self.tokens.len()) + 1
 {
   self.tokens.push(Token { kind: kind, lo: self.base + lo, hi: self.base + hi })
   self.line_has_code = true
 }
 
 /// An inserted statement end: zero width, and not code on the line.
-fn Lexer.push_semi(&mut self, at: Int) {
+fn Lexer.push_semi(&mut self, at: Int)
+  requires at >= 0 && at <= self.n
+{
   let p = self.base + at
   self.tokens.push(Token { kind: Kind.Semi, lo: p, hi: p })
 }
 
-fn Lexer.err(&mut self, code: Str, lo: Int, hi: Int, msg: Str) {
+fn Lexer.err(&mut self, code: Str, lo: Int, hi: Int, msg: Str)
+  requires lo >= 0 && lo <= hi && hi <= self.n
+{
   self.errors.push(Diag { code: code, lo: self.base + lo, hi: self.base + hi, msg: msg })
 }
 
-fn Lexer.newlines_significant(self) -> Bool {
+fn Lexer.newlines_significant(self) -> Bool
+  ensures result || !self.stack.is_empty()
+{
   return match self.stack.last() {
     Some(c) => c != '(' && c != '['
     None => true
   }
 }
 
-fn Lexer.last_ends_statement(self) -> Bool {
+fn Lexer.last_ends_statement(self) -> Bool
+  ensures !result || !self.tokens.is_empty()
+{
   return match self.tokens.last() {
     Some(t) => t.kind.ends_statement()
     None => false
@@ -158,15 +205,19 @@ fn Lexer.last_ends_statement(self) -> Bool {
 }
 
 /// Does the text after the line break before `start` continue the previous expression?
-fn Lexer.continues_on_next_line(self, start: Int) -> Bool {
+fn Lexer.continues_on_next_line(self, start: Int) -> Bool
+  requires start >= 0 && start <= self.n
+{
   var j = start
-  for {
-    for j < self.n && (is_blank(self.at(j)) || self.at(j) == '\n') {
+  for invariant j >= start && j <= self.n {
+    for j < self.n && (is_blank(self.at(j)) || self.at(j) == '\n')
+      invariant j >= start && j <= self.n
+    {
       j += 1
     }
     // Skip full-line comments between the lines.
     if j + 1 < self.n && self.at(j) == '/' && self.at(j + 1) == '/' {
-      for j < self.n && self.at(j) != '\n' {
+      for j < self.n && self.at(j) != '\n' invariant j >= start && j <= self.n {
         j += 1
       }
       continue
@@ -178,7 +229,9 @@ fn Lexer.continues_on_next_line(self, start: Int) -> Bool {
   return (c == '.' && d != '.') || (c == '&' && d == '&') || (c == '|' && d == '|')
 }
 
-fn Lexer.newline(&mut self, at: Int) {
+fn Lexer.newline(&mut self, at: Int)
+  requires self.at(at) == '\n'
+{
   if self.newlines_significant() &&
     self.last_ends_statement() &&
     !self.continues_on_next_line(at + 1) {
@@ -186,7 +239,7 @@ fn Lexer.newline(&mut self, at: Int) {
   }
   // A blank line (only whitespace) after some content.
   var j = at + 1
-  for j < self.n && is_blank(self.at(j)) {
+  for j < self.n && is_blank(self.at(j)) invariant j > at && j <= self.n {
     j += 1
   }
   if j < self.n && self.at(j) == '\n' && (!self.tokens.is_empty() || !self.comments.is_empty()) {
@@ -195,7 +248,9 @@ fn Lexer.newline(&mut self, at: Int) {
   self.line_has_code = false
 }
 
-fn Lexer.run(&mut self) {
+fn Lexer.run(&mut self)
+  ensures self.tokens.len() > 0 && self.tokens[self.tokens.len() - 1].kind == Kind.Eof
+{
   for self.i < self.n {
     let c = self.at(self.i)
     let start = self.i
@@ -206,11 +261,11 @@ fn Lexer.run(&mut self) {
       self.i += 1
     } else if c == '/' && self.peek(1) == '/' {
       let doc = self.peek(2) == '/' && self.peek(3) != '/'
-      for self.i < self.n && self.at(self.i) != '\n' {
+      for self.i < self.n && self.at(self.i) != '\n' invariant self.i >= start {
         self.i += 1
       }
       var hi = self.i
-      for hi > start && is_blank(self.at(hi - 1)) {
+      for hi > start && is_blank(self.at(hi - 1)) invariant hi >= start && hi <= self.i {
         hi -= 1
       }
       self.comments.push(
@@ -222,7 +277,9 @@ fn Lexer.run(&mut self) {
         },
       )
     } else if is_alpha(c) || c == '_' {
-      for self.i < self.n && is_word(self.at(self.i)) {
+      for self.i < self.n && is_word(self.at(self.i))
+        invariant self.i >= start && self.i <= self.n
+      {
         self.i += 1
       }
       let kind = keyword(self.s[start..self.i]).unwrap_or(Kind.Ident)
@@ -250,13 +307,16 @@ fn Lexer.digits(&mut self)
 {
   let start = self.i
   for self.i < self.n && (is_digit(self.at(self.i)) || self.at(self.i) == '_')
-    invariant self.i >= start
+    invariant self.i >= start && self.i <= self.n
   {
     self.i += 1
   }
 }
 
-fn Lexer.number(&mut self) {
+fn Lexer.number(&mut self)
+  requires is_digit(self.at(self.i))
+  ensures self.i > old(self.i)
+{
   let start = self.i
   let after_dot = match self.tokens.last() {
     Some(t) => t.kind == Kind.Dot
@@ -266,10 +326,12 @@ fn Lexer.number(&mut self) {
   let p1 = self.peek(1)
   if self.at(self.i) == '0' && (p1 == 'x' || p1 == 'b' || p1 == 'o') {
     self.i += 2
-    for self.i < self.n && is_word(self.at(self.i)) invariant self.i >= start {
+    for self.i < self.n && is_word(self.at(self.i)) invariant self.i > start && self.i <= self.n {
       self.i += 1
     }
   } else {
+    // The first digit, then the rest.
+    self.i += 1
     self.digits()
     if !after_dot && self.peek(0) == '.' && is_digit(self.peek(1)) {
       is_float = true
@@ -291,7 +353,7 @@ fn Lexer.number(&mut self) {
     }
     // A trailing identifier character makes the literal invalid (`12abc`).
     if self.i < self.n && (is_alpha(self.at(self.i)) || self.at(self.i) == '_') {
-      for self.i < self.n && is_word(self.at(self.i)) invariant self.i >= start {
+      for self.i < self.n && is_word(self.at(self.i)) invariant self.i > start && self.i <= self.n {
         self.i += 1
       }
       self.err("E0104", start, self.i, "invalid number literal")
@@ -302,7 +364,8 @@ fn Lexer.number(&mut self) {
 
 /// At a backslash.
 fn Lexer.escape(&mut self)
-  ensures self.i >= old(self.i)
+  requires self.at(self.i) == '\\'
+  ensures self.i > old(self.i)
 {
   let start = self.i
   self.i += 1
@@ -313,7 +376,9 @@ fn Lexer.escape(&mut self)
     self.i += 2
     let hs = self.i
     var value = 0
-    for self.i < self.n && is_hex(self.at(self.i)) invariant self.i >= hs {
+    for self.i < self.n && is_hex(self.at(self.i))
+      invariant self.i >= hs && self.i <= self.n && value >= 0
+    {
       if value < 1114112 {
         value = value * 16 + hex_value(self.at(self.i))
       }
@@ -332,15 +397,18 @@ fn Lexer.escape(&mut self)
       self.err("E0103", start, self.i, "invalid unicode escape")
     }
   } else if c != '\0' && c != '\n' {
-    self.i += utf8_len(c as Int)
+    self.i = self.char_end(self.i)
     self.err("E0103", start, self.i, "invalid escape sequence")
   }
 }
 
-fn Lexer.string(&mut self) {
+fn Lexer.string(&mut self)
+  requires self.at(self.i) == '"'
+  ensures self.i > old(self.i)
+{
   let start = self.i
   self.i += 1
-  for invariant self.i >= start {
+  for invariant self.i > start {
     if self.i >= self.n || self.at(self.i) == '\n' {
       self.err("E0102", start, self.i, "unterminated string literal")
       break
@@ -359,11 +427,14 @@ fn Lexer.string(&mut self) {
   self.push(Kind.Str, start, self.i)
 }
 
-fn Lexer.char_lit(&mut self) {
+fn Lexer.char_lit(&mut self)
+  requires self.at(self.i) == '\''
+  ensures self.i > old(self.i)
+{
   let start = self.i
   self.i += 1
   var count = 0
-  for invariant self.i >= start {
+  for invariant self.i > start && count >= 0 && count < self.i - start {
     if self.i >= self.n || self.at(self.i) == '\n' {
       self.err("E0106", start, self.i, "unterminated character literal")
       break
@@ -376,7 +447,7 @@ fn Lexer.char_lit(&mut self) {
     if c == '\\' {
       self.escape()
     } else {
-      self.i += utf8_len(c as Int)
+      self.i = self.char_end(self.i)
     }
     count += 1
   }
@@ -393,8 +464,14 @@ struct Punct {
   invariant len >= 1 && len <= 3
 }
 
-/// The punctuation token at the cursor, if any.
-fn punct_kind(c: Char, n1: Char, n2: Char) -> Option<Punct> {
+/// The punctuation token at the cursor, if any, from the next three characters: one of two
+/// or three characters needs the second (and third) to be there.
+fn punct_kind(c: Char, n1: Char, n2: Char) -> Option<Punct>
+  ensures match result {
+    Some(p) => (p.len == 1 || n1 != '\0') && (p.len <= 2 || n2 != '\0')
+    None => true
+  }
+{
   return match c {
     '(' => Some(Punct { kind: Kind.LParen, len: 1 })
     ')' => Some(Punct { kind: Kind.RParen, len: 1 })
@@ -492,14 +569,16 @@ fn punct_kind(c: Char, n1: Char, n2: Char) -> Option<Punct> {
   }
 }
 
-fn Lexer.punct(&mut self) {
+fn Lexer.punct(&mut self)
+  requires self.i < self.n
+  ensures self.i > old(self.i)
+{
   let start = self.i
   let c = self.at(self.i)
   match punct_kind(c, self.peek(1), self.peek(2)) {
     None => {
-      self.i += utf8_len(c as Int)
-      let end = min(self.i, self.n)
-      self.err("E0101", start, end, "unexpected character `" + self.s[start..end] + "`")
+      self.i = self.char_end(self.i)
+      self.err("E0101", start, self.i, "unexpected character `" + self.s[start..self.i] + "`")
     }
     Some(p) => {
       let kind = p.kind

@@ -121,12 +121,14 @@ pub fn vc(dir: &Path, std: bool) -> Result<String, String> {
         })
         .collect();
     let frames = crate::verify::frame::compute_all(&prog);
+    let reads = crate::verify::frame::compute_reads(&prog);
     let mut out = String::new();
     let mut places: Vec<Vec<String>> = Vec::new();
     let mut all = Vec::new();
     {
         let mut gen = crate::verify::vc::Gen::new(&mut prog);
         gen.frames = frames;
+        gen.reads = reads;
         for &f in &fns {
             all.push(gen.function(f));
         }

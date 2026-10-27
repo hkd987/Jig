@@ -35,7 +35,9 @@ struct EffectSet {
 }
 
 /// Parse `src`, whose first byte is at global offset `base`.
-pub fn parse(src: Str, base: Int) -> Parsed {
+pub fn parse(src: Str, base: Int) -> Parsed
+  requires base >= 0 && base <= MAX_OFFSET - src.len()
+{
   let lx = lex(src, base)
   var p = Parser {
     src: src

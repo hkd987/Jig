@@ -234,6 +234,18 @@ impl Sv {
     }
 }
 
+/// The part of `v` at a field path.
+fn sub_value<'v>(v: &'v Sv, path: &[u32]) -> Option<&'v Sv> {
+    let mut cur = v;
+    for &i in path {
+        cur = match cur {
+            Sv::Struct(_, xs) | Sv::Tuple(xs) => xs.get(i as usize)?,
+            _ => return None,
+        };
+    }
+    Some(cur)
+}
+
 /// The leaves of a value made only of integers, booleans and characters (in `fresh` order).
 fn scalar_leaves(v: &Sv) -> Option<Vec<(String, Base)>> {
     let mut ls = Vec::new();
@@ -390,6 +402,8 @@ pub struct Gen<'a> {
     depth: u32,
     /// What each function may change in each `&mut` parameter (see `frame.rs`).
     pub frames: FxHashMap<(FnId, usize), super::frame::Frame>,
+    /// What each pure function reads of each parameter (see `frame.rs`).
+    pub reads: FxHashMap<(FnId, usize), super::frame::Frame>,
 }
 
 impl<'a> Gen<'a> {
@@ -425,6 +439,7 @@ impl<'a> Gen<'a> {
             cur_ret: None,
             depth: 0,
             frames: FxHashMap::default(),
+            reads: FxHashMap::default(),
         }
     }
 
@@ -2934,35 +2949,62 @@ impl<'a> Gen<'a> {
                 }
             }
         }
-        // The result: an uninterpreted function of the arguments when the callee is pure
-        // and everything is scalar (so equal arguments give equal results), else fresh.
+        // The result: when the callee is pure, returns a scalar and reads only scalars of its
+        // arguments, an uninterpreted function of what it reads (so equal arguments give equal
+        // results, a method on a struct included), else fresh. Lists stay out: a function of
+        // arrays is slow to solve.
         let has_mut = args.iter().any(|a| matches!(a, Arg::Place(..)));
-        let scalar_args: Option<Vec<(String, String)>> = args
-            .iter()
-            .map(|a| match a.value() {
-                Sv::Leaf(l) if l.depth == 0 => Some(l.clone()),
-                _ => None,
-            })
-            .map(|l| l.map(|l| (l.t.clone(), self.sort(&l.base, 0))))
-            .collect();
-        let result = match (pure && !has_mut, scalar_args, self.fresh_at(t, "r", 0)) {
-            (true, Some(sargs), Sv::Leaf(rl)) if inst.is_empty() => {
-                let rs = self.sort(&rl.base, 0);
-                let sorts: Vec<String> = sargs.iter().map(|(_, s)| s.clone()).collect();
-                let fnum = self.fn_num(f);
-                let fname_smt = self.fun(&format!("fn_{fnum}"), &sorts, &rs);
-                let app = if sargs.is_empty() {
-                    fname_smt
-                } else {
-                    format!("({fname_smt} {})", sargs.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>().join(" "))
-                };
-                let v = Sv::Leaf(Leaf { t: self.define(&rs, app), base: rl.base, depth: 0 });
-                for fct in self.wf_facts(&v) {
-                    self.assume(&mut cst, fct);
+        let fresh_r = self.fresh_at(t, "r", 0);
+        let modeled = match &fresh_r {
+            Sv::Leaf(rl) if pure && !has_mut && inst.is_empty() => {
+                let mut ls = Vec::new();
+                for (k, a) in args.iter().enumerate() {
+                    let v = a.value();
+                    // Only the parts the callee reads; all of it if a path does not fit.
+                    let parts: Option<Vec<&Sv>> = match self.reads.get(&(f, k)) {
+                        Some(super::frame::Frame::Paths(ps)) => ps.iter().map(|p| sub_value(v, p)).collect(),
+                        _ => None,
+                    };
+                    match parts {
+                        Some(parts) => parts.iter().for_each(|x| x.leaves(&mut ls)),
+                        None => v.leaves(&mut ls),
+                    }
                 }
-                v
+                let ls: Vec<Leaf> = ls.into_iter().cloned().collect();
+                if ls.iter().all(|l| l.depth == 0) {
+                    let sorts: Vec<String> = ls.iter().map(|l| self.sort(&l.base, 0)).collect();
+                    let rs = self.sort(&rl.base, 0);
+                    let name = format!("fn_{}", self.fn_num(f));
+                    // Values of one type have one shape, so one signature per function; a
+                    // mismatch falls back to a fresh result rather than reach the solver.
+                    let sig = format!("sig {name} ({}) {rs}", sorts.join(" "));
+                    if !self.declared.contains(&format!("fun {name}")) {
+                        self.declared.insert(sig.clone());
+                    }
+                    if self.declared.contains(&sig) {
+                        let fname_smt = self.fun(&name, &sorts, &rs);
+                        let app = if ls.is_empty() {
+                            fname_smt
+                        } else {
+                            format!("({fname_smt} {})", ls.iter().map(|l| l.t.as_str()).collect::<Vec<_>>().join(" "))
+                        };
+                        let v = Sv::Leaf(Leaf { t: self.define(&rs, app), base: rl.base.clone(), depth: 0 });
+                        for fct in self.wf_facts(&v) {
+                            self.assume(&mut cst, fct);
+                        }
+                        Some(v)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             }
-            (_, _, v) => {
+            _ => None,
+        };
+        let result = match (modeled, fresh_r) {
+            (Some(v), _) => v,
+            (None, v) => {
                 let facts = self.wf_facts_deep(&v);
                 self.axioms.extend(facts);
                 v
