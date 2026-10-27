@@ -1,0 +1,282 @@
+// A stable 128-bit content hash for the proof cache, ported from the bootstrap compiler's
+// `util/fx.rs` (`StableHasher`): two 64-bit lanes with splitmix64 mixing. jigc's cache keys
+// are the bootstrap's, so both compilers share one `.jig/proofs`. Also a small JSON reader for
+// the cache's files.
+
+struct StableHasher {
+  a: U64
+  b: U64
+  len: U64
+}
+
+fn new_hasher() -> StableHasher {
+  return StableHasher { a: 2611923443488327891, b: 1376283091369227076, len: 0 }
+}
+
+fn mix64(x: U64) -> U64 {
+  // splitmix64 finalizer
+  var z = x
+  z = (z ^ (z >> 30)).wrapping_mul(13787848793156543929)
+  z = (z ^ (z >> 27)).wrapping_mul(10723151780598845931)
+  return z ^ (z >> 31)
+}
+
+fn rotl64(x: U64, n: Int) -> U64 {
+  return (x << n) | (x >> (64 - n))
+}
+
+fn StableHasher.word(&mut self, w: U64) {
+  self.a = mix64(self.a ^ w).wrapping_add(11400714819323198485)
+  self.b = mix64(rotl64(self.b, 29) ^ w.wrapping_mul(18397679294719823053))
+}
+
+fn StableHasher.str(&mut self, s: Str) {
+  let bs = s.bytes()
+  self.len = self.len.wrapping_add(bs.len() as U64)
+  var i = 0
+  for i + 8 <= bs.len() {
+    var w: U64 = 0
+    for k in 0..8 {
+      w = w | ((bs[i + k] as U64) << (8 * k))
+    }
+    self.word(w)
+    i += 8
+  }
+  var w: U64 = 0
+  let rest = bs.len() - i
+  for k in 0..rest {
+    w = w | ((bs[i + k] as U64) << (8 * k))
+  }
+  // The last byte of the padded tail carries the tail's length.
+  w = w ^ ((rest as U64) << 56)
+  self.word(w)
+}
+
+fn hex64(x: U64) -> Str {
+  let digits = "0123456789abcdef"
+  var out = ""
+  var k = 60
+  for k >= 0 {
+    let d = ((x >> k) & 15) as Int
+    out += digits[d..d + 1]
+    k -= 4
+  }
+  return out
+}
+
+/// The 128-bit hash as 32 hex digits.
+fn StableHasher.finish_hex(self) -> Str {
+  let a = mix64(self.a ^ self.len)
+  let b = mix64(self.b ^ rotl64(a, 17))
+  return hex64(a) + hex64(b)
+}
+
+// ---------- JSON ----------
+
+enum Json {
+  Null
+  Bool(b: Bool)
+  Num(n: Int)
+  Str(s: Str)
+  Arr(xs: List<Json>)
+  Obj(kv: List<(Str, Json)>)
+}
+
+fn Json.get(self, k: Str) -> Option<Json> {
+  match self {
+    Obj(kv) => {
+      for (key, v) in kv {
+        if key == k {
+          return Some(v)
+        }
+      }
+      return None
+    }
+    _ => {
+      return None
+    }
+  }
+}
+
+fn Json.as_str(self) -> Option<Str> {
+  return match self {
+    Str(s) => Some(s)
+    _ => None
+  }
+}
+
+fn Json.as_int(self) -> Option<Int> {
+  return match self {
+    Num(n) => Some(n)
+    _ => None
+  }
+}
+
+fn Json.as_bool(self) -> Option<Bool> {
+  return match self {
+    Bool(b) => Some(b)
+    _ => None
+  }
+}
+
+fn json_ws(cs: List<Char>, pos: &mut Int) {
+  for pos < cs.len() && (cs[pos] == ' ' || cs[pos] == '\n' || cs[pos] == '\r' || cs[pos] == '\t') {
+    pos += 1
+  }
+}
+
+fn hex_val(c: Char) -> Int {
+  let v = c as Int
+  if v >= 48 && v <= 57 {
+    return v - 48
+  }
+  if v >= 97 && v <= 102 {
+    return v - 87
+  }
+  if v >= 65 && v <= 70 {
+    return v - 55
+  }
+  return -1
+}
+
+fn json_string(cs: List<Char>, pos: &mut Int) -> Option<Str> {
+  pos += 1
+  var out: List<Char> = []
+  for pos < cs.len() {
+    let c = cs[pos]
+    pos += 1
+    if c == '"' {
+      return Some(Str.from_chars(out))
+    }
+    if c != '\\' {
+      out.push(c)
+      continue
+    }
+    if pos >= cs.len() {
+      return None
+    }
+    let e = cs[pos]
+    pos += 1
+    if e == 'n' {
+      out.push('\n')
+    } else if e == 't' {
+      out.push('\t')
+    } else if e == 'r' {
+      out.push('\r')
+    } else if e == 'u' {
+      if pos + 4 > cs.len() {
+        return None
+      }
+      var v = 0
+      for k in 0..4 {
+        let h = hex_val(cs[pos + k])
+        if h < 0 {
+          return None
+        }
+        v = v * 16 + h
+      }
+      pos += 4
+      if v >= 55296 && v <= 57343 {
+        return None
+      }
+      out.push(v as Char)
+    } else {
+      out.push(e)
+    }
+  }
+  return None
+}
+
+fn json_value(cs: List<Char>, pos: &mut Int) -> Option<Json> {
+  json_ws(cs, &mut pos)
+  if pos >= cs.len() {
+    return None
+  }
+  let c = cs[pos]
+  if c == '{' {
+    pos += 1
+    var kv: List<(Str, Json)> = []
+    json_ws(cs, &mut pos)
+    if pos < cs.len() && cs[pos] == '}' {
+      pos += 1
+      return Some(Json.Obj(kv))
+    }
+    for {
+      json_ws(cs, &mut pos)
+      if pos >= cs.len() || cs[pos] != '"' {
+        return None
+      }
+      let k = json_string(cs, &mut pos)?
+      json_ws(cs, &mut pos)
+      if pos >= cs.len() || cs[pos] != ':' {
+        return None
+      }
+      pos += 1
+      kv.push((k, json_value(cs, &mut pos)?))
+      json_ws(cs, &mut pos)
+      if pos < cs.len() && cs[pos] == ',' {
+        pos += 1
+        continue
+      }
+      if pos < cs.len() && cs[pos] == '}' {
+        pos += 1
+        return Some(Json.Obj(kv))
+      }
+      return None
+    }
+  }
+  if c == '[' {
+    pos += 1
+    var xs: List<Json> = []
+    json_ws(cs, &mut pos)
+    if pos < cs.len() && cs[pos] == ']' {
+      pos += 1
+      return Some(Json.Arr(xs))
+    }
+    for {
+      xs.push(json_value(cs, &mut pos)?)
+      json_ws(cs, &mut pos)
+      if pos < cs.len() && cs[pos] == ',' {
+        pos += 1
+        continue
+      }
+      if pos < cs.len() && cs[pos] == ']' {
+        pos += 1
+        return Some(Json.Arr(xs))
+      }
+      return None
+    }
+  }
+  if c == '"' {
+    return Some(Json.Str(json_string(cs, &mut pos)?))
+  }
+  var word: List<Char> = []
+  for pos < cs.len() &&
+    cs[pos] != ',' &&
+    cs[pos] != '}' &&
+    cs[pos] != ']' &&
+    cs[pos] != ' ' &&
+    cs[pos] != '\n' {
+    word.push(cs[pos])
+    pos += 1
+  }
+  let w = Str.from_chars(word)
+  if w == "true" {
+    return Some(Json.Bool(true))
+  }
+  if w == "false" {
+    return Some(Json.Bool(false))
+  }
+  if w == "null" {
+    return Some(Json.Null)
+  }
+  return match w.to_int() {
+    Some(n) => Some(Json.Num(n))
+    None => None
+  }
+}
+
+fn parse_json(s: Str) -> Option<Json> {
+  var pos = 0
+  return json_value(s.chars(), &mut pos)
+}

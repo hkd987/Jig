@@ -33,6 +33,8 @@ struct ObResult {
   span: syntax.Span
   msg: Str
   status: Status
+  /// Whether proving it may remove the runtime check at `span`.
+  elidable: Bool
   /// For failed contracts: what running the function on the interpreter showed.
   replay: Option<Replay>
   /// The counterexample's parameter values (integers as text), when they can be rebuilt.
@@ -43,6 +45,7 @@ struct FnReport {
   fid: Int
   name: Str
   obligations: List<ObResult>
+  cached: Bool
 }
 
 // ---------- solver responses ----------
@@ -475,6 +478,7 @@ fn read_results(all: List<FnVcs>, rs: List<Str>) -> List<List<ObResult>> {
           span: ob.span
           msg: ob.msg
           status: status
+          elidable: ob.elidable
           replay: None
           model: model
         },
@@ -498,29 +502,370 @@ fn Sema.prove_fns(self, std: Bool, filter: Str) -> List<Int> {
 
 /// Prove the program's functions (or, with `std`, the standard library's) whose name contains
 /// `filter`.
-fn prove_program(s: Sema, std: Bool, filter: Str, cwd: Str) -> Result<List<FnReport>, Str>
+fn prove_program(
+  s: Sema,
+  std_dir: Str,
+  std: Bool,
+  filter: Str,
+  cwd: Str,
+  cache_dir: Option<Str>,
+) -> Result<List<FnReport>, Str>
   effects {fs, env, ffi, clock}
 {
+  let solver = match solver_version() {
+    Some(v) => v
+    None => {
+      return Err("cannot run the SMT solver `" + solver_path() + "` (install z3 or set JIG_Z3)")
+    }
+  }
+  let global = s.global_key(std_dir, solver)
   let fns = s.prove_fns(std, filter)
   let frames = compute_frames(s)
   var g = new_gen(s, frames)
   var reports: List<FnReport> = []
+  // The functions solved now: (report index, cache key, span base).
+  var todo: List<(Int, Str, Int)> = []
   var all: List<FnVcs> = []
   for f in fns {
+    let key = g.s.cache_key(f, global, g.frames)
+    let fd = g.s.defs.fns[f]
+    let base = g.s.pkgs[fd.pkg].files[fd.file].ast.items[fd.item].span.lo
+    let name = g.s.fn_display_name(f)
+    let cached = match cache_dir {
+      Some(d) => load_cached(join_path(d, key + ".json"), base)
+      None => None
+    }
+    match cached {
+      Some(obs) => {
+        reports.push(FnReport { fid: f, name: name, obligations: obs, cached: true })
+        continue
+      }
+      None => {}
+    }
     match g.function(f) {
       Some(v) => {
-        reports.push(FnReport { fid: f, name: g.s.fn_display_name(f), obligations: [] })
+        todo.push((reports.len(), key, base))
+        reports.push(FnReport { fid: f, name: name, obligations: [], cached: false })
         all.push(v)
       }
       None => {}
     }
   }
-  let out = run_solver(solver_script(all, 2000))?
-  let results = read_results(all, split_responses(out))
-  for i in 0..reports.len() {
-    reports[i].obligations = results[i]
+  if !all.is_empty() {
+    let out = run_solver(solver_script(all, 2000))?
+    let results = read_results(all, split_responses(out))
+    for i in 0..todo.len() {
+      reports[todo[i].0].obligations = results[i]
+    }
   }
-  return Ok(replay_failures(g.s, reports, cwd))
+  reports = replay_failures(g.s, reports, cwd)
+  match cache_dir {
+    Some(d) => {
+      let _ = system("mkdir -p '" + d + "'")
+      for (idx, key, base) in todo {
+        // Timeouts are not cached: a faster machine (or a longer timeout) may prove them.
+        var timeout = false
+        for o in reports[idx].obligations {
+          timeout = timeout || o.status == Status.Unknown("timeout")
+        }
+        if !timeout {
+          let _ = fs.write(join_path(d, key + ".json"), cache_json(reports[idx].obligations, base))
+        }
+      }
+    }
+    None => {}
+  }
+  return Ok(reports)
+}
+
+// ---------- the proof cache ----------
+
+/// Bump when the encoding changes, so stale cached proofs are not reused (the bootstrap's).
+const VC_VERSION: Str = "vc-6"
+
+/// The bootstrap compiler's version (its `CARGO_PKG_VERSION`), part of every key.
+const JIG_VERSION: Str = "0.1.0-alpha"
+
+/// The solver's version line, part of every proof cache key.
+fn solver_version() -> Option<Str> effects {fs, env, ffi, clock} {
+  let dir = os.env("TMPDIR").unwrap_or("/tmp")
+  let out = join_path(dir, "jigc-solver-" + time.now_ns().str() + ".txt")
+  let code = system(solver_path() + " --version > '" + out + "' 2>/dev/null")
+  let text = fs.read(out)
+  let _ = system("rm -f '" + out + "'")
+  if code != 0 {
+    return None
+  }
+  return match text {
+    Ok(t) => Some(t.trim())
+    Err(_) => None
+  }
+}
+
+fn Sema.snippet(self, lo: Int, hi: Int) -> Str {
+  return match self.src_file_at(lo) {
+    Some(f) => f.text[lo - f.base..min(max(hi, lo) - f.base, f.text.len())]
+    None => ""
+  }
+}
+
+/// Facts shared by every key: the encoding, the solver, the standard library and all type
+/// declarations (struct invariants and refinement aliases).
+fn Sema.global_key(self, std_dir: Str, solver: Str) -> Str effects {fs} {
+  var h = new_hasher()
+  h.str(VC_VERSION)
+  h.str(JIG_VERSION)
+  h.str(solver)
+  for p in ["io", "fs", "os", "time", "rand", "math", "task", "sim", "net", "lists", "strings"] {
+    h.str("std/" + p)
+    h.str(p + ".jig")
+    h.str(fs.read(join_path(std_dir, p + ".jig")).unwrap_or(""))
+  }
+  for pkg in self.pkgs {
+    if pkg.is_std {
+      continue
+    }
+    for f in pkg.files {
+      for item in f.ast.items {
+        let typeish = match item.kind {
+          Struct(_, _, _) | TypeAlias(_, _) | Enum(_, _) => true
+          _ => false
+        }
+        if typeish {
+          h.str(self.snippet(item.span.lo, item.span.hi))
+        }
+      }
+    }
+  }
+  return h.finish_hex()
+}
+
+/// The text of a function's signature and contract (what its callers rely on).
+fn Sema.contract_text(self, f: Int) -> Str {
+  let fd = self.defs.fns[f]
+  let ast = self.pkgs[fd.pkg].files[fd.file].ast
+  let item = ast.items[fd.item]
+  let end = match item.kind {
+    Fn(d) => match d.body {
+      Some(b) => ast.exprs[b].span.lo
+      None => item.span.hi
+    }
+    _ => item.span.hi
+  }
+  return self.pkgs[fd.pkg].path + "|" + self.snippet(item.span.lo, end)
+}
+
+/// Functions referenced from a function's contract expressions.
+fn Sema.contract_refs(self, f: Int, out: &mut List<Int>) {
+  let fd = self.defs.fns[f]
+  let ast = self.pkgs[fd.pkg].files[fd.file].ast
+  let d = match ast.items[fd.item].kind {
+    Fn(d) => d
+    _ => {
+      return
+    }
+  }
+  var stack = d.pre
+  stack.extend(d.post)
+  for p in d.params {
+    match p.refine {
+      Some(r) => stack.push(r)
+      None => {}
+    }
+  }
+  let tab = self.tables[fd.pkg][fd.file]
+  for !stack.is_empty() {
+    let e = stack.pop().unwrap_or(0)
+    match ast.exprs[e].kind {
+      Call(callee, _) => match tab.expr_res[callee] {
+        Fn(g) | Method(g) => out.push(g)
+        _ => {}
+      }
+      _ => {}
+    }
+    visit_children(ast, e, &mut stack)
+  }
+}
+
+/// For cache keys: the parts of a parameter a function may change.
+fn frame_summary(f: MutFrame) -> Str {
+  return match f {
+    Whole => "*"
+    Paths(ps) => {
+      var parts: List<Str> = []
+      for p in ps {
+        var ns: List<Str> = []
+        for i in p {
+          ns.push(i.str())
+        }
+        parts.push(ns.join("."))
+      }
+      parts.join(",")
+    }
+  }
+}
+
+/// Everything a function's proof depends on: its own text, the contracts of what it calls
+/// (transitively through contracts), what its direct callees may change in `&mut` arguments,
+/// and the global facts.
+fn Sema.cache_key(self, f: Int, global: Str, frames: Map<(Int, Int), MutFrame>) -> Str {
+  let fd = self.defs.fns[f]
+  let item = self.pkgs[fd.pkg].files[fd.file].ast.items[fd.item]
+  var h = new_hasher()
+  h.str(global)
+  h.str(self.pkgs[fd.pkg].path)
+  h.str(self.snippet(item.span.lo, item.span.hi))
+  let refs = match self.bodies[f] {
+    Some(b) => b.refs
+    None => []
+  }
+  var seen: Set<Int> = Set.new()
+  var work = refs
+  var deps: List<Int> = []
+  for !work.is_empty() {
+    let g = work.pop().unwrap_or(0)
+    if seen.contains(g) {
+      continue
+    }
+    seen.insert(g)
+    if seen.len() > 512 {
+      continue
+    }
+    deps.push(g)
+    self.contract_refs(g, &mut work)
+  }
+  var texts: List<Str> = []
+  for g in deps {
+    texts.push(self.contract_text(g))
+  }
+  for g in refs {
+    for i in 0..self.defs.fns[g].params.len() + 1 {
+      match frames.get((g, i)) {
+        Some(fr) => texts.push(
+          "frame " + self.contract_text(g) + " " + i.str() + " " + frame_summary(fr),
+        )
+        None => {}
+      }
+    }
+  }
+  texts.sort()
+  for t in texts {
+    h.str(t)
+  }
+  return h.finish_hex()
+}
+
+fn ob_kind_named(s: Str) -> Option<ObKind> {
+  for k in [
+    ObKind.Precondition,
+    ObKind.Postcondition,
+    ObKind.LoopInvariant,
+    ObKind.StructInvariant,
+    ObKind.Refinement,
+    ObKind.Assert,
+    ObKind.Overflow,
+    ObKind.DivZero,
+    ObKind.Bounds,
+    ObKind.Unwrap,
+    ObKind.Panic,
+    ObKind.Cast,
+    ObKind.Shift,
+  ] {
+    if k.name() == s {
+      return Some(k)
+    }
+  }
+  return None
+}
+
+/// A cached function's results, if the file is there and readable.
+fn load_cached(path: Str, base: Int) -> Option<List<ObResult>> effects {fs} {
+  let src = match fs.read(path) {
+    Ok(t) => t
+    Err(_) => {
+      return None
+    }
+  }
+  let j = parse_json(src)?
+  let obs = match j.get("obligations")? {
+    Arr(xs) => xs
+    _ => {
+      return None
+    }
+  }
+  var out: List<ObResult> = []
+  for o in obs {
+    let kind = ob_kind_named(o.get("kind")?.as_str()?)?
+    let lo = o.get("lo")?.as_int()? + base
+    let hi = o.get("hi")?.as_int()? + base
+    let msg = o.get("msg")?.as_str()?
+    let elidable = o.get("elidable")?.as_bool()?
+    let st = o.get("status")?.as_str()?
+    var status = Status.Unknown(
+      match o.get("reason") {
+        Some(r) => r.as_str().unwrap_or("")
+        None => ""
+      },
+    )
+    if st == "proved" {
+      status = Status.Proved
+    } else if st == "failed" {
+      var cex: List<(Str, Str)> = []
+      match o.get("counterexample") {
+        Some(Obj(kv)) => {
+          for (k, v) in kv {
+            cex.push((k, v.as_str().unwrap_or("")))
+          }
+        }
+        _ => {}
+      }
+      status = Status.Failed(cex)
+    }
+    let replay = match o.get("replay") {
+      Some(r) => match r.as_str() {
+        Some(inputs) => if inputs == "not reproduced" {
+          Some(Replay.NotReproduced)
+        } else {
+          Some(Replay.Confirmed(inputs))
+        }
+        None => None
+      }
+      None => None
+    }
+    out.push(
+      ObResult {
+        kind: kind
+        span: syntax.Span { lo: lo, hi: hi }
+        msg: msg
+        status: status
+        elidable: elidable
+        replay: replay
+        model: None
+      },
+    )
+  }
+  return Some(out)
+}
+
+/// A function's results as its cache file (the bootstrap's format).
+fn cache_json(obs: List<ObResult>, base: Int) -> Str {
+  var parts: List<Str> = []
+  for o in obs {
+    var j = "{" + status_json(o.status)
+    j += ",\"kind\":" + json_str(o.kind.name())
+    j += ",\"lo\":" + (o.span.lo - base).str() + ",\"hi\":" + (o.span.hi - base).str()
+    j += ",\"msg\":" +
+      json_str(o.msg) +
+      ",\"elidable\":" +
+      (if o.elidable { "true" } else { "false" })
+    match o.replay {
+      Some(Confirmed(inputs)) => j += ",\"replay\":" + json_str(inputs)
+      Some(NotReproduced) => j += ",\"replay\":\"not reproduced\""
+      None => {}
+    }
+    parts.push(j + "}")
+  }
+  return "{\"obligations\":[" + parts.join(",") + "]}"
 }
 
 // ---------- replay ----------
@@ -744,10 +1089,14 @@ fn Interp.shrink_replay(
 
 /// Run functions whose contracts failed on the interpreter: first with the counterexample (when
 /// its inputs can be rebuilt), then with generated inputs. A run that fails the same check
-/// confirms a real bug; a counterexample that passes means a missing fact.
+/// confirms a real bug; a counterexample that passes means a missing fact. Cached results keep
+/// the replay they were stored with.
 fn replay_failures(s: Sema, reports: List<FnReport>, cwd: Str) -> List<FnReport> effects {ffi} {
   var todo = false
   for r in reports {
+    if r.cached {
+      continue
+    }
     for o in r.obligations {
       if o.kind.is_contract() && is_failed(o.status) {
         todo = true
@@ -762,6 +1111,9 @@ fn replay_failures(s: Sema, reports: List<FnReport>, cwd: Str) -> List<FnReport>
   for ri in 0..out.len() {
     let rep = out[ri]
     var any = false
+    if rep.cached {
+      continue
+    }
     for o in rep.obligations {
       any = any || (o.kind.is_contract() && is_failed(o.status))
     }
@@ -917,6 +1269,16 @@ fn Sema.contract_coverage(self, fs: List<FnReport>) -> (Int, Int) {
     }
   }
   return (with, proved)
+}
+
+fn cached_count(fs: List<FnReport>) -> Int {
+  var n = 0
+  for f in fs {
+    if f.cached {
+      n += 1
+    }
+  }
+  return n
 }
 
 fn failed_contracts(fs: List<FnReport>) -> Int {
@@ -1078,7 +1440,9 @@ fn Sema.render_report(self, fs: List<FnReport>, verbose: Bool, millis: Int, cwd:
     stot.str() +
     " safety obligations in " +
     fs.len().str() +
-    " functions (0 from cache), " +
+    " functions (" +
+    cached_count(fs).str() +
+    " from cache), " +
     (hundredths / 100).str() +
     "." +
     (if frac.len() < 2 { "0" + frac } else { frac }) +
@@ -1113,7 +1477,9 @@ fn Sema.summary_json(self, fs: List<FnReport>, millis: Int) -> Str {
     with.str() +
     ",\"functions_with_contracts_proved\":" +
     proved.str() +
-    ",\"cached\":0,\"millis\":" +
+    ",\"cached\":" +
+    cached_count(fs).str() +
+    ",\"millis\":" +
     millis.str() +
     "}"
 }

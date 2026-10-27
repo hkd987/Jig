@@ -1184,7 +1184,13 @@ fn compare_prove(exe: &Path, std_dir: &Path, dir: &Path) -> Option<String> {
     let (_, expected) =
         output_within(Command::new(jig).args(["prove", "--json", "--no-cache"]).arg(dir).current_dir(&root), 120)?;
     let out = output_within(
-        Command::new(exe).arg("prove").arg(dir).arg(std_dir).arg("--json").current_dir(&root).env("PWD", &root),
+        Command::new(exe)
+            .arg("prove")
+            .arg(dir)
+            .arg(std_dir)
+            .args(["--json", "--no-cache"])
+            .current_dir(&root)
+            .env("PWD", &root),
         120,
     );
     let Some((_, actual)) = out else { return Some(format!("{}: jigc prove timed out", dir.display())) };
@@ -1251,4 +1257,84 @@ fn jigc_proofs_match_bootstrap() {
     }
     assert!(compared >= 30, "only {compared} mutations checked");
     assert!(failures.is_empty(), "{} cases differ:\n{}", failures.len(), failures.join("\n"));
+}
+
+/// The proof cache is shared: `jigc prove` writes the same `.jig/proofs` files (same keys,
+/// same contents) as `jig prove`, and each compiler's report from the other's warm cache is
+/// the same as its own.
+#[test]
+fn jigc_proof_cache_matches_bootstrap() {
+    if !have_cc() || jig::verify::smt::solver_version().is_none() {
+        eprintln!("skipping: no C compiler or no SMT solver");
+        return;
+    }
+    let root = repo_root();
+    let exe = jigc();
+    let std_dir = std::fs::canonicalize(root.join("compiler/std")).unwrap();
+    let work = std::fs::canonicalize(PathBuf::from(env!("CARGO_TARGET_TMPDIR"))).unwrap().join("selfhost-cache");
+    let _ = std::fs::remove_dir_all(&work);
+    let jig = env!("CARGO_BIN_EXE_jig");
+    let listing = |dir: &Path| -> Vec<(String, Vec<u8>)> {
+        let mut v: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir.join(".jig/proofs"))
+            .map(|rd| {
+                rd.map(|e| {
+                    let p = e.unwrap().path();
+                    (p.file_name().unwrap().to_string_lossy().to_string(), std::fs::read(&p).unwrap())
+                })
+                .collect()
+            })
+            .unwrap_or_default();
+        v.sort();
+        v
+    };
+    let report = |cmd: &mut Command| -> String {
+        let out = cmd.output().unwrap();
+        let s = String::from_utf8_lossy(&out.stdout).to_string();
+        s.lines()
+            .map(|l| match l.find(",\"millis\":") {
+                Some(i) => format!("{}}}", &l[..i]),
+                None => l.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let mut failures = Vec::new();
+    let rootc = std::fs::canonicalize(&root).unwrap();
+    for (i, src) in
+        ["compiler/tests/prove/basics", "compiler/tests/prove/semantics", "examples/gate1"].iter().enumerate()
+    {
+        // One directory, so both reports name the same files.
+        let d = work.join(format!("case{i}"));
+        copy_dir(&root.join(src), &d);
+        let jig_prove = || report(Command::new(jig).args(["prove", "--json"]).arg(&d).current_dir(&rootc));
+        let jigc_prove = || {
+            report(
+                Command::new(exe)
+                    .arg("prove")
+                    .arg(&d)
+                    .arg(&std_dir)
+                    .arg("--json")
+                    .current_dir(&rootc)
+                    .env("PWD", &rootc),
+            )
+        };
+        let cold_jig = jig_prove();
+        let from_jig = listing(&d);
+        let warm_jigc = jigc_prove();
+        let _ = std::fs::remove_dir_all(d.join(".jig"));
+        let cold_jigc = jigc_prove();
+        let from_jigc = listing(&d);
+        let warm_jig = jig_prove();
+        if cold_jig != cold_jigc {
+            failures.push(format!("{src}: cold reports differ"));
+        }
+        if from_jig.is_empty() || from_jig != from_jigc {
+            failures.push(format!("{src}: caches differ ({} and {} files)", from_jig.len(), from_jigc.len()));
+        }
+        // Each read the other's cache.
+        if warm_jig != warm_jigc || !warm_jig.contains(&format!("\"cached\":{}", from_jig.len())) {
+            failures.push(format!("{src}: warm reports differ"))
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

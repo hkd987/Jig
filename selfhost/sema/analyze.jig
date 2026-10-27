@@ -362,8 +362,9 @@ pub fn vc_dump(dir: Str, std_dir: Str, std: Bool) -> Result<Str, Str> effects {f
   return Ok(out)
 }
 
-/// `jigc prove DIR STD [--json] [--verbose] [--std] [FILTER]`: prove the package in DIR (or the
-/// standard library) as `jig prove --no-cache` does, printing the same report. Returns the
+/// `jigc prove DIR STD [--json] [--verbose] [--std] [--no-cache] [FILTER]`: prove the package in
+/// DIR (or the standard library) as `jig prove` does, printing the same report and sharing its
+/// proof cache (`.jig/proofs` in the project). Returns the
 /// output and the exit code.
 pub fn prove_cmd(dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> (Str, Int)
   effects {fs, env, ffi, clock}
@@ -404,7 +405,14 @@ pub fn prove_cmd(dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> (Str, In
     return ("error: " + dir + " has errors\n", 1)
   }
   let start = time.now_ms()
-  let reports = match prove_program(s, std, filter, cwd) {
+  let cache_dir = if flags.contains("--no-cache") {
+    None
+  } else if std {
+    Some(join_path(join_path(cwd, ".jig"), "proofs"))
+  } else {
+    Some(join_path(join_path(find_project_root(dir).unwrap_or(dir), ".jig"), "proofs"))
+  }
+  let reports = match prove_program(s, std_dir, std, filter, cwd, cache_dir) {
     Ok(r) => r
     Err(e) => {
       return ("error: " + e + "\n", 2)
