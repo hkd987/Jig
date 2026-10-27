@@ -914,7 +914,9 @@ fn Cg.gen_glue(&mut self, t: Int, kind: Int, name: Str, c: Str) {
 }
 
 /// Field-by-field equality or ordering of a struct or tuple.
-fn Cg.eq_fields(&mut self, t: Int, kind: Int, is_eq: Bool) -> Str {
+fn Cg.eq_fields(&mut self, t: Int, kind: Int, is_eq: Bool) -> Str
+  ensures !result.is_empty()
+{
   var s = ""
   let fs = self.field_tys(t)
   for i in 0..fs.len() {

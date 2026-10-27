@@ -20,7 +20,10 @@ fn Sema.files(self) -> Files {
   return Files { files: out }
 }
 
-fn Files.at(self, pos: Int) -> Option<SrcFile> {
+fn Files.at(self, pos: Int) -> Option<SrcFile>
+  ensures result.is_none() ||
+    (result.unwrap().base <= pos && pos - result.unwrap().base <= result.unwrap().text.len())
+{
   for f in self.files {
     if f.base <= pos && pos <= f.base + f.text.len() {
       return Some(f)

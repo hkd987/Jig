@@ -1225,24 +1225,32 @@ fn Cg.ffi_call(
   }
 }
 
-fn Cg.opt_some(&mut self, opt_ty: Int, v: Str) -> Str {
+fn Cg.opt_some(&mut self, opt_ty: Int, v: Str) -> Str
+  ensures !result.is_empty()
+{
   let c = self.cty(opt_ty)
   return "((" + c + "){.tag = 0, .u.v0 = {.f0 = " + v + "}})"
 }
 
-fn Cg.opt_none(&mut self, opt_ty: Int) -> Str {
+fn Cg.opt_none(&mut self, opt_ty: Int) -> Str
+  ensures !result.is_empty()
+{
   let c = self.cty(opt_ty)
   return "((" + c + "){.tag = 1})"
 }
 
-fn Cg.opt_of(&mut self, ret: Int, ok: Str, v: Str) -> Str {
+fn Cg.opt_of(&mut self, ret: Int, ok: Str, v: Str) -> Str
+  ensures !result.is_empty()
+{
   let some = self.opt_some(ret, v)
   let none = self.opt_none(ret)
   return "(" + ok + " ? " + some + " : " + none + ")"
 }
 
 /// A `Result` value: `Ok(ok_val)` when `ok` holds, else `Err(err_val)`.
-fn Cg.result_of(&mut self, ret: Int, ok: Str, ok_val: Str, err_val: Str) -> Str {
+fn Cg.result_of(&mut self, ret: Int, ok: Str, ok_val: Str, err_val: Str) -> Str
+  ensures !result.is_empty()
+{
   let c = self.cty(ret)
   return "(" +
     ok +
@@ -2127,7 +2135,9 @@ fn Cg.intrinsic(
 
 /// Calls a task's function value: `*out = f()`, or `*out = f(*in)` with an argument
 /// (`arg` is -1 for none).
-fn Cg.task_thunk(&mut self, ret: Int, arg: Int) -> Str {
+fn Cg.task_thunk(&mut self, ret: Int, arg: Int) -> Str
+  ensures !result.is_empty()
+{
   let rc = self.cty(ret)
   let name = if arg < 0 {
     "task_" + self.type_id(ret).str()
@@ -2155,7 +2165,9 @@ fn Cg.task_thunk(&mut self, ret: Int, arg: Int) -> Str {
 
 /// Runs a `net.serve` handler on the state in place: releases the old state, stores the new
 /// one and returns the reply.
-fn Cg.serve_thunk(&mut self, st: Int) -> Str {
+fn Cg.serve_thunk(&mut self, st: Int) -> Str
+  ensures !result.is_empty()
+{
   let name = "serve_" + self.type_id(st).str()
   if !self.serve_thunks.contains(st) {
     self.serve_thunks.insert(st)
@@ -2181,7 +2193,9 @@ fn Cg.serve_thunk(&mut self, st: Int) -> Str {
   return name
 }
 
-fn Cg.sortby_thunk(&mut self, elem: Int) -> Str {
+fn Cg.sortby_thunk(&mut self, elem: Int) -> Str
+  ensures !result.is_empty()
+{
   let ec = self.cty(elem)
   let name = "sortby_" + self.type_id(elem).str()
   if !self.sortby_thunks.contains(elem) {

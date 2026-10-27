@@ -1003,11 +1003,13 @@ fn Sema.step_arg(self, text: Str, t: Int) -> Const {
 }
 
 /// A quoted placeholder's text: `\n` and `\t` are escapes, `\` keeps the next character.
-fn unquote(s: Str) -> Str {
+fn unquote(s: Str) -> Str
+  ensures result.len() <= 4 * s.len()
+{
   var out: List<Char> = []
   var esc = false
   let cs = s.chars()
-  for i in 1..cs.len() - 1 {
+  for i in 1..cs.len() - 1 invariant out.len() < i {
     let c = cs[i]
     if esc {
       out.push(if c == 'n' { '\n' } else if c == 't' { '\t' } else { c })

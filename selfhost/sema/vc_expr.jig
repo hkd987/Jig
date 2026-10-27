@@ -352,14 +352,18 @@ fn Gen.construct(&mut self, t: Int, adt: Int, v: Int, fields: List<Sv>) -> Sv
   return Sv.Enum(adt, Leaf { t: v.str(), base: Base.Tag(n), depth: 0 }, vars)
 }
 
-fn Gen.rec_tag(&mut self, t: Int, x: Str) -> Str {
+fn Gen.rec_tag(&mut self, t: Int, x: Str) -> Str
+  ensures !result.is_empty()
+{
   let s = self.sort(Base.Opaque(t), 0)
   let n = self.ty_num(t)
   let f = self.fun("tag_" + n.str(), [s], "Int")
   return "(" + f + " " + x + ")"
 }
 
-fn Gen.rec_field_fn(&mut self, t: Int, v: Int, i: Int, l: Leaf) -> Str {
+fn Gen.rec_field_fn(&mut self, t: Int, v: Int, i: Int, l: Leaf) -> Str
+  ensures !result.is_empty()
+{
   let s = self.sort(Base.Opaque(t), 0)
   let r = self.sort(l.base, 0)
   let n = self.ty_num(t)

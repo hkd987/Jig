@@ -686,7 +686,9 @@ fn Sema.use_local(&mut self, id: Int) {
 // ---------- effects ----------
 
 /// Perform effects at `span` (a call or a function value invocation).
-fn Sema.use_effects(&mut self, eff: Int, span: syntax.Span, what: Str) {
+fn Sema.use_effects(&mut self, eff: Int, span: syntax.Span, what: Str)
+  ensures self.diags.len() == old(self.diags.len()) || self.diags.len() == old(self.diags.len()) + 1
+{
   if eff == 0 {
     return
   }
@@ -1430,7 +1432,9 @@ fn to_snake(s: Str) -> Str {
   return out
 }
 
-fn Sema.check_camel(&mut self, name: Str, span: syntax.Span, what: Str) {
+fn Sema.check_camel(&mut self, name: Str, span: syntax.Span, what: Str)
+  ensures self.diags.len() == old(self.diags.len()) || self.diags.len() == old(self.diags.len()) + 1
+{
   if is_camel(name) || to_camel(name) == name {
     return
   }

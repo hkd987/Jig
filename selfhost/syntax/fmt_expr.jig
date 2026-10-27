@@ -63,6 +63,7 @@ fn Printer.flat(self, e: Int) -> Option<Str> {
 fn Printer.flat_into(self, e: Int, o: &mut Str) -> Bool
   ensures o.len() >= old(o.len())
 {
+  let len0 = o.len()
   if o.len() > FLAT_LIMIT {
     return false
   }
@@ -224,7 +225,7 @@ fn Printer.flat_into(self, e: Int, o: &mut Str) -> Bool
         return true
       }
       o += " { "
-      for i in 0..fields.len() {
+      for i in 0..fields.len() invariant o.len() >= len0 {
         if i > 0 {
           o += ", "
         }
@@ -297,8 +298,9 @@ fn Printer.flat_binary_into(self, e: Int, o: &mut Str) -> Bool
   if !self.flat_into(cur, &mut o) {
     return false
   }
+  let len0 = o.len()
   var i = spine.len()
-  for i > 0 {
+  for i > 0 invariant i <= spine.len(), o.len() >= len0 {
     i -= 1
     let (op, rhs) = spine[i]
     o += " " + op.text() + " "
@@ -1298,11 +1300,11 @@ fn Printer.unit_into(self, factors: List<UnitFactor>, o: &mut Str)
 
 /// `effects {io, fs}`.
 fn Printer.effects_into(self, es: List<Name>, o: &mut Str)
-  ensures o.len() >= old(o.len())
+  ensures o.len() >= old(o.len()) + 10
 {
   let start = o.len()
   o += "effects {"
-  for i in 0..es.len() invariant o.len() >= start {
+  for i in 0..es.len() invariant o.len() - start >= 9 {
     if i > 0 {
       o += ", "
     }

@@ -618,7 +618,10 @@ fn Sema.snippet(self, lo: Int, hi: Int) -> Str {
 
 /// Facts shared by every key: the encoding, the solver, the standard library and all type
 /// declarations (struct invariants and refinement aliases).
-fn Sema.global_key(self, std_dir: Str, solver: Str) -> Str effects {fs} {
+fn Sema.global_key(self, std_dir: Str, solver: Str) -> Str
+  ensures result.len() == 32
+  effects {fs}
+{
   var h = new_hasher()
   h.str(VC_VERSION)
   h.str(JIG_VERSION)

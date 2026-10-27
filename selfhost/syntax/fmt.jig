@@ -956,7 +956,9 @@ fn Printer.variant(self, v: VariantDecl, ind: Int) -> Str {
   return s
 }
 
-fn Printer.effects_text(self, es: List<Name>) -> Str {
+fn Printer.effects_text(self, es: List<Name>) -> Str
+  ensures result.len() >= 10
+{
   var o = ""
   self.effects_into(es, &mut o)
   return o
