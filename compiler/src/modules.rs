@@ -7,6 +7,7 @@
 //!
 //! One version of each module is used: the highest any module in the build requires.
 
+use crate::mir::interp::os_error;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -212,7 +213,8 @@ pub fn get(root: &Path) -> Result<String, String> {
         for m in missing {
             let url = format!("{base}{}", m.path);
             let parent = m.dir.parent().ok_or("bad module cache path")?;
-            std::fs::create_dir_all(parent).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create {}: {}", parent.display(), os_error(&e)))?;
             let tmp = parent.join(format!(
                 ".tmp-{}-{}",
                 std::process::id(),
@@ -221,7 +223,8 @@ pub fn get(root: &Path) -> Result<String, String> {
             let _ = std::fs::remove_dir_all(&tmp);
             let tmp_s = tmp.to_string_lossy().to_string();
             git(&["clone", "--quiet", "--depth", "1", "--branch", &m.version, &url, &tmp_s], None)?;
-            std::fs::rename(&tmp, &m.dir).map_err(|e| format!("cannot move {} into the module cache: {e}", m.path))?;
+            std::fs::rename(&tmp, &m.dir)
+                .map_err(|e| format!("cannot move {} into the module cache: {}", m.path, os_error(&e)))?;
             log.push_str(&format!("downloaded {} {}\n", m.path, m.version));
         }
     }
@@ -241,7 +244,7 @@ pub fn get(root: &Path) -> Result<String, String> {
         sum.push_str(&format!("{} {} {commit}\n", m.path, m.version));
     }
     if !sum.is_empty() || root.join("jig.sum").exists() {
-        std::fs::write(root.join("jig.sum"), &sum).map_err(|e| format!("cannot write jig.sum: {e}"))?;
+        std::fs::write(root.join("jig.sum"), &sum).map_err(|e| format!("cannot write jig.sum: {}", os_error(&e)))?;
     }
     if log.is_empty() {
         log.push_str("all modules are downloaded\n");

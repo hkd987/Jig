@@ -1,0 +1,175 @@
+// `jigc get`, ported from the bootstrap compiler's `modules.rs`: download every required
+// module version that is not in the module cache (a git tag, from `https://PATH` or
+// `$JIG_GIT_BASE` followed by the path), then record the commit of each in `jig.sum`.
+
+import "std/fs"
+import "std/os"
+import "std/strings"
+import "std/time"
+
+fn mkdir(path: Str, mode: U32) -> I32 effects {ffi}
+
+fn rename(from: Str, to: Str) -> I32 effects {ffi}
+
+fn getpid() -> I32 effects {ffi}
+
+fn jig_ccall_os_error() -> Str effects {ffi}
+
+/// Create a directory and its missing parents.
+fn create_dir_all(path: Str) -> Result<(), Str> effects {fs, ffi} {
+  if is_dir(path) {
+    return Ok(())
+  }
+  match parent_dir(path) {
+    Some(p) => create_dir_all(p)?
+    None => {}
+  }
+  if mkdir(path, 511) != 0 && !is_dir(path) {
+    return Err(jig_ccall_os_error())
+  }
+  return Ok(())
+}
+
+/// Run git: its standard output, trimmed, or why it failed.
+fn git(args: List<Str>, dir: Str) -> Result<Str, Str> effects {fs, env, ffi, clock} {
+  var cmd = "git"
+  if !dir.is_empty() {
+    cmd += " -C " + shell_quote(dir)
+  }
+  for a in args {
+    cmd += " " + shell_quote(a)
+  }
+  let tmp = join_path(os.env("TMPDIR").unwrap_or("/tmp"), "jigc-git-" + time.now_ns().str())
+  let status = system(cmd + " > " + shell_quote(tmp + ".out") + " 2> " + shell_quote(tmp + ".err"))
+  let out = fs.read(tmp + ".out").unwrap_or("").trim()
+  let err = fs.read(tmp + ".err").unwrap_or("").trim()
+  let _ = system("rm -f " + shell_quote(tmp + ".out") + " " + shell_quote(tmp + ".err"))
+  if status != 0 {
+    return Err("git " + args.join(" ") + " failed: " + err)
+  }
+  return Ok(out)
+}
+
+/// `jig.sum`: the commit of every downloaded module version.
+fn read_sum(root: Str) -> List<(Str, Str, Str)> effects {fs} {
+  var out: List<(Str, Str, Str)> = []
+  for l in fs.read(join_path(root, "jig.sum")).unwrap_or("").lines() {
+    let w = strings.words(l)
+    if w.len() == 3 {
+      out.push((w[0], w[1], w[2]))
+    }
+  }
+  return out
+}
+
+/// The modules the project at `root` needs (none without a readable `jig.mod`).
+fn resolve_root(root: Str) -> (List<Resolved>, List<Str>) effects {fs, env} {
+  return match fs.read(join_path(root, "jig.mod")) {
+    Ok(text) => resolve_modules(root, parse_mod(text))
+    Err(_) => ([], [])
+  }
+}
+
+/// Download what is missing and write `jig.sum`: what was downloaded. A version whose
+/// commit differs from the one `jig.sum` recorded is an error: the tag moved, or the
+/// download is not what was used before.
+fn get_modules(root: Str) -> Result<Str, Str> effects {fs, env, ffi, clock} {
+  let base = os.env("JIG_GIT_BASE").unwrap_or("https://")
+  var log = ""
+  for {
+    let (mods, errors) = resolve_root(root)
+    if !errors.is_empty() {
+      return Err(errors[0])
+    }
+    var missing: List<Resolved> = []
+    for m in mods {
+      if m.missing && !m.replaced {
+        missing.push(m)
+      }
+    }
+    if missing.is_empty() {
+      break
+    }
+    for m in missing {
+      let parent = match parent_dir(m.dir) {
+        Some(p) => p
+        None => {
+          return Err("bad module cache path")
+        }
+      }
+      match create_dir_all(parent) {
+        Ok(_) => {}
+        Err(e) => {
+          return Err("cannot create " + parent + ": " + e)
+        }
+      }
+      let name = m.dir[parent.len() + 1..m.dir.len()]
+      let tmp = join_path(parent, ".tmp-" + (getpid() as Int).str() + "-" + name)
+      let _ = system("rm -rf " + shell_quote(tmp))
+      let _ = git(
+        ["clone", "--quiet", "--depth", "1", "--branch", m.version, base + m.path, tmp],
+        "",
+      )?
+      if rename(tmp, m.dir) != 0 {
+        return Err("cannot move " + m.path + " into the module cache: " + jig_ccall_os_error())
+      }
+      log += "downloaded " + m.path + " " + m.version + "\n"
+    }
+  }
+  let (mods, _) = resolve_root(root)
+  let old = read_sum(root)
+  var sum = ""
+  for m in mods {
+    if m.replaced {
+      continue
+    }
+    let commit = git(["rev-parse", "HEAD"], m.dir)?
+    for (p, v, c) in old {
+      if p == m.path && v == m.version && c != commit {
+        return Err(
+          m.path +
+            " " +
+            m.version +
+            " is commit " +
+            commit +
+            ", but jig.sum recorded " +
+            c +
+            ": the tag moved or the download was changed",
+        )
+      }
+    }
+    sum += m.path + " " + m.version + " " + commit + "\n"
+  }
+  let sum_file = join_path(root, "jig.sum")
+  if !sum.is_empty() || fs.exists(sum_file) {
+    match fs.write(sum_file, sum) {
+      Ok(_) => {}
+      Err(e) => {
+        return Err("cannot write jig.sum: " + error_reason(e))
+      }
+    }
+  }
+  return Ok(if log.is_empty() { "all modules are downloaded\n" } else { log })
+}
+
+/// "PATH: reason" without the path.
+fn error_reason(e: Str) -> Str {
+  return match last_index_of(e, ": ") {
+    Some(i) => e[i + 2..e.len()]
+    None => e
+  }
+}
+
+/// `jigc get [PATH]`, as `jig get`.
+fn get_cmd(o: Opts, cwd: Str) -> Output effects {fs, env, ffi, clock} {
+  let root = match find_project_root(absolute_path(o.path, cwd)) {
+    Some(r) => r
+    None => {
+      return output("", "error: no jig.mod in " + o.path + " or above\n", 2)
+    }
+  }
+  return match get_modules(root) {
+    Ok(log) => output(log, "", 0)
+    Err(e) => output("", "error: " + e + "\n", 1)
+  }
+}

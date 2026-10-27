@@ -247,6 +247,8 @@ struct Resolved {
   path: Str
   version: Str
   dir: Str
+  /// Pointed at a local directory by `replace`.
+  replaced: Bool
   /// Not downloaded yet (`jig get`).
   missing: Bool
 }
@@ -270,15 +272,23 @@ fn resolve_modules(root: Str, top: ModFile) -> (List<Resolved>, List<Str>) effec
       continue
     }
     var dir = path_join(cache_dir(), path + "@" + version)
+    var replaced = false
     for (rp, rd) in top.replaces {
       if rp == path {
         dir = path_join(root, rd)
+        replaced = true
         break
       }
     }
     let mod_file = path_join(dir, "jig.mod")
     let missing = !fs.exists(mod_file)
-    let r = Resolved { path: path, version: version, dir: dir, missing: missing }
+    let r = Resolved {
+      path: path
+      version: version
+      dir: dir
+      replaced: replaced
+      missing: missing
+    }
     if at >= 0 {
       chosen[at] = r
     } else {

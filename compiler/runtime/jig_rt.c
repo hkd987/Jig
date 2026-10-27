@@ -2048,6 +2048,9 @@ void jig_ccall_close(int64_t fd) { close((int)fd); }
 
 const char *jig_ccall_net_error(void) { return g_ccall_net_err; }
 
+/* The last failed C call's error, as the C library words it. */
+const char *jig_ccall_os_error(void) { return strerror(errno); }
+
 /* ---------- runtime element types ---------- */
 
 static void str_retain(void *p) { jig_str_retain(*(jig_str **)p); }

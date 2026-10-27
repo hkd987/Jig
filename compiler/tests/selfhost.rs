@@ -1759,3 +1759,126 @@ fn jigc_tools_match_bootstrap() {
     }
     assert!(failures.is_empty(), "{} runs differ:\n{}", failures.len(), failures.join("\n"));
 }
+
+fn git_in(dir: &Path, args: &[&str]) {
+    let ok = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(args)
+        .output()
+        .unwrap()
+        .status
+        .success();
+    assert!(ok, "git {args:?} in {}", dir.display());
+}
+
+/// `jigc get` downloads and verifies modules as `jig get` does: each step runs both on their
+/// own copy of the project and module cache, and they must print the same (paths and the
+/// temporary clone's process id aside), exit the same way and write the same `jig.sum`.
+/// Downloads, nothing left to download, versions raised by another module, a `jig.sum` whose
+/// commit does not match, `replace`, a tag that does not exist, a module that names another
+/// and a directory without `jig.mod`.
+#[test]
+fn jigc_get_matches_bootstrap() {
+    if !have_cc() || !Command::new("git").arg("--version").output().is_ok_and(|o| o.status.success()) {
+        eprintln!("skipping: no C compiler or no git");
+        return;
+    }
+    let exe = jigc();
+    let work = std::fs::canonicalize(PathBuf::from(env!("CARGO_TARGET_TMPDIR"))).unwrap().join("selfhost-get");
+    let _ = std::fs::remove_dir_all(&work);
+    let lib = work.join("remotes/example.com/greetlib");
+    write_file(&lib.join("jig.mod"), "module example.com/greetlib\n");
+    write_file(&lib.join("greet/greet.jig"), "pub fn hello(name: Str) -> Str {\n  return \"hello, \" + name\n}\n");
+    git_in(&lib, &["init", "-q"]);
+    git_in(&lib, &["add", "-A"]);
+    git_in(&lib, &["commit", "-qm", "v1"]);
+    git_in(&lib, &["tag", "v1.0.0"]);
+    write_file(&lib.join("greet/greet.jig"), "pub fn hello(name: Str) -> Str {\n  return \"hi, \" + name\n}\n");
+    git_in(&lib, &["commit", "-qam", "v1.1"]);
+    git_in(&lib, &["tag", "v1.1.0"]);
+    let mid = work.join("remotes/example.com/middle");
+    write_file(&mid.join("jig.mod"), "module example.com/middle\nrequire example.com/greetlib v1.1.0\n");
+    write_file(&mid.join("m/m.jig"), "pub fn m() -> Int {\n  return 1\n}\n");
+    git_in(&mid, &["init", "-q"]);
+    git_in(&mid, &["add", "-A"]);
+    git_in(&mid, &["commit", "-qm", "m"]);
+    git_in(&mid, &["tag", "v0.1.0"]);
+    let other = work.join("remotes/example.com/other");
+    write_file(&other.join("jig.mod"), "module example.com/somethingelse\n");
+    write_file(&other.join("o/o.jig"), "pub fn o() -> Int {\n  return 1\n}\n");
+    git_in(&other, &["init", "-q"]);
+    git_in(&other, &["add", "-A"]);
+    git_in(&other, &["commit", "-qm", "o"]);
+    git_in(&other, &["tag", "v1.0.0"]);
+    write_file(&work.join("local/jig.mod"), "module example.com/greetlib\n");
+    write_file(&work.join("local/greet/greet.jig"), "pub fn hello(name: Str) -> Str {\n  return name\n}\n");
+    let base = format!("file://{}/remotes/", work.display());
+    let tmp_name = |s: &str| -> String {
+        // `.tmp-PID-` names the clone's temporary directory.
+        let mut out = String::new();
+        let mut rest = s;
+        while let Some(i) = rest.find(".tmp-") {
+            out.push_str(&rest[..i + 5]);
+            rest = rest[i + 5..].trim_start_matches(|c: char| c.is_ascii_digit());
+        }
+        out + rest
+    };
+    let run = |bin: &Path, side: &str, app: &str| {
+        let dir = work.join(side).join(app);
+        let out = Command::new(bin)
+            .arg("get")
+            .arg(&dir)
+            .env("JIG_HOME", work.join(side).join("home"))
+            .env("JIG_GIT_BASE", &base)
+            .env("PWD", &work)
+            .current_dir(&work)
+            .output()
+            .unwrap();
+        let side_dir = work.join(side).display().to_string();
+        let norm = |b: &[u8]| tmp_name(&String::from_utf8_lossy(b).replace(&side_dir, "SIDE"));
+        let sum = std::fs::read_to_string(dir.join("jig.sum")).ok();
+        (out.status.code(), norm(&out.stdout), norm(&out.stderr), sum)
+    };
+    let main = "fn main() {\n}\n";
+    let steps: [(&str, &str); 9] = [
+        ("app", "module app\nrequire example.com/greetlib v1.0.0\n"),
+        ("app", "module app\nrequire example.com/greetlib v1.0.0\n"),
+        ("app", "module app\nrequire example.com/greetlib v1.0.0\nrequire example.com/middle v0.1.0\n"),
+        ("tampered", "module app\nrequire example.com/greetlib v1.0.0\n"),
+        ("replaced", "module app\nrequire example.com/greetlib v9.9.9\nreplace example.com/greetlib => ../../local\n"),
+        ("no_tag", "module app\nrequire example.com/greetlib v7.0.0\n"),
+        ("named_other", "module app\nrequire example.com/other v1.0.0\n"),
+        ("bad_line", "module app\nrequire example.com/greetlib\n"),
+        ("none", ""),
+    ];
+    let mut failures = Vec::new();
+    for (i, (app, jig_mod)) in steps.iter().enumerate() {
+        for side in ["a", "b"] {
+            let dir = work.join(side).join(app);
+            std::fs::create_dir_all(&dir).unwrap();
+            if !jig_mod.is_empty() {
+                write_file(&dir.join("jig.mod"), jig_mod);
+                write_file(&dir.join("main.jig"), main);
+            }
+            if *app == "tampered" {
+                write_file(
+                    &dir.join("jig.sum"),
+                    "example.com/greetlib v1.0.0 0000000000000000000000000000000000000000\n",
+                );
+            }
+        }
+        let expected = run(Path::new(env!("CARGO_BIN_EXE_jig")), "a", app);
+        let actual = run(exe, "b", app);
+        let want =
+            ["downloaded example.com/greetlib v1.0.0", "all modules are downloaded", "example.com/middle v0.1.0"];
+        if let Some(w) = want.get(i) {
+            assert!(expected.1.contains(w), "step {i}: {expected:?}");
+        }
+        if expected != actual {
+            failures.push(format!("step {i} ({app}): bootstrap {expected:?}, jigc {actual:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{} steps differ:\n{}", failures.len(), failures.join("\n"));
+}

@@ -248,6 +248,7 @@ fn usage() -> Str {
     "  build [--release] [-o out]  compile main to a native executable (C)",
     "  trace [fn <name> | scenario <name> | uncovered] [--json]  which scenarios exercise which code",
     "  fmt [--check]           format .jig files in place",
+    "  get                     download the modules jig.mod requires, recording their commits in jig.sum",
     "  explain <code>          explain a diagnostic code",
     "  search <signature>      find functions by type, e.g. 'List<T> -> Option<T>'",
     "  reference               print the language reference",
@@ -368,6 +369,9 @@ pub fn run_cli(args: List<Str>, cwd: Str, std_dir: Str) -> Output
     var flags = o.rest
     flags.extend(out)
     return build_cmd(absolute_path(o.path, cwd), std_dir, cwd, flags)
+  }
+  if cmd == "get" {
+    return get_cmd(parse_opts(rest), cwd)
   }
   if cmd == "trace" {
     return trace_cmd(parse_opts(rest), std_dir, cwd)

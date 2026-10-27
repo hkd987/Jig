@@ -1705,7 +1705,7 @@ impl<'l, 'a> Interp<'l, 'a> {
 }
 
 /// An OS error as the C library words it (what native builds print).
-fn os_error(e: &std::io::Error) -> String {
+pub(crate) fn os_error(e: &std::io::Error) -> String {
     let s = e.to_string();
     let s = s.strip_prefix("failed to lookup address information: ").unwrap_or(&s);
     match s.find(" (os error") {
