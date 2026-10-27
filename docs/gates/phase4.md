@@ -126,10 +126,11 @@ contracts, so the measure above stays 39%.
 
 ## The alpha
 
-Version 0.1.0-alpha is what `main` holds now: the `jig` command (Rust), the standard library,
-the agent plugin, `jigc` and its C bootstrap. `.github/workflows/release.yml` builds the
-Linux x86-64 binary and publishes it with `bootstrap/jigc.c` as a GitHub pre-release when a
-`v*` tag is pushed:
+Version 0.1.0-alpha is what `main` holds now: the `jig` command (jigc, built from its C
+bootstrap), the standard library and the agent plugin, with the Rust compiler kept as the
+reference the tests compare jigc with. `.github/workflows/release.yml` builds the Linux
+x86-64 binary from `bootstrap/jigc.c` and publishes it, with `bootstrap/jigc.c` itself, as a
+GitHub pre-release when a `v*` tag is pushed:
 
 ```
 git tag v0.1.0-alpha && git push origin v0.1.0-alpha

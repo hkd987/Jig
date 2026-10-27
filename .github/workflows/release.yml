@@ -1,7 +1,8 @@
 name: Release
 
 # Pushing a tag such as v0.1.0-alpha publishes a GitHub pre-release with the Linux x86-64
-# `jig` binary, the agent plugin and the C bootstrap (D28).
+# `jig` binary, the agent plugin and the C bootstrap (D28). `jig` is jigc, built from the C
+# bootstrap (D6); the Rust compiler runs only the tests, as the reference.
 on:
   push:
     tags: ["v*"]
@@ -24,10 +25,10 @@ jobs:
         run: sh bootstrap/update.sh --check
       - name: Package
         run: |
-          cargo build --release --locked
+          CC=clang sh bootstrap/install.sh "$PWD/dist/prefix"
           name="jig-${GITHUB_REF_NAME}-x86_64-linux"
           mkdir -p "dist/$name"
-          cp target/release/jig README.md CHANGELOG.md LICENSE "dist/$name/"
+          cp dist/prefix/bin/jig README.md CHANGELOG.md LICENSE "dist/$name/"
           cp -r plugin docs "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           cp bootstrap/jigc.c dist/jigc.c

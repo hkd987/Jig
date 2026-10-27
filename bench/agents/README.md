@@ -26,3 +26,17 @@ python3 bench/agents/run.py target/release/jig \
 The summary prints, per language, the tasks solved and the mean number of agent turns on the
 solved ones (read from the agent's JSON `num_turns`). Run it in a sandbox: the agent edits
 files and runs commands in its workspace.
+
+Where skipping permissions is not allowed, give every language the same short list of tools
+instead: editing files, and running the check script, the program, the three toolchains and
+a few commands that only read. No pattern may contain a space (the command is split on
+spaces), and the final `--` ends the variadic `--allowedTools` before the prompt:
+
+```
+python3 bench/agents/run.py ~/.local/bin/jig \
+  --agent 'claude -p --output-format json --max-turns 40 --permission-mode acceptEdits --allowedTools Read Edit Write Glob Grep Bash(./check.sh:*) Bash(./prog:*) Bash(jig:*) Bash(rustc:*) Bash(node:*) Bash(cat:*) Bash(ls:*) Bash(head:*) Bash(diff:*) Bash(cmp:*) Bash(echo:*) --' \
+  --lang jig --out jig.json
+```
+
+Each language can run as its own process (`--lang jig`, `rust`, `ts`) at the same time.
+`docs/gates/phase4.md` has the results of the runs made so far.
