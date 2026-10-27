@@ -364,6 +364,8 @@ jig_str *jig_net_request(const jig_str *addr, const jig_str *req, bool *ok);
 typedef jig_str *(*jig_serve_call)(jig_fn *f, void *state, jig_str *req);
 jig_str *jig_net_serve(const jig_str *addr, void *state, jig_fn *f, jig_serve_call call, int64_t limit, bool *ok,
                        const char *loc);
+jig_str *jig_net_serve_http(const jig_str *addr, void *state, jig_fn *f, jig_serve_call call, int64_t limit,
+                            bool *ok, const char *loc);
 int64_t jig_rand_int(int64_t lo, int64_t hi, const char *loc);
 double jig_rand_float(void);
 

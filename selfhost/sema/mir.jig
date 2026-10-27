@@ -355,6 +355,7 @@ enum Op {
   SimAnswers
   NetRequest
   NetServe
+  NetServeHttp
   /// `x.str()` with derived formatting (the type in `tys[0]`).
   Show
   StrConcat
@@ -427,6 +428,7 @@ fn lookup_intrinsic(pkg_path: Str, recv: Option<TyKey>, name: Str) -> Option<(Op
       "std/net" => match name {
         "request" => Some(Op.NetRequest)
         "serve" => Some(Op.NetServe)
+        "serve_http" => Some(Op.NetServeHttp)
         _ => None
       }
       "std/rand" => match name {

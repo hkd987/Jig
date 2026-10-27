@@ -12,6 +12,8 @@ fn jig_ccall_accept(fd: Int, addr: Str) -> Int effects {ffi}
 
 fn jig_ccall_request(conn: Int) -> Str effects {ffi}
 
+fn jig_ccall_request_http(conn: Int) -> Str effects {ffi}
+
 fn jig_ccall_answer(conn: Int, reply: Str) effects {ffi}
 
 fn jig_ccall_close(fd: Int) effects {ffi}
@@ -37,14 +39,103 @@ fn is_sim(op: Op) -> Bool {
   }
 }
 
-/// `net.serve` for real: one connection at a time, each request through `handle` with the
-/// state, until `limit` requests (0: forever).
+/// How much of what a connection sent is its HTTP request (`net.serve_http`): its length
+/// once complete, -1 while it is not, or the status it is refused with, negated: -411 for any
+/// `Transfer-Encoding` (a chunked body), -400 for a `Content-Length` that is not a number. A
+/// request ends after the blank line that ends its headers and the `Content-Length` bytes of
+/// body they announce, as the runtime's `http_frame` and the bootstrap compiler's frame it.
+fn http_frame(s: Str) -> Int {
+  let head = match s.find("\r\n\r\n") {
+    Some(i) => i
+    None => {
+      return -1
+    }
+  }
+  let lines = s[0..head].split("\n")
+  var body = 0
+  // Header lines follow the request line.
+  for k in 1..lines.len() {
+    var line = lines[k]
+    if line.ends_with("\r") {
+      line = line[0..line.len() - 1]
+    }
+    let colon = match line.find(":") {
+      Some(c) => c
+      None => {
+        continue
+      }
+    }
+    let name = ascii_lower(trim_blanks(line[0..colon]))
+    let value = trim_blanks(line[colon + 1..line.len()])
+    if name == "transfer-encoding" {
+      return -411
+    }
+    if name == "content-length" {
+      if value.is_empty() || value.len() > 18 {
+        return -400
+      }
+      var n = 0
+      for b in value.bytes() {
+        if b < 48 || b > 57 {
+          return -400
+        }
+        n = n * 10 + (b - 48) as Int
+      }
+      body = n
+    }
+  }
+  let end = head + 4
+  if s.len() - end < body {
+    return -1
+  }
+  return end + body
+}
+
+/// The fixed reply to a refused HTTP request.
+fn http_refusal(status: Int) -> Str
+  ensures !result.is_empty()
+{
+  return if status == 411 {
+    "HTTP/1.1 411 Length Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+  } else {
+    "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+  }
+}
+
+/// `s` without the spaces and tabs it starts and ends with.
+fn trim_blanks(s: Str) -> Str
+  ensures result.len() <= s.len()
+{
+  var a = 0
+  for a < s.len() && (s[a] == 32 || s[a] == 9) invariant a >= 0 && a <= s.len() {
+    a += 1
+  }
+  var b = s.len()
+  for b > a && (s[b - 1] == 32 || s[b - 1] == 9) invariant b >= a && b <= s.len() {
+    b -= 1
+  }
+  return s[a..b]
+}
+
+/// `s` with its ASCII capitals in lower case.
+fn ascii_lower(s: Str) -> Str {
+  var out: List<U8> = []
+  for b in s.bytes() {
+    out.push(if b >= 65 && b <= 90 { b + 32 } else { b })
+  }
+  // Only ASCII bytes change, so the text stays valid.
+  return Str.from_bytes(out).unwrap_or(s)
+}
+
+/// `net.serve` and `net.serve_http` for real: one connection at a time, each request through
+/// `handle` with the state, until `limit` requests (0: forever).
 fn Interp.serve_real(
   &mut self,
   addr: Str,
   state: Value,
   handle: Value,
   limit: Int,
+  http: Bool,
   span: syntax.Span,
 ) -> Result<(Value, List<Value>), Trap>
   effects {io, fs, net, clock, env, ffi}
@@ -60,7 +151,17 @@ fn Interp.serve_real(
     if conn < 0 {
       return ret_v(err_v(jig_ccall_net_error()))
     }
-    let (s2, reply) = match self.serve_one(handle, st, jig_ccall_request(conn), span) {
+    var req = if http { jig_ccall_request_http(conn) } else { jig_ccall_request(conn) }
+    let frame = if http { http_frame(req) } else { -1 }
+    if frame < -1 {
+      jig_ccall_answer(conn, http_refusal(0 - frame))
+      served += 1
+      continue
+    }
+    if frame >= 0 {
+      req = req[0..frame]
+    }
+    let (s2, reply) = match self.serve_one(handle, st, req, span) {
       Ok(r) => r
       Err(t) => {
         jig_ccall_close(conn)

@@ -1485,7 +1485,8 @@ impl<'l, 'a> Interp<'l, 'a> {
                     Err(e) => Self::err(format!("{addr}: {}", os_error(&e))),
                 })
             }
-            NetServe => {
+            NetServe | NetServeHttp => {
+                let http = intr.op == NetServeHttp;
                 let addr = self.str_arg(&a[0], span)?.to_string();
                 let mut state = a[1].clone();
                 let handle = a[2].clone();
@@ -1497,8 +1498,20 @@ impl<'l, 'a> Interp<'l, 'a> {
                 if self.fx.fake {
                     while limit == 0 || served < limit {
                         let Some(req) = self.fx.net_incoming.get_mut(&addr).and_then(|q| q.pop_front()) else { break };
-                        let (s2, reply) = self.serve_one(&handle, state, &req, span)?;
-                        state = s2;
+                        let reply = match if http { http_frame(req.as_bytes()) } else { HttpFrame::Incomplete } {
+                            HttpFrame::Refused(status) => http_refusal(status).to_string(),
+                            frame => {
+                                let req = match frame {
+                                    HttpFrame::Complete(n) => {
+                                        String::from_utf8_lossy(&req.as_bytes()[..n]).into_owned()
+                                    }
+                                    _ => req,
+                                };
+                                let (s2, reply) = self.serve_one(&handle, state, &req, span)?;
+                                state = s2;
+                                reply
+                            }
+                        };
                         self.fx.net_answers.entry(addr.clone()).or_default().push(reply);
                         served += 1;
                     }
@@ -1512,14 +1525,28 @@ impl<'l, 'a> Interp<'l, 'a> {
                     Err(e) => return ret(Self::err(format!("{addr}: {}", os_error(&e)))),
                 };
                 while limit == 0 || served < limit {
+                    // What the program printed shows before the server waits.
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
                     let (mut conn, _) = match listener.accept() {
                         Ok(c) => c,
                         Err(e) => return ret(Self::err(format!("{addr}: {}", os_error(&e)))),
                     };
-                    let mut req = String::new();
-                    let _ = std::io::Read::read_to_string(&mut conn, &mut req);
-                    let (s2, reply) = self.serve_one(&handle, state, &req, span)?;
-                    state = s2;
+                    let reply = if http {
+                        match read_http(&mut conn) {
+                            (_, Some(status)) => http_refusal(status).to_string(),
+                            (req, None) => {
+                                let (s2, reply) = self.serve_one(&handle, state, &req, span)?;
+                                state = s2;
+                                reply
+                            }
+                        }
+                    } else {
+                        let mut req = String::new();
+                        let _ = std::io::Read::read_to_string(&mut conn, &mut req);
+                        let (s2, reply) = self.serve_one(&handle, state, &req, span)?;
+                        state = s2;
+                        reply
+                    };
                     let _ = std::io::Write::write_all(&mut conn, reply.as_bytes());
                     served += 1;
                 }
@@ -1723,6 +1750,83 @@ fn addr_error(addr: &str) -> Option<&'static str> {
 }
 
 /// ":port" listens on every interface.
+/// How much of what a connection sent is its HTTP request (`net.serve_http`): it ends after
+/// the blank line that ends its headers and the `Content-Length` bytes of body they announce.
+/// Any `Transfer-Encoding` (a chunked body) is refused with 411, a `Content-Length` that is
+/// not a number with 400. The C runtime frames requests the same way.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum HttpFrame {
+    Incomplete,
+    Complete(usize),
+    Refused(u16),
+}
+
+fn http_frame(s: &[u8]) -> HttpFrame {
+    let Some(end) = s.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4) else {
+        return HttpFrame::Incomplete;
+    };
+    let head = &s[..end - 4];
+    let mut body: u64 = 0;
+    // Header lines follow the request line.
+    for line in head.split(|&c| c == b'\n').skip(1) {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let Some(colon) = line.iter().position(|&c| c == b':') else { continue };
+        let trim = |x: &[u8]| -> Vec<u8> {
+            let a = x.iter().position(|&c| c != b' ' && c != b'\t').unwrap_or(x.len());
+            let b = x.iter().rposition(|&c| c != b' ' && c != b'\t').map_or(a, |i| i + 1);
+            x[a..b.max(a)].to_vec()
+        };
+        let name = trim(&line[..colon]).to_ascii_lowercase();
+        let value = trim(&line[colon + 1..]);
+        if name == b"transfer-encoding" {
+            return HttpFrame::Refused(411);
+        }
+        if name == b"content-length" {
+            if value.is_empty() || value.len() > 18 || !value.iter().all(|c| c.is_ascii_digit()) {
+                return HttpFrame::Refused(400);
+            }
+            body = value.iter().fold(0, |n, &c| n * 10 + u64::from(c - b'0'));
+        }
+    }
+    if ((s.len() - end) as u64) < body {
+        HttpFrame::Incomplete
+    } else {
+        HttpFrame::Complete(end + body as usize)
+    }
+}
+
+fn http_refusal(status: u16) -> &'static str {
+    if status == 411 {
+        "HTTP/1.1 411 Length Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    } else {
+        "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    }
+}
+
+/// A connection's HTTP request, read until it is complete, refused or the client stops; with
+/// the status it is refused with.
+fn read_http(conn: &mut std::net::TcpStream) -> (String, Option<u16>) {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 16384];
+    loop {
+        match http_frame(&buf) {
+            HttpFrame::Refused(status) => return (String::new(), Some(status)),
+            HttpFrame::Complete(n) => {
+                buf.truncate(n);
+                break;
+            }
+            HttpFrame::Incomplete => {}
+        }
+        match std::io::Read::read(conn, &mut tmp) {
+            Ok(0) => break,
+            Ok(k) => buf.extend_from_slice(&tmp[..k]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    (String::from_utf8_lossy(&buf).into_owned(), None)
+}
+
 fn listen_addr(addr: &str) -> String {
     if addr.starts_with(':') {
         format!("0.0.0.0{addr}")

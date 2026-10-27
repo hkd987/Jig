@@ -2286,7 +2286,8 @@ impl<'l, 'a> CGen<'l, 'a> {
                 let c = self.cty(ret);
                 format!("(nk{n} ? (({c}){{.tag = 0, .u.v0 = {{.f0 = nr{n}}}}}) : (({c}){{.tag = 1, .u.v1 = {{.f0 = nr{n}}}}}))")
             }
-            NetServe => {
+            NetServe | NetServeHttp => {
+                let serve = if intr.op == NetServe { "jig_net_serve" } else { "jig_net_serve_http" };
                 let st = intr.tys[0];
                 let sc = self.cty(st);
                 let th = self.serve_thunk(st);
@@ -2297,7 +2298,7 @@ impl<'l, 'a> CGen<'l, 'a> {
                 let rel = self.release_stmt(st, &format!("sv{n}"));
                 let _ = writeln!(
                     cx.out,
-                    "    {sc} sv{n} = {state}; jig_fn hf{n} = {};\n    bool sk{n}; jig_str *se{n} = jig_net_serve({}, &sv{n}, &hf{n}, {th}, {}, &sk{n}, {loc});\n    if (!sk{n}) {{ {rel} }}",
+                    "    {sc} sv{n} = {state}; jig_fn hf{n} = {};\n    bool sk{n}; jig_str *se{n} = {serve}({}, &sv{n}, &hf{n}, {th}, {}, &sk{n}, {loc});\n    if (!sk{n}) {{ {rel} }}",
                     a[2],
                     a[0],
                     a[3]

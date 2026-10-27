@@ -26,7 +26,8 @@ Native code through C (release builds as one unit at `-O2`), within 10% of Rust 
 shared benchmark suite; a 100k-line project checks in about 70 ms with the Rust compiler on
 four threads (jigc, which `jig` now runs, takes about 210 ms on one).
 
-**Standard library.** `std/io`, `fs`, `net` (TCP request/response and a simulator),
+**Standard library.** `std/io`, `fs`, `net` (TCP request/response, HTTP serving for
+browsers and HTTP clients, and a simulator),
 `time`, `rand`, `os`, `task` (fork-join), `math`, `lists`, `strings`; 91% of its functions
 have contracts that prove.
 

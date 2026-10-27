@@ -12,3 +12,18 @@ pub fn request(addr: Str, request: Str) -> Result<Str, Str> effects {net}
 pub fn serve<S>(addr: Str, state: S, handle: fn(S, Str) -> (S, Str), limit: Int) -> Result<S, Str>
   requires limit >= 0
   effects {net}
+
+/// Serve HTTP/1.x on `addr`, like `serve`, for browsers and other HTTP clients, which do not
+/// close their sending side: a request ends after its headers and the `Content-Length` bytes
+/// of body they announce. `handle` gets the raw request (request line, headers, body) and
+/// returns the raw reply (status line, headers, body); the connection closes after it. A
+/// request with `Transfer-Encoding` (a chunked body) is answered `411 Length Required`, one
+/// whose `Content-Length` is not a number `400 Bad Request`, without calling `handle`.
+pub fn serve_http<S>(
+  addr: Str,
+  state: S,
+  handle: fn(S, Str) -> (S, Str),
+  limit: Int,
+) -> Result<S, Str>
+  requires limit >= 0
+  effects {net}

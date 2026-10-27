@@ -1,0 +1,31 @@
+import "std/sim"
+
+test "the greeting at /, 404 anywhere else" {
+  sim.connect(":8080", "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+  sim.connect(":8080", "GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n")
+  sim.set_args(["http", ":8080", "2"])
+  main()
+  let hello = response("200 OK", "Hello, world!\n")
+  assert(sim.answers(":8080") == [hello, response("404 Not Found", "not found\n")])
+  assert(sim.stdout() == "listening on :8080\nserved 2\n")
+}
+
+test "a request ends after its Content-Length body" {
+  sim.connect(":8080", "POST / HTTP/1.1\r\nContent-Length: 2\r\n\r\nhi and more")
+  sim.set_args(["http", ":8080", "1"])
+  main()
+  assert(sim.answers(":8080") == [response("200 OK", "Hello, world!\n")])
+}
+
+test "a chunked request is refused without the handler" {
+  sim.connect(":8080", "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n")
+  sim.set_args(["http", ":8080", "1"])
+  main()
+  let refused = "HTTP/1.1 411 Length Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+  assert(sim.answers(":8080") == [refused])
+  assert(sim.stdout() == "listening on :8080\nserved 0\n")
+}
+
+test "every reply ends with its body"(body: Str) {
+  assert(response("200 OK", body).ends_with(body))
+}

@@ -2047,7 +2047,8 @@ fn Cg.intrinsic(
         ");\n"
       return self.result_of(ret, "nk" + n, "nr" + n, "nr" + n)
     }
-    NetServe => {
+    NetServe | NetServeHttp => {
+      let serve = if intr.op == Op.NetServe { "jig_net_serve" } else { "jig_net_serve_http" }
       let st = intr.tys[0]
       let sc = self.cty(st)
       let th = self.serve_thunk(st)
@@ -2067,7 +2068,9 @@ fn Cg.intrinsic(
         n +
         "; jig_str *se" +
         n +
-        " = jig_net_serve(" +
+        " = " +
+        serve +
+        "(" +
         a[0] +
         ", &sv" +
         n +

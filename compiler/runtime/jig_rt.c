@@ -1880,8 +1880,101 @@ jig_str *jig_net_request(const jig_str *addr, const jig_str *req, bool *ok) {
     return reply;
 }
 
-jig_str *jig_net_serve(const jig_str *addr, void *state, jig_fn *f, jig_serve_call call, int64_t limit, bool *ok,
-                       const char *loc) {
+/* HTTP framing (`net.serve_http`): how much of what a connection sent so far is its request.
+   A request ends after the blank line that ends its headers and the `Content-Length` bytes of
+   body they announce. Returns the request's length, -1 while it is incomplete, or the status
+   it is refused with: 411 for any `Transfer-Encoding` (a chunked body), 400 for a
+   `Content-Length` that is not a number. The same rules are in both interpreters. */
+static bool http_name_is(const char *p, size_t n, const char *name) {
+    size_t k = strlen(name);
+    if (n != k) return false;
+    for (size_t i = 0; i < k; i++) {
+        char c = p[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c != name[i]) return false;
+    }
+    return true;
+}
+
+static int64_t http_frame(const char *s, size_t n, int *refuse) {
+    *refuse = 0;
+    size_t end = 0;
+    for (size_t i = 0; i + 4 <= n; i++) {
+        if (s[i] == '\r' && s[i + 1] == '\n' && s[i + 2] == '\r' && s[i + 3] == '\n') {
+            end = i + 4;
+            break;
+        }
+    }
+    if (!end) return -1;
+    uint64_t body = 0;
+    /* Header lines: after the request line, up to the blank line. */
+    size_t i = 0;
+    while (i < end && s[i] != '\n') i++;
+    i++;
+    while (i + 2 < end) {
+        size_t lo = i;
+        while (i < end && s[i] != '\n') i++;
+        size_t hi = i > lo && s[i - 1] == '\r' ? i - 1 : i;
+        i++;
+        size_t colon = lo;
+        while (colon < hi && s[colon] != ':') colon++;
+        if (colon == hi) continue;
+        size_t ns = lo, ne = colon;
+        while (ns < ne && (s[ns] == ' ' || s[ns] == '\t')) ns++;
+        while (ne > ns && (s[ne - 1] == ' ' || s[ne - 1] == '\t')) ne--;
+        size_t v = colon + 1, ve = hi;
+        while (v < ve && (s[v] == ' ' || s[v] == '\t')) v++;
+        while (ve > v && (s[ve - 1] == ' ' || s[ve - 1] == '\t')) ve--;
+        if (http_name_is(s + ns, ne - ns, "transfer-encoding")) {
+            *refuse = 411;
+            return 0;
+        }
+        if (http_name_is(s + ns, ne - ns, "content-length")) {
+            if (v == ve || ve - v > 18) {
+                *refuse = 400;
+                return 0;
+            }
+            body = 0;
+            for (size_t k = v; k < ve; k++) {
+                if (s[k] < '0' || s[k] > '9') {
+                    *refuse = 400;
+                    return 0;
+                }
+                body = body * 10 + (uint64_t)(s[k] - '0');
+            }
+        }
+    }
+    if ((uint64_t)(n - end) < body) return -1;
+    return (int64_t)(end + body);
+}
+
+static const char *http_refusal(int status) {
+    return status == 411 ? "HTTP/1.1 411 Length Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                         : "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+}
+
+/* A connection's HTTP request: read until it is complete, refused or the client stops. */
+static jig_str *net_read_http(int fd, int *refuse) {
+    jig_buf b = {0};
+    char tmp[1 << 14];
+    *refuse = 0;
+    for (;;) {
+        int64_t n = http_frame(b.data, (size_t)b.len, refuse);
+        if (*refuse) break;
+        if (n >= 0) {
+            b.len = n;
+            break;
+        }
+        ssize_t k = recv(fd, tmp, sizeof tmp, 0);
+        if (k < 0 && errno == EINTR) continue;
+        if (k <= 0) break;
+        jig_buf_push(&b, tmp, (int64_t)k);
+    }
+    return jig_buf_to_str(&b);
+}
+
+static jig_str *net_serve_loop(const jig_str *addr, void *state, jig_fn *f, jig_serve_call call, int64_t limit,
+                               bool *ok, const char *loc, bool http) {
     if (limit < 0) jig_panic("precondition failed: limit >= 0", loc);
     const char *err = NULL;
     struct addrinfo *res = net_resolve(addr, true, &err);
@@ -1898,6 +1991,8 @@ jig_str *jig_net_serve(const jig_str *addr, void *state, jig_fn *f, jig_serve_ca
     }
     freeaddrinfo(res);
     for (int64_t served = 0; limit == 0 || served < limit; served++) {
+        /* What the program printed shows before the server waits. */
+        flush_out();
         int c = accept(fd, NULL, NULL);
         if (c < 0) {
             if (errno == EINTR) {
@@ -1908,16 +2003,32 @@ jig_str *jig_net_serve(const jig_str *addr, void *state, jig_fn *f, jig_serve_ca
             close(fd);
             return e;
         }
-        jig_str *req = net_read_all(c);
-        jig_str *reply = call(f, state, req);
-        net_send_all(c, jig_str_data(reply), (size_t)jig_str_len(reply));
+        int refuse = 0;
+        jig_str *req = http ? net_read_http(c, &refuse) : net_read_all(c);
+        if (refuse) {
+            const char *r = http_refusal(refuse);
+            net_send_all(c, r, strlen(r));
+        } else {
+            jig_str *reply = call(f, state, req);
+            net_send_all(c, jig_str_data(reply), (size_t)jig_str_len(reply));
+            jig_str_release(reply);
+        }
         close(c);
         jig_str_release(req);
-        jig_str_release(reply);
     }
     close(fd);
     *ok = true;
     return NULL;
+}
+
+jig_str *jig_net_serve(const jig_str *addr, void *state, jig_fn *f, jig_serve_call call, int64_t limit, bool *ok,
+                       const char *loc) {
+    return net_serve_loop(addr, state, f, call, limit, ok, loc, false);
+}
+
+jig_str *jig_net_serve_http(const jig_str *addr, void *state, jig_fn *f, jig_serve_call call, int64_t limit,
+                            bool *ok, const char *loc) {
+    return net_serve_loop(addr, state, f, call, limit, ok, loc, true);
 }
 
 int64_t jig_now_ns(void) {
@@ -2015,6 +2126,7 @@ int64_t jig_ccall_listen(const char *addr) {
 }
 
 int64_t jig_ccall_accept(int64_t fd, const char *addr) {
+    flush_out();
     for (;;) {
         int c = accept((int)fd, NULL, NULL);
         if (c >= 0) return c;
@@ -2029,6 +2141,21 @@ int64_t jig_ccall_accept(int64_t fd, const char *addr) {
 /* The connection's request, read to its end (valid until the next call). */
 const char *jig_ccall_request(int64_t conn) {
     jig_str *r = net_read_all((int)conn);
+    size_t n = (size_t)jig_str_len(r);
+    free(g_ccall_request);
+    g_ccall_request = malloc(n + 1);
+    if (!g_ccall_request) jig_oom();
+    memcpy(g_ccall_request, jig_str_data(r), n);
+    g_ccall_request[n] = 0;
+    jig_str_release(r);
+    return g_ccall_request;
+}
+
+/* The connection's HTTP request, read until it is complete or refused (see http_frame); the
+   interpreter frames it again to tell which. */
+const char *jig_ccall_request_http(int64_t conn) {
+    int refuse = 0;
+    jig_str *r = net_read_http((int)conn, &refuse);
     size_t n = (size_t)jig_str_len(r);
     free(g_ccall_request);
     g_ccall_request = malloc(n + 1);

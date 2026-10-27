@@ -13,13 +13,14 @@ jigc's command line, as compiler/tests/ checks them through the bootstrap compil
   projects  every example and jigc itself check and pass their tests; the repository is
             formatted
   modules   jig get, jig.sum and replace against local git repositories (needs git)
-  net       the greet example over real sockets, natively and on the interpreter
+  net       the greet and http examples over real sockets, natively and on the interpreter
 
 Suites about the bootstrap compiler itself (checking on several threads, the differential
 tests against jigc, its unit tests) have no counterpart. Needs no Rust.
 
 usage: suites.py [--jigc PATH] [SUITE...]
 """
+import http.client
 import json
 import os
 import shutil
@@ -476,6 +477,45 @@ def suite_net(r):
         failures.append("net: interpreted server answered %r" % reply)
     if server.communicate(timeout=30)[0].decode() != "greeted 1\n":
         failures.append("net: the interpreted server did not finish")
+    failures += net_http(r)
+    return failures
+
+
+def net_http(r):
+    """The http example answers an HTTP client, which keeps its side open, natively and on
+    the interpreter."""
+    failures = []
+    d = r.scratch("net-http")
+    shutil.copy(os.path.join(ROOT, "examples/http/main.jig"), os.path.join(d, "main.jig"))
+    exe = os.path.join(d, "http")
+    code, _, err = r.run(["build", d, "-o", exe])
+    if code != 0:
+        return ["net: http build failed: " + err]
+    for how, cmd in (("native", [exe]), ("interpreted", [r.jigc, "run", d, "--"])):
+        addr = free_addr()
+        # The probe that waits for it to listen is a request too, then two over HTTP.
+        server = subprocess.Popen(cmd + [addr, "3"], stdout=subprocess.PIPE, cwd=ROOT)
+        if not wait_listening(addr):
+            server.kill()
+            failures.append("net: the %s http server never listened" % how)
+            continue
+        host, port = addr.split(":")
+        got = []
+        for method, path, body in (("GET", "/", None), ("POST", "/missing", "some body")):
+            c = http.client.HTTPConnection(host, int(port), timeout=10)
+            try:
+                c.request(method, path, body=body)
+                resp = c.getresponse()
+                got.append((resp.status, resp.read().decode()))
+            except OSError as e:
+                got.append(("error", str(e)))
+            finally:
+                c.close()
+        if got != [(200, "Hello, world!\n"), (404, "not found\n")]:
+            failures.append("net: the %s http server answered %r" % (how, got))
+        out = server.communicate(timeout=30)[0].decode()
+        if out != "listening on %s\nserved 3\n" % addr:
+            failures.append("net: the %s http server printed %r" % (how, out))
     return failures
 
 

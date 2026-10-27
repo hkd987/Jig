@@ -813,7 +813,8 @@ fn Interp.intrinsic(
       self.fx.net_replies.insert(addr, replies)
       return ret_v(ok_v(Value.Str(r)))
     }
-    NetServe => {
+    NetServe | NetServeHttp => {
+      let http = intr.op == Op.NetServeHttp
       let addr = str_v(a[0])
       var state = a[1]
       let limit = int_v(a[3])
@@ -821,7 +822,7 @@ fn Interp.intrinsic(
         return Err(self.panic("precondition failed: limit >= 0\n  limit = " + limit.str(), span))
       }
       if self.fx.real {
-        return self.serve_real(addr, state, a[2], limit, span)
+        return self.serve_real(addr, state, a[2], limit, http, span)
       }
       var served = 0
       for limit == 0 || served < limit {
@@ -831,8 +832,20 @@ fn Interp.intrinsic(
         }
         let req = incoming.remove(0)
         self.fx.net_incoming.insert(addr, incoming)
-        let (s2, reply) = self.serve_one(a[2], state, req, span)?
-        state = s2
+        let frame = if http { http_frame(req) } else { -1 }
+        var reply = ""
+        if frame < -1 {
+          reply = http_refusal(0 - frame)
+        } else {
+          let (s2, r) = self.serve_one(
+            a[2],
+            state,
+            if frame >= 0 { req[0..frame] } else { req },
+            span,
+          )?
+          state = s2
+          reply = r
+        }
         var answers = self.fx.net_answers.get(addr).unwrap_or([])
         answers.push(reply)
         self.fx.net_answers.insert(addr, answers)
