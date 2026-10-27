@@ -246,8 +246,9 @@ enum Trap {
   Exit(code: Int)
 }
 
-/// How effects behave: all faked.
+/// How effects behave: faked (tests, scenarios), or the process's own (`jigc run`).
 struct Effects {
+  real: Bool
   stdout: Str
   stderr: Str
   stdin: List<Str>
@@ -267,6 +268,7 @@ struct Effects {
 
 fn fake_effects(seed: U64) -> Effects {
   return Effects {
+    real: false
     stdout: ""
     stderr: ""
     stdin: []
@@ -356,7 +358,7 @@ fn Interp.panic(self, msg: Str, span: syntax.Span) -> Trap {
 /// Call a function with argument values (which it takes, leaving `()`): the result and the
 /// final values of `&mut` parameters.
 fn Interp.call(&mut self, f: Int, args: &mut List<Value>) -> Result<(Value, List<Value>), Trap>
-  effects {ffi}
+  effects {io, fs, net, clock, env, ffi}
 {
   self.lw.ensure_lowered(f)
   let code = self.lw.mir.fns[f]
@@ -377,7 +379,7 @@ fn Interp.call(&mut self, f: Int, args: &mut List<Value>) -> Result<(Value, List
 }
 
 fn Interp.run(&mut self, code: MFn, args: &mut List<Value>) -> Result<(Value, List<Value>), Trap>
-  effects {ffi}
+  effects {io, fs, net, clock, env, ffi}
 {
   var locals = [Value.Unit].repeat(code.locals.len())
   for i in 0..min(code.params.len(), args.len()) {
@@ -650,7 +652,7 @@ fn Interp.rvalue(
   locals: &mut List<Value>,
   span: syntax.Span,
 ) -> Result<Value, Trap>
-  effects {ffi}
+  effects {io, fs, net, clock, env, ffi}
 {
   match rv {
     Use(op) => {
@@ -1295,7 +1297,9 @@ fn quoted_char(c: Int) -> Str {
 }
 
 /// Format a value the way `.str()` does. `nested` quotes strings and characters.
-fn Interp.show(&mut self, v: Value, ty: Int, nested: Bool) -> Result<Str, Trap> effects {ffi} {
+fn Interp.show(&mut self, v: Value, ty: Int, nested: Bool) -> Result<Str, Trap>
+  effects {io, fs, net, clock, env, ffi}
+{
   let kind = self.lw.s.tys.kinds[ty]
   match (v, kind) {
     (Str(s), _) => {
@@ -1364,7 +1368,7 @@ fn Interp.show(&mut self, v: Value, ty: Int, nested: Bool) -> Result<Str, Trap> 
 }
 
 fn Interp.show_adt(&mut self, v: Value, a: Int, args: List<Int>) -> Result<Str, Trap>
-  effects {ffi}
+  effects {io, fs, net, clock, env, ffi}
 {
   // A user-defined `str` takes precedence.
   match self.lw.s.defs.methods.get((TyKey.Adt(a), "str")) {

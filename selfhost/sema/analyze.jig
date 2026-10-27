@@ -246,7 +246,9 @@ fn c_unit(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs, env
 
 /// `jigc sim DIR STD`: run `main` of DIR on the interpreter with simulated effects, printing
 /// its output and then `<exit N>` or `<panic: MESSAGE>` if it did not return.
-fn sim_main(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs, env, ffi} {
+fn sim_main(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str>
+  effects {io, fs, net, clock, env, ffi}
+{
   let (s, _) = analyze(dir, std_dir)
   if !s.diags.is_empty() {
     return Err(dir + " has errors")
@@ -362,7 +364,7 @@ fn vc_dump(dir: Str, std_dir: Str, std: Bool) -> Result<Str, Str> effects {fs, e
 /// proof cache (`.jig/proofs` in the project). Returns the
 /// output and the exit code.
 fn prove_cmd(dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> Output
-  effects {fs, env, ffi, clock}
+  effects {io, fs, net, clock, env, ffi}
 {
   let json = flags.contains("--json")
   let verbose = flags.contains("--verbose")
@@ -453,11 +455,18 @@ fn c_compiler(release: Bool) -> Str effects {env, ffi} {
 fn build_cmd(dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> Output
   effects {fs, env, ffi, clock}
 {
-  let release = flags.contains("--release")
   let (s, _) = analyze(dir, std_dir)
   if !s.diags.is_empty() {
     return s.error_output(false, cwd)
   }
+  return build_sema(s, dir, std_dir, cwd, flags)
+}
+
+/// Build the analyzed package in DIR (without errors), as `jigc build` does.
+fn build_sema(s: Sema, dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> Output
+  effects {fs, env, ffi, clock}
+{
+  let release = flags.contains("--release")
   let root = find_project_root(dir).unwrap_or(dir)
   let proven = s.cached_proven(std_dir, join_path(join_path(root, ".jig"), "proofs"))
   var note = ""

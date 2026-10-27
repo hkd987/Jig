@@ -1,0 +1,13 @@
+import "std/io"
+import "std/time"
+
+fn main() effects {io, clock} {
+  let t = time.now_ms()
+  // A sleep as the value of an `if`.
+  if t > 0 {
+    time.sleep(1)
+  } else {
+    io.println("before the epoch")
+  }
+  io.println(if time.now_ms() > t { "later" } else { "not later" })
+}

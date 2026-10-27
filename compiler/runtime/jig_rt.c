@@ -1703,6 +1703,15 @@ jig_str *jig_fs_read(const jig_str *path, bool *ok) {
     char tmp[1 << 14];
     size_t n;
     while ((n = fread(tmp, 1, sizeof tmp, f)) > 0) jig_buf_push(&b, tmp, (int64_t)n);
+    if (ferror(f)) {
+        /* A directory opens, then fails to read. */
+        int e = errno;
+        fclose(f);
+        jig_buf_free(&b);
+        errno = e;
+        *ok = false;
+        return err_str(path);
+    }
     fclose(f);
     *ok = true;
     return jig_buf_to_str(&b);
@@ -1976,6 +1985,68 @@ int64_t jig_ccall_strdup(const char *s) { return (int64_t)(intptr_t)strdup(s); }
 void jig_ccall_free(int64_t p) { free((void *)(intptr_t)p); }
 /* The string a C function returned (empty for NULL). */
 const char *jig_ccall_str(int64_t p) { return p ? (const char *)(intptr_t)p : ""; }
+
+/* Serving for jigc's interpreter, which cannot hand `jig_net_serve` a handler to call: listen,
+   take one connection's request, answer it. A failure returns -1, its message ("ADDR: reason")
+   kept for jig_ccall_net_error. */
+static char g_ccall_net_err[512];
+static char *g_ccall_request;
+
+int64_t jig_ccall_listen(const char *addr) {
+    jig_str *a = jig_str_new(addr, (int64_t)strlen(addr));
+    const char *err = NULL;
+    struct addrinfo *res = net_resolve(a, true, &err);
+    jig_str_release(a);
+    if (!res) {
+        snprintf(g_ccall_net_err, sizeof g_ccall_net_err, "%s: %s", addr, err);
+        return -1;
+    }
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    int one = 1;
+    if (fd >= 0) setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    if (fd < 0 || bind(fd, res->ai_addr, res->ai_addrlen) != 0 || listen(fd, 64) != 0) {
+        snprintf(g_ccall_net_err, sizeof g_ccall_net_err, "%s: %s", addr, strerror(errno));
+        if (fd >= 0) close(fd);
+        freeaddrinfo(res);
+        return -1;
+    }
+    freeaddrinfo(res);
+    return fd;
+}
+
+int64_t jig_ccall_accept(int64_t fd, const char *addr) {
+    for (;;) {
+        int c = accept((int)fd, NULL, NULL);
+        if (c >= 0) return c;
+        if (errno != EINTR) {
+            snprintf(g_ccall_net_err, sizeof g_ccall_net_err, "%s: %s", addr, strerror(errno));
+            close((int)fd);
+            return -1;
+        }
+    }
+}
+
+/* The connection's request, read to its end (valid until the next call). */
+const char *jig_ccall_request(int64_t conn) {
+    jig_str *r = net_read_all((int)conn);
+    size_t n = (size_t)jig_str_len(r);
+    free(g_ccall_request);
+    g_ccall_request = malloc(n + 1);
+    if (!g_ccall_request) jig_oom();
+    memcpy(g_ccall_request, jig_str_data(r), n);
+    g_ccall_request[n] = 0;
+    jig_str_release(r);
+    return g_ccall_request;
+}
+
+void jig_ccall_answer(int64_t conn, const char *reply) {
+    net_send_all((int)conn, reply, strlen(reply));
+    close((int)conn);
+}
+
+void jig_ccall_close(int64_t fd) { close((int)fd); }
+
+const char *jig_ccall_net_error(void) { return g_ccall_net_err; }
 
 /* ---------- runtime element types ---------- */
 

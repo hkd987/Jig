@@ -1386,7 +1386,7 @@ impl<'l, 'a> Interp<'l, 'a> {
                 }
                 ret(match std::fs::read_to_string(&*p) {
                     Ok(c) => Self::ok(Value::Str(Rc::from(c.as_str()))),
-                    Err(e) => Self::err(format!("{p}: {e}")),
+                    Err(e) => Self::err(format!("{p}: {}", os_error(&e))),
                 })
             }
             FsWrite => {
@@ -1398,7 +1398,7 @@ impl<'l, 'a> Interp<'l, 'a> {
                 }
                 ret(match std::fs::write(&*p, c.as_bytes()) {
                     Ok(()) => Self::ok(Value::Unit),
-                    Err(e) => Self::err(format!("{p}: {e}")),
+                    Err(e) => Self::err(format!("{p}: {}", os_error(&e))),
                 })
             }
             FsExists => {
@@ -1433,7 +1433,7 @@ impl<'l, 'a> Interp<'l, 'a> {
                             names.into_iter().map(|n| Value::Str(Rc::from(n.as_str()))).collect(),
                         )))
                     }
-                    Err(e) => Self::err(format!("{p}: {e}")),
+                    Err(e) => Self::err(format!("{p}: {}", os_error(&e))),
                 })
             }
             Args => ret(Value::List(Rc::new(self.fx.args.iter().map(|s| Value::Str(Rc::from(s.as_str()))).collect()))),
@@ -1477,6 +1477,9 @@ impl<'l, 'a> Interp<'l, 'a> {
                         None => Self::err(format!("{addr}: Connection refused")),
                     });
                 }
+                if let Some(e) = addr_error(&addr) {
+                    return ret(Self::err(format!("{addr}: {e}")));
+                }
                 ret(match net_request(&addr, &req) {
                     Ok(r) => Self::ok(Value::Str(Rc::from(r.as_str()))),
                     Err(e) => Self::err(format!("{addr}: {}", os_error(&e))),
@@ -1500,6 +1503,9 @@ impl<'l, 'a> Interp<'l, 'a> {
                         served += 1;
                     }
                     return ret(Self::ok(state));
+                }
+                if let Some(e) = addr_error(&addr) {
+                    return ret(Self::err(format!("{addr}: {e}")));
                 }
                 let listener = match std::net::TcpListener::bind(listen_addr(&addr)) {
                     Ok(l) => l,
@@ -1701,9 +1707,18 @@ impl<'l, 'a> Interp<'l, 'a> {
 /// An OS error as the C library words it (what native builds print).
 fn os_error(e: &std::io::Error) -> String {
     let s = e.to_string();
+    let s = s.strip_prefix("failed to lookup address information: ").unwrap_or(&s);
     match s.find(" (os error") {
         Some(i) => s[..i].to_string(),
-        None => s,
+        None => s.to_string(),
+    }
+}
+
+/// Why `addr` is not "host:port", in native builds' words.
+fn addr_error(addr: &str) -> Option<&'static str> {
+    match addr.rfind(':') {
+        Some(i) if i + 1 < addr.len() => (i >= 256 || addr.len() - i > 32).then_some("address too long"),
+        _ => Some("expected host:port"),
     }
 }
 

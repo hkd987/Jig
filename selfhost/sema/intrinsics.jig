@@ -2,7 +2,12 @@
 // compiler's `mir/interp.rs`. Strings, characters and numbers go through the language's own
 // operations, which native builds share.
 
+import "std/fs"
+import "std/io"
 import "std/math"
+import "std/net"
+import "std/os"
+import "std/time"
 import "syntax"
 
 fn some_v(v: Value) -> Value {
@@ -176,8 +181,11 @@ fn Interp.intrinsic(
   a: &mut List<Value>,
   span: syntax.Span,
 ) -> Result<(Value, List<Value>), Trap>
-  effects {ffi}
+  effects {io, fs, net, clock, env, ffi}
 {
+  if self.fx.real && is_sim(intr.op) {
+    return Err(self.panic("`std/sim` only works in tests", span))
+  }
   match intr.op {
     Panic => {
       return Err(self.panic(str_v(a[0]), span))
@@ -612,18 +620,38 @@ fn Interp.intrinsic(
       return ret_v(Value.Str(self.show(a[0], intr.tys[0], false)?))
     }
     Print => {
-      self.fx.stdout += str_v(a[0])
+      if self.fx.real {
+        io.print(str_v(a[0]))
+      } else {
+        self.fx.stdout += str_v(a[0])
+      }
       return ret_v(Value.Unit)
     }
     Println => {
-      self.fx.stdout += str_v(a[0]) + "\n"
+      if self.fx.real {
+        io.println(str_v(a[0]))
+      } else {
+        self.fx.stdout += str_v(a[0]) + "\n"
+      }
       return ret_v(Value.Unit)
     }
     Eprintln => {
-      self.fx.stderr += str_v(a[0]) + "\n"
+      if self.fx.real {
+        io.eprintln(str_v(a[0]))
+      } else {
+        self.fx.stderr += str_v(a[0]) + "\n"
+      }
       return ret_v(Value.Unit)
     }
     ReadLine => {
+      if self.fx.real {
+        return ret_v(
+          match io.read_line() {
+            Some(l) => some_v(Value.Str(l))
+            None => none_v()
+          },
+        )
+      }
       if self.fx.stdin_pos < self.fx.stdin.len() {
         let l = self.fx.stdin[self.fx.stdin_pos]
         self.fx.stdin_pos += 1
@@ -632,6 +660,9 @@ fn Interp.intrinsic(
       return ret_v(none_v())
     }
     ReadAll => {
+      if self.fx.real {
+        return ret_v(Value.Str(io.read_all()))
+      }
       let from = min(self.fx.stdin_pos, self.fx.stdin.len())
       let rest = self.fx.stdin[from..self.fx.stdin.len()].join("\n")
       self.fx.stdin_pos = self.fx.stdin.len()
@@ -639,6 +670,14 @@ fn Interp.intrinsic(
     }
     FsRead => {
       let p = str_v(a[0])
+      if self.fx.real {
+        return ret_v(
+          match fs.read(p) {
+            Ok(c) => ok_v(Value.Str(c))
+            Err(e) => err_v(e)
+          },
+        )
+      }
       return ret_v(
         match self.fx.files.get(p) {
           Some(c) => ok_v(Value.Str(c))
@@ -647,13 +686,32 @@ fn Interp.intrinsic(
       )
     }
     FsWrite => {
+      if self.fx.real {
+        return ret_v(
+          match fs.write(str_v(a[0]), str_v(a[1])) {
+            Ok(_) => ok_v(Value.Unit)
+            Err(e) => err_v(e)
+          },
+        )
+      }
       self.fx.files.insert(str_v(a[0]), str_v(a[1]))
       return ret_v(ok_v(Value.Unit))
     }
     FsExists => {
+      if self.fx.real {
+        return ret_v(Value.Bool(fs.exists(str_v(a[0]))))
+      }
       return ret_v(Value.Bool(self.fx.files.contains(str_v(a[0]))))
     }
     FsList => {
+      if self.fx.real {
+        return ret_v(
+          match fs.list(str_v(a[0])) {
+            Ok(names) => ok_v(strs_v(names))
+            Err(e) => err_v(e)
+          },
+        )
+      }
       var dir = str_v(a[0])
       for dir.ends_with("/") {
         dir = dir[0..dir.len() - 1]
@@ -684,6 +742,14 @@ fn Interp.intrinsic(
       return ret_v(strs_v(self.fx.args))
     }
     EnvVar => {
+      if self.fx.real {
+        return ret_v(
+          match os.env(str_v(a[0])) {
+            Some(v) => some_v(Value.Str(v))
+            None => none_v()
+          },
+        )
+      }
       return ret_v(
         match self.fx.env.get(str_v(a[0])) {
           Some(v) => some_v(Value.Str(v))
@@ -695,10 +761,16 @@ fn Interp.intrinsic(
       return Err(Trap.Exit(int_v(a[0])))
     }
     NowMs => {
+      if self.fx.real {
+        return ret_v(Value.Int(time.now_ms()))
+      }
       self.fx.clock_ms += 1
       return ret_v(Value.Int(self.fx.clock_ms))
     }
     NowNs => {
+      if self.fx.real {
+        return ret_v(Value.Int(time.now_ns()))
+      }
       self.fx.clock_ms += 1
       return ret_v(Value.Int(self.fx.clock_ms * 1000000))
     }
@@ -707,11 +779,23 @@ fn Interp.intrinsic(
       if ms < 0 {
         return Err(self.panic("precondition failed: ms >= 0\n  ms = " + ms.str(), span))
       }
-      self.fx.clock_ms += ms
+      if self.fx.real {
+        time.sleep(ms)
+      } else {
+        self.fx.clock_ms += ms
+      }
       return ret_v(Value.Unit)
     }
     NetRequest => {
       let addr = str_v(a[0])
+      if self.fx.real {
+        return ret_v(
+          match net.request(addr, str_v(a[1])) {
+            Ok(r) => ok_v(Value.Str(r))
+            Err(e) => err_v(e)
+          },
+        )
+      }
       var reqs = self.fx.net_requests.get(addr).unwrap_or([])
       reqs.push(str_v(a[1]))
       self.fx.net_requests.insert(addr, reqs)
@@ -729,6 +813,9 @@ fn Interp.intrinsic(
       let limit = int_v(a[3])
       if limit < 0 {
         return Err(self.panic("precondition failed: limit >= 0\n  limit = " + limit.str(), span))
+      }
+      if self.fx.real {
+        return self.serve_real(addr, state, a[2], limit, span)
       }
       var served = 0
       for limit == 0 || served < limit {
@@ -970,7 +1057,7 @@ fn Interp.serve_one(
   req: Str,
   span: syntax.Span,
 ) -> Result<(Value, Str), Trap>
-  effects {ffi}
+  effects {io, fs, net, clock, env, ffi}
 {
   match self.call_value(handle, [state, Value.Str(req)], span)? {
     Tuple(t) => if t.len() == 2 {
@@ -987,7 +1074,7 @@ fn Interp.call_value(
   args: List<Value>,
   span: syntax.Span,
 ) -> Result<Value, Trap>
-  effects {ffi}
+  effects {io, fs, net, clock, env, ffi}
 {
   match f {
     Fn(m) => {
@@ -1012,7 +1099,7 @@ fn Interp.merge_sort(
   less: Value,
   span: syntax.Span,
 ) -> Result<(), Trap>
-  effects {ffi}
+  effects {io, fs, net, clock, env, ffi}
 {
   let n = xs.len()
   if n <= 1 {

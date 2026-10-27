@@ -2015,7 +2015,7 @@ fn Cg.intrinsic(
       return "((" + self.cty(ret) + "){0})"
     }
     Sleep => {
-      return "jig_sleep_ms(" + a[0] + ", " + loc + ")"
+      return "({ jig_sleep_ms(" + a[0] + ", " + loc + "); (jig_unit)0; })"
     }
     NetRequest => {
       cx.out += "    bool nk" +

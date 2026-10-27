@@ -37,8 +37,8 @@ trace collection.
 C identical to the Rust compiler's, runs tests and scenarios on its own interpreter with
 the same results, and compiles itself: `bootstrap/jigc.c` builds with any
 C compiler and regenerates itself byte for byte. It runs tests and proves contracts with the
-same results as the Rust compiler too; `jigc check`, `test`, `prove`, `build` and `fmt` take
-`jig`'s arguments and print what it prints.
+same results as the Rust compiler too; `jigc check`, `test`, `prove`, `run`, `build` and
+`fmt` take `jig`'s arguments and print what it prints.
 
 **Not yet.** `jigc` has no full command line, so the `jig` command is still the Rust
 compiler. Agent benchmark results, contracts on most of the compiler (its lexer and nearly

@@ -1496,3 +1496,143 @@ fn jigc_proof_cache_matches_bootstrap() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A program for `run` that uses the real effects: arguments, standard input, files, the
+/// environment, the clock, both output streams and the exit code.
+const EFFECTS_MAIN: &str = r#"import "std/fs"
+import "std/io"
+import "std/os"
+import "std/time"
+
+fn main() effects {io, fs, env, clock} {
+  let args = os.args()
+  io.println("args: " + args[1..args.len()].join(","))
+  let dir = args[1]
+  io.println(match fs.read(dir + "/missing") {
+    Ok(_) => "read"
+    Err(e) => e.replace(dir, "DIR")
+  })
+  let _ = fs.write(dir + "/note.txt", "written")
+  io.println(fs.read(dir + "/note.txt").unwrap_or("?"))
+  io.println(fs.list(dir).unwrap_or([]).join(","))
+  io.println(fs.exists(dir + "/missing").str())
+  io.println(os.env("JIG_RUN_TEST").unwrap_or("unset"))
+  let t = time.now_ms()
+  if t > 0 {
+    time.sleep(1)
+  } else {
+    io.println("before the epoch")
+  }
+  io.print("first line: ")
+  io.println(io.read_line().unwrap_or("<eof>"))
+  io.println("the rest: " + io.read_all())
+  io.eprintln("on standard error")
+  os.exit(3)
+}
+"#;
+
+/// Run with `stdin`, from `cwd`: exit code, standard output and standard error, or `None` if
+/// it runs past `secs`.
+fn run_within(cmd: &mut Command, stdin: &str, secs: u64) -> Option<(Option<i32>, String, String)> {
+    use std::io::Write;
+    let mut child = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let _ = child.stdin.take().unwrap().write_all(stdin.as_bytes());
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let out = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut stdout, &mut s);
+        s
+    });
+    let err = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut stderr, &mut s);
+        s
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return Some((status.code(), out.join().unwrap(), err.join().unwrap()));
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// `jigc run [--native] DIR -- ARGS` against `jig run`, from `cwd`, with the same input: the
+/// same exit code, standard output and standard error.
+fn compare_run(exe: &Path, std_dir: &Path, cwd: &Path, dir: &Path, native: bool) -> Option<String> {
+    let jig = env!("CARGO_BIN_EXE_jig");
+    let stdin = "one\ntwo\nthree";
+    let args = |cmd: &mut Command| {
+        cmd.arg("run");
+        if native {
+            cmd.arg("--native");
+        }
+        cmd.arg(dir).arg("--").arg(dir).arg("a b").arg("it's").current_dir(cwd).env("JIG_RUN_TEST", "set");
+    };
+    let mut c = Command::new(jig);
+    args(&mut c);
+    let expected = run_within(&mut c, stdin, 60)?;
+    let mut c = Command::new(exe);
+    args(&mut c);
+    c.env("JIG_STD", std_dir).env("PWD", cwd);
+    let actual = run_within(&mut c, stdin, 120);
+    if actual.as_ref() == Some(&expected) {
+        return None;
+    }
+    Some(format!("{}{}: bootstrap {expected:?}, jigc {actual:?}", dir.display(), if native { " (native)" } else { "" }))
+}
+
+/// `jigc run` runs programs as `jig run` does, with real effects: every run test and example
+/// and a program using every kind of effect on the interpreter (output as it goes, panics with
+/// their backtraces, `os.exit`), and the examples and that program built and run with
+/// `--native`.
+#[test]
+fn jigc_run_matches_bootstrap() {
+    if !have_cc() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    let root = repo_root();
+    let exe = jigc();
+    let std_dir = std::fs::canonicalize(root.join("compiler/std")).unwrap();
+    let work = std::fs::canonicalize(PathBuf::from(env!("CARGO_TARGET_TMPDIR"))).unwrap().join("selfhost-run");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    let mut failures: Vec<String> = Vec::new();
+    let mut entries: Vec<PathBuf> =
+        std::fs::read_dir(root.join("compiler/tests/run")).unwrap().map(|e| e.unwrap().path()).collect();
+    entries.sort();
+    for p in entries.iter().filter(|p| p.extension().is_some_and(|x| x == "jig")) {
+        let name = p.file_stem().unwrap().to_string_lossy().to_string();
+        let d = work.join(format!("run-{name}"));
+        write_file(&d.join("main.jig"), &std::fs::read_to_string(p).unwrap());
+        failures.extend(compare_run(exe, &std_dir, &work, &d, false));
+    }
+    let effects = work.join("effects");
+    write_file(&effects.join("main.jig"), EFFECTS_MAIN);
+    let mut natives = vec![effects.clone()];
+    let mut entries: Vec<PathBuf> =
+        std::fs::read_dir(root.join("examples")).unwrap().map(|e| e.unwrap().path()).collect();
+    entries.sort();
+    for p in entries.iter().filter(|p| p.is_dir()) {
+        let d = work.join(p.file_name().unwrap());
+        copy_dir(p, &d);
+        natives.push(d);
+    }
+    for d in &natives {
+        failures.extend(compare_run(exe, &std_dir, &work, d, false));
+        failures.extend(compare_run(exe, &std_dir, &work, d, true));
+    }
+    assert!(failures.is_empty(), "{} runs differ:\n{}", failures.len(), failures.join("\n"));
+}

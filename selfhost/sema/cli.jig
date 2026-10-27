@@ -2,6 +2,7 @@
 // returns what `jig` prints on standard output and on standard error, and its exit code.
 
 import "std/fs"
+import "std/io"
 import "std/time"
 import "syntax"
 
@@ -68,7 +69,7 @@ fn hex_lower(v: Int) -> Str {
 /// `jigc test [PATH] [FILTER] [--json]`: run the package's tests and scenarios on the
 /// interpreter, as `jig test` does.
 fn test_cmd(dir: Str, std_dir: Str, cwd: Str, filter: Str, json: Bool) -> Output
-  effects {fs, env, ffi, clock}
+  effects {io, fs, net, clock, env, ffi}
 {
   let (s, _) = analyze(dir, std_dir)
   if !s.diags.is_empty() {
@@ -188,6 +189,51 @@ fn fmt_cmd(targets: List<Str>, check: Bool) -> Output effects {fs} {
   return output(out, err, if failed > 0 { 1 } else { 0 })
 }
 
+/// A word for `sh`, quoted.
+fn shell_quote(s: Str) -> Str {
+  return "'" + s.replace("'", "'\\''") + "'"
+}
+
+/// `jigc run [PATH] [--native] [-- ARGS...]`: run `main` on the interpreter with real effects,
+/// or build it (debug) and run the executable, as `jig run` does. What the program prints goes
+/// out as it runs; the output is jigc's own, and the exit code the program's.
+fn run_cmd(o: Opts, std_dir: Str, cwd: Str, args: List<Str>) -> Output
+  effects {io, fs, net, clock, env, ffi}
+{
+  let dir = absolute_path(o.path, cwd)
+  let (s, _) = analyze(dir, std_dir)
+  if !s.diags.is_empty() {
+    return s.error_output(o.json, cwd)
+  }
+  if o.rest.contains("--native") {
+    let b = build_sema(s, dir, std_dir, cwd, [])
+    if b.code != 0 {
+      return output("", b.err, b.code)
+    }
+    if !b.err.is_empty() {
+      // The note on proofs used.
+      io.eprintln(b.err[0..b.err.len() - 1])
+    }
+    let exe = b.out.trim()
+    var cmd = shell_quote(exe)
+    for a in args {
+      cmd += " " + shell_quote(a)
+    }
+    let status = system(cmd) as Int
+    if status < 0 {
+      return output("", "error: cannot run " + exe + "\n", 1)
+    }
+    // Exited: its code; killed by a signal: 101.
+    return output("", "", if status % 128 == 0 { status / 256 % 256 } else { 101 })
+  }
+  var argv = [o.path]
+  argv.extend(args)
+  return match run_main_real(new_lw(s), cwd, argv) {
+    Ok(code) => output("", "", code)
+    Err(e) => output("", "error: " + e + "\n", 1)
+  }
+}
+
 // ---------- the command line ----------
 
 fn usage() -> Str {
@@ -198,6 +244,7 @@ fn usage() -> Str {
     "  check [--json]          parse, types, effects, lints and dead code for the project",
     "  test [filter] [--json]  run tests in the deterministic runner",
     "  prove [filter] [--json] [--verbose]  prove contracts and safety with an SMT solver (cached)",
+    "  run [--native] [-- args]  run main (interpreter, or a native debug build)",
     "  build [--release] [-o out]  compile main to a native executable (C)",
     "  fmt [--check]           format .jig files in place",
     "  cc DIR [STD]            DIR's release build as one C file, the runtime included",
@@ -259,7 +306,9 @@ fn result_output(r: Result<Str, Str>) -> Output {
 }
 
 /// Run `jigc ARGS` (without the program name) in `cwd`: what it prints, and its exit code.
-pub fn run_cli(args: List<Str>, cwd: Str, std_dir: Str) -> Output effects {fs, env, ffi, clock} {
+pub fn run_cli(args: List<Str>, cwd: Str, std_dir: Str) -> Output
+  effects {io, fs, net, clock, env, ffi}
+{
   if args.is_empty() {
     return output("", usage(), 2)
   }
@@ -280,6 +329,22 @@ pub fn run_cli(args: List<Str>, cwd: Str, std_dir: Str) -> Output effects {fs, e
       flags.push("--json")
     }
     return prove_cmd(absolute_path(o.path, cwd), std_dir, cwd, flags)
+  }
+  if cmd == "run" {
+    // Arguments after `--` are the program's.
+    var ours: List<Str> = []
+    var prog_args: List<Str> = []
+    var after = false
+    for a in rest {
+      if after {
+        prog_args.push(a)
+      } else if a == "--" {
+        after = true
+      } else {
+        ours.push(a)
+      }
+    }
+    return run_cmd(parse_opts(ours), std_dir, cwd, prog_args)
   }
   if cmd == "build" {
     // `-o OUT` first, so OUT is not taken for the project's path.

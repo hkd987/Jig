@@ -518,10 +518,14 @@ fn Loader.add_dir_package(
       return None
     }
   }
+  // Source files: not directories (such as a build's `.jig`).
+  var sources: List<Str> = []
   var any_jig = false
   for n in names {
-    if n.ends_with(".jig") {
-      any_jig = true
+    let kind = source_kind(n)
+    if !kind.is_empty() && !is_dir(join_path(dir, n)) {
+      sources.push(n)
+      any_jig = any_jig || kind == "jig"
     }
   }
   if !any_jig {
@@ -529,10 +533,7 @@ fn Loader.add_dir_package(
     return None
   }
   let p = self.new_package(path, false, module)
-  for n in names {
-    if !n.ends_with(".jig") && !n.ends_with(".feature") {
-      continue
-    }
+  for n in sources {
     let f = join_path(dir, n)
     match fs.read(f) {
       Ok(text) => self.add_file(p, f, text)
@@ -541,6 +542,18 @@ fn Loader.add_dir_package(
   }
   self.queue.push(p)
   return Some(p)
+}
+
+/// "jig" or "feature" for a source file's name, else "": its extension, as a path's (`.jig`
+/// alone has none).
+fn source_kind(name: Str) -> Str {
+  if name.ends_with(".jig") && name.len() > 4 {
+    return "jig"
+  }
+  if name.ends_with(".feature") && name.len() > 8 {
+    return "feature"
+  }
+  return ""
 }
 
 fn Loader.parse_package(&mut self, p: Int) {

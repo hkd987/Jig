@@ -510,7 +510,7 @@ fn prove_program(
   cwd: Str,
   cache_dir: Option<Str>,
 ) -> Result<List<FnReport>, Str>
-  effects {fs, env, ffi, clock}
+  effects {io, fs, net, clock, env, ffi}
 {
   let solver = match solver_version() {
     Some(v) => v
@@ -922,7 +922,7 @@ fn Interp.run_matches(
   o: ObResult,
   own: List<syntax.Span>,
 ) -> Option<Bool>
-  effects {ffi}
+  effects {io, fs, net, clock, env, ffi}
 {
   self.fx = fake_effects(1)
   self.stack = []
@@ -983,7 +983,7 @@ fn last_index_of(s: Str, t: Str) -> Option<Int> {
 }
 
 fn Interp.show_args(&mut self, args: List<Value>, tys: List<Int>, names: List<Str>) -> Str
-  effects {ffi}
+  effects {io, fs, net, clock, env, ffi}
 {
   self.fx = fake_effects(1)
   self.stack = []
@@ -1075,7 +1075,7 @@ fn Interp.shrink_replay(
   o: ObResult,
   own: List<syntax.Span>,
 ) -> List<Value>
-  effects {ffi}
+  effects {io, fs, net, clock, env, ffi}
 {
   var args = first
   var budget = 300
@@ -1109,7 +1109,9 @@ fn Interp.shrink_replay(
 /// its inputs can be rebuilt), then with generated inputs. A run that fails the same check
 /// confirms a real bug; a counterexample that passes means a missing fact. Cached results keep
 /// the replay they were stored with.
-fn replay_failures(s: Sema, reports: List<FnReport>, cwd: Str) -> List<FnReport> effects {ffi} {
+fn replay_failures(s: Sema, reports: List<FnReport>, cwd: Str) -> List<FnReport>
+  effects {io, fs, net, clock, env, ffi}
+{
   var todo = false
   for r in reports {
     if r.cached {

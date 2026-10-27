@@ -2,12 +2,12 @@ import "sema"
 import "std/io"
 import "std/os"
 
-// jigc: the Jig compiler, written in Jig. `jigc check`, `test`, `prove`, `build` and `fmt` take
+// jigc: the Jig compiler, written in Jig. `jigc check`, `test`, `prove`, `run`, `build` and `fmt` take
 // the same arguments as `jig`'s and print the same; `jigc debug ...` prints the dumps the tests
 // compare with `jig debug ...`, and `jigc cc DIR` the one C file that is `bootstrap/jigc.c`
 // for `selfhost` (see `sema/cli.jig`).
 
-fn main() effects {io, fs, env, ffi, clock} {
+fn main() effects {io, fs, net, clock, env, ffi} {
   let args = os.args()
   let o = sema.run_cli(
     args[1..args.len()],

@@ -1,0 +1,77 @@
+// Real effects for `jigc run`, as the bootstrap compiler's `Effects::real`: the console,
+// files, environment, clock and network are the process's own. Serving goes through the
+// runtime's `jig_ccall_*` helpers, since `net.serve` takes a handler without effects and a
+// handler here runs on the interpreter.
+
+import "std/time"
+import "syntax"
+
+fn jig_ccall_listen(addr: Str) -> Int effects {ffi}
+
+fn jig_ccall_accept(fd: Int, addr: Str) -> Int effects {ffi}
+
+fn jig_ccall_request(conn: Int) -> Str effects {ffi}
+
+fn jig_ccall_answer(conn: Int, reply: Str) effects {ffi}
+
+fn jig_ccall_close(fd: Int) effects {ffi}
+
+fn jig_ccall_net_error() -> Str effects {ffi}
+
+/// Effects for running `main` for real with these arguments; random numbers start from the
+/// clock.
+fn real_effects(args: List<Str>) -> Effects effects {clock} {
+  var fx = fake_effects(u64_bits_of(time.now_ns()))
+  fx.real = true
+  fx.args = args
+  return fx
+}
+
+/// Is this one of `std/sim`'s operations, which only tests may use?
+fn is_sim(op: Op) -> Bool {
+  return match op {
+    SimStdout | SimStderr | SimSetStdin | SimSetArgs | SimSetEnv => true
+    SimSetFile | SimFile | SimRemoveFile | SimSetTime | SimAdvance => true
+    SimSeed | SimReply | SimRequests | SimConnect | SimAnswers => true
+    _ => false
+  }
+}
+
+/// `net.serve` for real: one connection at a time, each request through `handle` with the
+/// state, until `limit` requests (0: forever).
+fn Interp.serve_real(
+  &mut self,
+  addr: Str,
+  state: Value,
+  handle: Value,
+  limit: Int,
+  span: syntax.Span,
+) -> Result<(Value, List<Value>), Trap>
+  effects {io, fs, net, clock, env, ffi}
+{
+  let fd = jig_ccall_listen(addr)
+  if fd < 0 {
+    return ret_v(err_v(jig_ccall_net_error()))
+  }
+  var st = state
+  var served = 0
+  for limit == 0 || served < limit {
+    let conn = jig_ccall_accept(fd, addr)
+    if conn < 0 {
+      return ret_v(err_v(jig_ccall_net_error()))
+    }
+    let (s2, reply) = match self.serve_one(handle, st, jig_ccall_request(conn), span) {
+      Ok(r) => r
+      Err(t) => {
+        jig_ccall_close(conn)
+        jig_ccall_close(fd)
+        return Err(t)
+      }
+    }
+    st = s2
+    jig_ccall_answer(conn, reply)
+    served += 1
+  }
+  jig_ccall_close(fd)
+  return ret_v(ok_v(st))
+}

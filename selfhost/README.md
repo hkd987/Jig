@@ -17,11 +17,13 @@ bootstrap compiler on every `.jig` file in the repository plus a few hundred mut
 | MIR lowering, ownership analyses, C back end | `compiler/src/mir/lower.rs`, `compiler/src/codegen/` | `sema/mir.jig`, `sema/lower*.jig`, `sema/own.jig`, `sema/cgen*.jig` | `jigc debug c DIR` = `jig debug c DIR` |
 | Formatter | `compiler/src/fmt/` | `syntax/fmt.jig`, `syntax/fmt_expr.jig` | `jigc fmt [--check] PATH` = `jig fmt [--check] PATH` |
 | Interpreter, test runner, property tests | `compiler/src/mir/interp.rs`, `compiler/src/runner.rs`, `compiler/src/proptest.rs` | `sema/interp.jig`, `sema/intrinsics.jig`, `sema/runner.jig` | `jigc test [--json] DIR` = `jig test [--json] DIR` |
+| Real effects (`run`) | `Effects::real` in `compiler/src/mir/interp.rs`, `compiler/src/cli.rs` | `sema/real.jig`, `sema/cli.jig` | `jigc run [--native] DIR -- ARGS` = `jig run [--native] DIR -- ARGS` |
 | Prover: verification conditions | `compiler/src/verify/vc.rs`, `frame.rs` | `sema/vc*.jig`, `sema/frame.jig` | `jigc debug vc DIR` = `jig debug vc DIR` |
 | Prover: solving, replay, reports | `compiler/src/verify/mod.rs`, `smt.rs` | `sema/prove.jig` | `jigc prove --json DIR` = `jig prove --json DIR` |
 
-Its command line is `jig`'s: `jigc check`, `test`, `prove`, `build` and `fmt` take the same
-arguments and print the same, and the dumps the tests compare are `jigc debug ...`, as in
+Its command line is `jig`'s: `jigc check`, `test`, `prove`, `run`, `build` and `fmt` take the
+same arguments and print the same (`run` with real effects, on its interpreter or with
+`--native` built and run), and the dumps the tests compare are `jigc debug ...`, as in
 `jig debug ...`. It carries the standard library and the C runtime (`sema/stdlib.jig`, written
 by `bootstrap/stdlib.py` and kept current by a test); `$JIG_STD` names a directory to read
 instead.
@@ -72,6 +74,14 @@ every run test's expected output. C functions are called as the bootstrap's inte
 calls them (`sema/ffi.jig`): found by name with `dlsym` among the process's symbols and the
 libraries `jig.mod` links, and called through the runtime's `jig_ccall_*`, which fill every
 argument register.
+
+`jigc run` gives the interpreter the process's own effects (`sema/real.jig`): output as the
+program prints it, standard input, files, the environment, the clock and the network. A
+`net.serve` handler runs on the interpreter, so serving goes through the runtime's
+`jig_ccall_listen`, `_accept`, `_request` and `_answer` rather than `jig_net_serve`. The test
+runs every run test, every example and a program using each effect with `jigc run` and `jig
+run`, and the examples and that program with `--native`: the same standard output, standard
+error and exit code.
 
 The prover (`sema/frame.jig`, `sema/vc*.jig`, `sema/prove.jig`) evaluates each function
 symbolically into SMT-LIB obligations, as the bootstrap compiler's `verify/` does, and the

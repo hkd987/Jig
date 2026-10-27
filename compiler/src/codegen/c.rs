@@ -2279,7 +2279,7 @@ impl<'l, 'a> CGen<'l, 'a> {
                 let c = self.cty(ret);
                 format!("(({c}){{0}})")
             }
-            Sleep => format!("jig_sleep_ms({}, {loc})", a[0]),
+            Sleep => format!("({{ jig_sleep_ms({}, {loc}); (jig_unit)0; }})", a[0]),
             NetRequest => {
                 let _ =
                     writeln!(cx.out, "    bool nk{n}; jig_str *nr{n} = jig_net_request({}, {}, &nk{n});", a[0], a[1]);
