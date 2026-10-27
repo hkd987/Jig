@@ -441,7 +441,7 @@ fn jigc_checker_matches_bootstrap() {
 /// files relative to the working directory.
 fn compare_c(exe: &Path, std_dir: &Path, dir: &Path) -> Option<String> {
     let dir = std::fs::canonicalize(dir).unwrap();
-    let Ok(expected) = jig::tools::debug_check::c(&dir) else { return None };
+    let Ok(expected) = jig::tools::debug_check::c(&dir, false) else { return None };
     let cwd = std::env::current_dir().unwrap();
     let out = Command::new(exe).arg("c").arg(&dir).arg(std_dir).env("PWD", &cwd).output().unwrap();
     let actual = String::from_utf8_lossy(&out.stdout);
@@ -1260,8 +1260,8 @@ fn jigc_proofs_match_bootstrap() {
 }
 
 /// The proof cache is shared: `jigc prove` writes the same `.jig/proofs` files (same keys,
-/// same contents) as `jig prove`, and each compiler's report from the other's warm cache is
-/// the same as its own.
+/// same contents) as `jig prove`, each compiler's report from the other's warm cache is the
+/// same as its own, and the C both generate with the cached proofs is the same.
 #[test]
 fn jigc_proof_cache_matches_bootstrap() {
     if !have_cc() || jig::verify::smt::solver_version().is_none() {
@@ -1334,6 +1334,14 @@ fn jigc_proof_cache_matches_bootstrap() {
         // Each read the other's cache.
         if warm_jig != warm_jigc || !warm_jig.contains(&format!("\"cached\":{}", from_jig.len())) {
             failures.push(format!("{src}: warm reports differ"))
+        }
+        // Builds use the proofs: the same checks are removed from the same C.
+        let expected = jig::tools::debug_check::c(&d, true).unwrap_or_default();
+        let cwd = std::env::current_dir().unwrap();
+        let out = Command::new(exe).arg("c").arg(&d).arg(&std_dir).arg("proofs").env("PWD", &cwd).output().unwrap();
+        let unproved = jig::tools::debug_check::c(&d, false).unwrap_or_default();
+        if String::from_utf8_lossy(&out.stdout) != expected || expected == unproved {
+            failures.push(format!("{src}: the C with proofs differs (or no check was removed)"));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

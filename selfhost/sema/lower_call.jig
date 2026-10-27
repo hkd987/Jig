@@ -482,6 +482,9 @@ fn words_of(text: Str) -> List<Str> {
 fn Lw.check_with_names(&mut self, pred: Int, names: List<(Str, Int)>, kind: CheckKind, owner: Str) {
   let text = self.src(pred)
   let span = self.fb.cur_span
+  if self.mir.elide.contract.contains(span_key(span)) {
+    return
+  }
   let c = self.temp(self.s.tys.bool)
   if self.eval_pred_names(pred, names, place_of(c)) {
     let words = words_of(text)

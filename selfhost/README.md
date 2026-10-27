@@ -77,7 +77,9 @@ and replays failed contracts on the interpreter; its report matches `jig prove -
 on the prover tests, examples, agent solutions and 60 mutations. It shares `jig prove`'s proof
 cache: the same keys (the bootstrap's stable hash, ported in `sema/hash.jig`, over the same
 contract texts and frames) and the same files, so either compiler reads what the other
-proved.
+proved. Builds use those proofs as the bootstrap's do: `jigc c DIR STD proofs` prints what
+`jig debug c DIR proofs` prints (the checks discharged removed from lowering and the C), and
+`jigc build DIR STD [--release]` compiles it.
 
 The back end (about 6,600 lines of Jig for 7,300 of Rust) lowers to the same MIR, runs the
 same ownership analyses (borrowed locals, last uses, unique lists) and prints the same C:

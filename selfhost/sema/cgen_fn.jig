@@ -168,7 +168,8 @@ fn Cg.place_expr(&mut self, mf: MFn, cx: FnCx, p: Place, write: Bool, span: synt
         t = self.variant_tys(t)[v][i]
       }
       Index(op, ispan) => {
-        let unchecked = ispan.lo == 0 && ispan.hi == 0
+        let unchecked = (ispan.lo == 0 && ispan.hi == 0) ||
+          self.lw.mir.elide.bounds.contains(span_key(ispan))
         let elem = match self.kind(t) {
           List(x) => x
           _ => t
@@ -615,8 +616,12 @@ fn Cg.rvalue(
         (Not, _) => "(!" + x + ")"
         (Neg, Float(_)) => "(-" + x + ")"
         (Neg, Int(k, _)) => {
-          let loc = self.loc(span)
-          "jig_neg_" + int_suffix(k) + "(" + x + ", " + loc + ")"
+          if self.lw.mir.elide.safety.contains(span_key(span)) {
+            "((" + int_cty(k) + ")(-(uint64_t)(" + x + ")))"
+          } else {
+            let loc = self.loc(span)
+            "jig_neg_" + int_suffix(k) + "(" + x + ", " + loc + ")"
+          }
         }
         (BitNot, Int(k, _)) => "((" + int_cty(k) + ")~" + x + ")"
         _ => x
@@ -862,6 +867,19 @@ fn Cg.binary(
     Int(ik, _) => {
       let s = int_suffix(ik)
       let ct = int_cty(ik)
+      let proved = match op {
+        Add | Sub | Mul | Div | Shl | Shr => self.lw.mir.elide.safety.contains(span_key(span))
+        _ => false
+      }
+      if proved {
+        // Proved not to trap. Unsigned arithmetic sidesteps C's signed-overflow rules; the
+        // proof says the result is in range anyway.
+        return match op {
+          Div => "((" + ct + ")(" + x + " / " + y + "))"
+          Shl | Shr => "((" + ct + ")(" + x + " " + op.text() + " " + y + "))"
+          _ => "((" + ct + ")((uint64_t)(" + x + ") " + op.text() + " (uint64_t)(" + y + ")))"
+        }
+      }
       let loc = self.loc(span)
       return match op {
         Add => "jig_add_" + s + "(" + x + ", " + y + ", " + loc + ")"
@@ -1701,9 +1719,13 @@ fn Cg.intrinsic(
       let e = self.elem_of(self.arg_ty(mf, args[0]))
       let ec = self.cty(e)
       let d = self.desc(e)
-      let check = "\n      if ((uint64_t)si >= (uint64_t)sn || (uint64_t)sj >= (uint64_t)sn) jig_swap_oob(si, sj, sn, " +
-        loc +
-        ");"
+      let check = if self.lw.mir.elide.bounds.contains(span_key(span)) {
+        ""
+      } else {
+        "\n      if ((uint64_t)si >= (uint64_t)sn || (uint64_t)sj >= (uint64_t)sn) jig_swap_oob(si, sj, sn, " +
+          loc +
+          ");"
+      }
       let unique = match args[0] {
         MutRef(p) => p.proj.is_empty() && cx.unique.contains(p.local)
         _ => false

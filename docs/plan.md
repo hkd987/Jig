@@ -199,7 +199,8 @@ and 0.1.0-alpha is ready to tag (`.github/workflows/release.yml`).
       proves: its verification conditions are the bootstrap's byte for byte (`jigc vc` =
       `jig debug vc`; 5.7 million lines for jigc itself), and `jigc prove` reports the same
       statuses, counterexamples and replays as `jig prove`, and shares its proof cache (the
-      same keys and files). Left: builds that use proofs, and a full command line.
+      same keys and files); `jigc build` removes the checks cached proofs discharge, with
+      the same C as `jig build`. Left: a full command line.
 - [ ] Agent benchmark vs. Rust and TypeScript. `bench/agents`: six tasks with acceptance cases
       and reference solutions in all three languages (checked in CI), and a harness that runs
       an agent per task and language and reports tasks solved and turns. Results need agent

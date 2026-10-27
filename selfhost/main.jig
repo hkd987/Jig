@@ -14,7 +14,9 @@ import "syntax"
 // scenarios on the interpreter and prints the lines of `jig test --json`; `jigc sim DIR STD`
 // runs `main` there with simulated effects. `jigc vc DIR STD [std]` prints the verification
 // conditions `jig debug vc DIR [std]` prints, and `jigc prove DIR STD [--json] [--verbose]
-// [--std] [FILTER]` proves them as `jig prove --no-cache` does (with z3, or `$JIG_Z3`).
+// [--std] [FILTER]` proves them as `jig prove` does (with z3, or `$JIG_Z3`), sharing its
+// proof cache, and `jigc build DIR STD [--release] [-o OUT]` builds an executable with the
+// checks the cached proofs discharge removed.
 
 fn main() effects {io, fs, env, ffi, clock} {
   let args = os.args()
@@ -22,9 +24,12 @@ fn main() effects {io, fs, env, ffi, clock} {
     io.print(sema.check_dump(args[2], args[3]))
     return
   }
-  if args.len() == 4 && (args[1] == "c" || args[1] == "cc") {
+  if (args.len() == 4 || (args.len() == 5 && args[4] == "proofs")) &&
+    (args[1] == "c" || args[1] == "cc") {
     let cwd = os.env("PWD").unwrap_or("")
-    let out = if args[1] == "c" {
+    let out = if args.len() == 5 {
+      sema.c_dump_proved(args[2], args[3], cwd)
+    } else if args[1] == "c" {
       sema.c_dump(args[2], args[3], cwd)
     } else {
       sema.c_unit(args[2], args[3], cwd)
@@ -51,6 +56,19 @@ fn main() effects {io, fs, env, ffi, clock} {
         io.eprintln("error: " + e)
         os.exit(1)
       }
+    }
+    return
+  }
+  if args.len() >= 4 && args[1] == "build" {
+    let (out, code) = sema.build_cmd(
+      args[2],
+      args[3],
+      os.env("PWD").unwrap_or(""),
+      args[4..args.len()],
+    )
+    io.print(out)
+    if code != 0 {
+      os.exit(code)
     }
     return
   }
@@ -103,7 +121,7 @@ fn main() effects {io, fs, env, ffi, clock} {
   }
   if args.len() < 3 || (args[1] != "tokens" && args[1] != "ast") {
     io.eprintln(
-      "usage: jigc tokens|ast|fmt FILE, jigc check|c|cc|sim DIR STD, jigc vc DIR STD [std], jigc test DIR STD [FILTER], jigc prove DIR STD [--json] [--verbose] [--std] [FILTER]",
+      "usage: jigc tokens|ast|fmt FILE, jigc check|c|cc|sim DIR STD, jigc vc DIR STD [std], jigc test DIR STD [FILTER], jigc prove DIR STD [--json] [--verbose] [--std] [FILTER], jigc build DIR STD [--release] [-o OUT]",
     )
     os.exit(2)
   }

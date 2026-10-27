@@ -50,7 +50,7 @@ struct Lw {
 
 fn new_lw(s: Sema) -> Lw {
   let empty = empty_fb()
-  return Lw { s: s, mir: Mir { fns: [], instances: Map.new() }, fb: empty }
+  return Lw { s: s, mir: Mir { fns: [], instances: Map.new(), elide: no_proofs() }, fb: empty }
 }
 
 fn empty_fb() -> Fb {
@@ -188,10 +188,11 @@ fn Lw.lower_instance(&mut self, m: Int) {
   }
   self.begin_fn(fd.pkg, fd.file, body, args, m)
   self.params_from_body(modes)
-  // Parameter refinements, then preconditions.
+  // Parameter refinements, then preconditions, unless proved at every call.
+  let entry = !self.mir.elide.entries.contains(f)
   for p in decl.params {
     match p.refine {
-      Some(pred) => self.check(pred, CheckKind.Refinement)
+      Some(pred) => if entry { self.check(pred, CheckKind.Refinement) }
       None => {}
     }
   }
@@ -199,7 +200,7 @@ fn Lw.lower_instance(&mut self, m: Int) {
   self.fb.ret_refine = fd.ret_refine
   for i in 0..fd.params.len() {
     match fd.params[i].refine {
-      Some(al) => {
+      Some(al) => if entry {
         let l = self.fb.params[i + offset].0
         // At the parameter: the caller's obligation.
         let saved = self.fb.cur_span
@@ -210,8 +211,10 @@ fn Lw.lower_instance(&mut self, m: Int) {
       None => {}
     }
   }
-  for r in decl.pre {
-    self.check(r, CheckKind.Precondition)
+  if entry {
+    for r in decl.pre {
+      self.check(r, CheckKind.Precondition)
+    }
   }
   // `&mut` parameters must satisfy their struct predicates again on return.
   var mut_params: List<Int> = []
@@ -399,6 +402,13 @@ fn is_literal(k: syntax.ExprKind) -> Bool {
 /// Emit a runtime check of a boolean expression, showing operand values on failure.
 fn Lw.check(&mut self, cond: Int, kind: CheckKind) {
   let cspan = self.fb.ast.exprs[cond].span
+  if kind != CheckKind.Precondition && self.mir.elide.contract.contains(span_key(cspan)) {
+    // Proved: contracts are pure, but an assert's condition may have effects.
+    if kind == CheckKind.Assert {
+      let _ = self.expr(cond)
+    }
+    return
+  }
   let saved = self.fb.cur_span
   self.fb.cur_span = cspan
   let text = self.src(cond)

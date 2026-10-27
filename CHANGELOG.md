@@ -38,6 +38,6 @@ the same results, and compiles itself: `bootstrap/jigc.c` builds with any
 C compiler and regenerates itself byte for byte. It runs tests and proves contracts with the
 same results as the Rust compiler too.
 
-**Not yet.** `jigc` does not use proofs in its builds and has no full command line, so
+**Not yet.** `jigc` has no full command line, so
 the `jig` command is still the Rust compiler. Agent benchmark results, contracts on the
 compiler's own passes, and self-hosted speed parity are open (`docs/gates/phase4.md`).

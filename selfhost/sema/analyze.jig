@@ -212,6 +212,22 @@ pub fn c_dump(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs,
   return generate_c(new_lw(s), cwd)
 }
 
+/// `jigc c DIR STD proofs`: the C program with the cached proofs (`.jig/proofs` in the project)
+/// removing the checks they discharge, the same text as `jig debug c DIR proofs`.
+pub fn c_dump_proved(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str>
+  effects {fs, env, ffi, clock}
+{
+  let (s, _) = analyze(dir, std_dir)
+  if !s.diags.is_empty() {
+    return Err(dir + " has errors")
+  }
+  let cache = join_path(join_path(find_project_root(dir).unwrap_or(dir), ".jig"), "proofs")
+  let proven = s.cached_proven(std_dir, cache)
+  var lw = new_lw(s)
+  lw.mir.elide = proven
+  return generate_c(lw, cwd)
+}
+
 /// A release build of DIR as one self-contained C file: `c_dump`'s program with the runtime
 /// (`STD/../runtime`) inlined, so a C compiler alone builds it (`cc FILE -pthread -lm`).
 pub fn c_unit(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs, env} {
@@ -431,4 +447,109 @@ pub fn prove_cmd(dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> (Str, In
     out = s.render_report(reports, verbose, millis, cwd)
   }
   return (out, if failed_contracts(reports) > 0 { 1 } else { 0 })
+}
+
+/// The C compiler for a mode: `$JIG_CC`, else `clang` for release builds when present, else
+/// `cc` (as the bootstrap compiler picks it).
+fn c_compiler(release: Bool) -> Str effects {env, ffi} {
+  match os.env("JIG_CC") {
+    Some(cc) => {
+      return cc
+    }
+    None => {}
+  }
+  if release && system("clang --version > /dev/null 2>&1") == 0 {
+    return "clang"
+  }
+  return "cc"
+}
+
+/// `jigc build DIR STD [--release] [-o OUT]`: build `main` of the package in DIR into a native
+/// executable, with the checks the cached proofs discharge removed, as `jig build` does (one
+/// C file, the runtime included; release builds allocate from the runtime's pools and
+/// optimize). Prints the executable's path. Returns the output and the exit code.
+pub fn build_cmd(dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> (Str, Int)
+  effects {fs, env, ffi, clock}
+{
+  let release = flags.contains("--release")
+  let (s, _) = analyze(dir, std_dir)
+  if !s.diags.is_empty() {
+    return ("error: " + dir + " has errors\n", 1)
+  }
+  let root = find_project_root(dir).unwrap_or(dir)
+  let proven = s.cached_proven(std_dir, join_path(join_path(root, ".jig"), "proofs"))
+  let links = s.links
+  var lw = new_lw(s)
+  lw.mir.elide = proven
+  let c = match generate_c(lw, cwd) {
+    Ok(c) => c
+    Err(e) => {
+      return ("error: " + e + "\n", 1)
+    }
+  }
+  let rt = std_dir + "/../runtime/"
+  let header = match fs.read(rt + "jig_rt.h") {
+    Ok(t) => t
+    Err(e) => {
+      return ("error: " + e + "\n", 1)
+    }
+  }
+  let runtime = match fs.read(rt + "jig_rt.c") {
+    Ok(t) => t
+    Err(e) => {
+      return ("error: " + e + "\n", 1)
+    }
+  }
+  let include = "#include \"jig_rt.h\"\n"
+  let prefix = if release {
+    "#define _GNU_SOURCE\n#define JIG_POOL 1\n"
+  } else {
+    "#define _GNU_SOURCE\n"
+  }
+  let program = prefix + c.replace(include, header) + "\n" + runtime.replace(include, "")
+  var dir_name = dir
+  for dir_name.ends_with("/") && dir_name.len() > 1 {
+    dir_name = dir_name[0..dir_name.len() - 1]
+  }
+  var name = dir_name
+  match last_index_of(dir_name, "/") {
+    Some(i) => name = dir_name[i + 1..dir_name.len()]
+    None => {}
+  }
+  if name == "." || name.is_empty() {
+    name = "main"
+  }
+  let build_dir = join_path(
+    join_path(join_path(root, ".jig"), "build"),
+    if release { "release" } else { "debug" },
+  )
+  var out = join_path(build_dir, name)
+  for i in 0..flags.len() {
+    if flags[i] == "-o" && i + 1 < flags.len() {
+      out = flags[i + 1]
+    }
+  }
+  let _ = system("mkdir -p '" + build_dir + "'")
+  let src = join_path(build_dir, name + ".c")
+  match fs.write(src, program) {
+    Ok(_) => {}
+    Err(e) => {
+      return ("error: " + e + "\n", 1)
+    }
+  }
+  var cmd = c_compiler(release) +
+    (if release { " -O2 -fno-math-errno" } else { " -O0 -g -fno-math-errno" }) +
+    " -std=gnu11 -w -pthread '" +
+    src +
+    "'"
+  for l in links {
+    cmd += " -l" + l
+  }
+  let log = src + ".log"
+  cmd += " -lm -o '" + out + "' > '" + log + "' 2>&1"
+  if system(cmd) != 0 {
+    let msg = fs.read(log).unwrap_or("")
+    return ("error: C compiler failed:\n" + msg, 1)
+  }
+  return (out + "\n", 0)
 }

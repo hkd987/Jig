@@ -63,15 +63,24 @@ pub fn check(dir: &Path) -> String {
     out
 }
 
-/// `jig debug c DIR`: the C program `jig build --release` compiles for the package in DIR,
-/// without proofs (no check is removed). The self-hosted back end prints the same text.
-pub fn c(dir: &Path) -> Result<String, String> {
+/// `jig debug c DIR [proofs]`: the C program `jig build --release` compiles for the package in
+/// DIR, without proofs (no check is removed) or, with `proofs`, with the cached proofs of
+/// `jig prove` (in the project's `.jig/proofs`) removing the checks they discharge. The
+/// self-hosted back end prints the same text.
+pub fn c(dir: &Path, proofs: bool) -> Result<String, String> {
     let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let mut prog = crate::sema::analyze_on(&Sources::Disk, &dir, Some(1));
     if prog.diags.has_errors() {
         return Err(format!("{} has errors", dir.display()));
     }
+    let proven = if proofs {
+        let root = crate::sema::load::find_project_root(&Sources::Disk, &dir).unwrap_or_else(|| dir.clone());
+        crate::verify::cached_proven(&prog, &root.join(".jig").join("proofs"))
+    } else {
+        Default::default()
+    };
     let mut lw = crate::mir::lower::Lowerer::new(&mut prog, crate::mir::LowerOpts { check_contracts: true });
+    lw.mir.elide = proven;
     let c = crate::codegen::c::generate(&mut lw)?;
     Ok(c.unity())
 }

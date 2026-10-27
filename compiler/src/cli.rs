@@ -467,16 +467,18 @@ pub fn main() -> i32 {
                 print!("{}", crate::tools::debug_check::check(std::path::Path::new(dir)));
                 0
             }
-            [what, dir] if what == "c" => match crate::tools::debug_check::c(std::path::Path::new(dir)) {
-                Ok(c) => {
-                    print!("{c}");
-                    0
+            [what, dir, rest @ ..] if what == "c" => {
+                match crate::tools::debug_check::c(std::path::Path::new(dir), rest.iter().any(|a| a == "proofs")) {
+                    Ok(c) => {
+                        print!("{c}");
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        1
+                    }
                 }
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    1
-                }
-            },
+            }
             [what, dir, rest @ ..] if what == "vc" => {
                 let std = rest.iter().any(|a| a == "std");
                 match crate::tools::debug_check::vc(std::path::Path::new(dir), std) {
@@ -491,7 +493,7 @@ pub fn main() -> i32 {
                 }
             }
             _ => {
-                eprintln!("usage: jig debug tokens|ast FILE, jig debug check|c|vc DIR");
+                eprintln!("usage: jig debug tokens|ast FILE, jig debug check DIR, jig debug c|vc DIR [proofs|std]");
                 2
             }
         },

@@ -194,6 +194,30 @@ fn intrinsic(op: Op, tys: List<Int>) -> Intrinsic {
 struct Mir {
   fns: List<MFn>
   instances: Map<(Int, List<Int>), Int>
+  /// What proofs discharged: their runtime checks are left out.
+  elide: Proven
+}
+
+/// Discharged obligations, by span (`lo`, `hi`), consulted by lowering and code generation to
+/// drop runtime checks.
+struct Proven {
+  /// Contract checks (asserts, postconditions, invariants, refinements) at these spans.
+  contract: Set<(Int, Int)>
+  /// Arithmetic traps (overflow, division by zero, shift range) at these spans.
+  safety: Set<(Int, Int)>
+  /// List indexing proved in bounds at these spans.
+  bounds: Set<(Int, Int)>
+  /// Functions whose entry checks (`requires`, parameter refinements) are proved at every
+  /// call, so the function itself need not check them.
+  entries: Set<Int>
+}
+
+fn no_proofs() -> Proven {
+  return Proven { contract: Set.new(), safety: Set.new(), bounds: Set.new(), entries: Set.new() }
+}
+
+fn span_key(s: syntax.Span) -> (Int, Int) {
+  return (s.lo, s.hi)
 }
 
 enum Op {

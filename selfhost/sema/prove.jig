@@ -1483,3 +1483,161 @@ fn Sema.summary_json(self, fs: List<FnReport>, millis: Int) -> Str {
     millis.str() +
     "}"
 }
+
+// ---------- proofs in builds ----------
+
+/// Spans whose runtime checks are fully discharged: every obligation recorded there is proved.
+/// Preconditions are never removed (they are checked in the callee, which must stay safe for
+/// every caller).
+fn report_proven(fs: List<FnReport>) -> Proven {
+  var contract: Map<(Int, Int), Bool> = Map.new()
+  var safety: Map<(Int, Int), Bool> = Map.new()
+  var bounds: Map<(Int, Int), Bool> = Map.new()
+  for f in fs {
+    for o in f.obligations {
+      let ok = o.elidable && o.status == Status.Proved
+      let k = span_key(o.span)
+      match o.kind {
+        Precondition => {}
+        Postcondition | LoopInvariant | StructInvariant | Refinement | Assert => contract.insert(
+          k,
+          contract.get(k).unwrap_or(true) && ok,
+        )
+        Overflow | DivZero | Shift => safety.insert(k, safety.get(k).unwrap_or(true) && ok)
+        Bounds => bounds.insert(k, bounds.get(k).unwrap_or(true) && ok)
+        _ => {}
+      }
+    }
+  }
+  var p = no_proofs()
+  for (k, ok) in contract {
+    if ok {
+      p.contract.insert(k)
+    }
+  }
+  for (k, ok) in safety {
+    if ok {
+      p.safety.insert(k)
+    }
+  }
+  for (k, ok) in bounds {
+    if ok {
+      p.bounds.insert(k)
+    }
+  }
+  return p
+}
+
+/// Whether a span lies in a test or in a `*_test.jig` file (code that runs only in tests).
+fn Sema.in_test(self, p: Int, f: Int, sp: syntax.Span) -> Bool {
+  let file = self.pkgs[p].files[f]
+  if file.path.ends_with("_test.jig") {
+    return true
+  }
+  for it in file.ast.items {
+    match it.kind {
+      Test(_, _, _, _) => if it.span.lo <= sp.lo && sp.hi <= it.span.hi {
+        return true
+      }
+      _ => {}
+    }
+  }
+  return false
+}
+
+/// Functions whose entry checks hold at every call. The program is closed, so when each call
+/// site has its preconditions proved, the callee need not check them again. A function used as
+/// a value or reached through a generic bound has calls the prover cannot see, and one with no
+/// calls at all is an entry point; neither qualifies. Calls in tests and test helpers don't
+/// count: they run in the interpreter, which keeps every check.
+fn Sema.proven_entries(self, fs: List<FnReport>) -> Set<Int> {
+  var sites: Map<Int, List<(Int, Int)>> = Map.new()
+  var as_value: Set<Int> = Set.new()
+  for p in 0..self.pkgs.len() {
+    for fi in 0..self.pkgs[p].files.len() {
+      let ast = self.pkgs[p].files[fi].ast
+      let res = self.tables[p][fi].expr_res
+      var callee_of: Map<Int, syntax.Span> = Map.new()
+      for e in ast.exprs {
+        match e.kind {
+          Call(callee, _) => callee_of.insert(callee, e.span)
+          _ => {}
+        }
+      }
+      for i in 0..ast.exprs.len() {
+        let f = match res[i] {
+          Fn(f) | Method(f) => f
+          _ => {
+            continue
+          }
+        }
+        match callee_of.get(i) {
+          Some(call) => if !self.in_test(p, fi, call) {
+            var ss = sites.get(f).unwrap_or([])
+            ss.push(span_key(call))
+            sites.insert(f, ss)
+          }
+          None => if !self.in_test(p, fi, ast.exprs[i].span) { as_value.insert(f) }
+        }
+      }
+    }
+  }
+  var dyn_names: Set<Str> = Set.new()
+  for b in self.bodies {
+    match b {
+      Some(body) => {
+        for n in body.dyn_methods {
+          dyn_names.insert(n)
+        }
+      }
+      None => {}
+    }
+  }
+  // Per call site: whether every precondition obligation there was proved.
+  var at: Map<(Int, Int), Bool> = Map.new()
+  for f in fs {
+    for o in f.obligations {
+      if o.kind == ObKind.Precondition {
+        let k = span_key(o.span)
+        at.insert(k, at.get(k).unwrap_or(true) && o.elidable && o.status == Status.Proved)
+      }
+    }
+  }
+  var out: Set<Int> = Set.new()
+  for (f, calls) in sites {
+    let fd = self.defs.fns[f]
+    if as_value.contains(f) ||
+      fd.step_attr.is_some() ||
+      (fd.recv.is_some() && dyn_names.contains(fd.name)) {
+      continue
+    }
+    var all = true
+    for sp in calls {
+      all = all && at.get(sp) == Some(true)
+    }
+    if all {
+      out.insert(f)
+    }
+  }
+  return out
+}
+
+/// The proofs `jig prove` (or `jigc prove`) cached for the program, as a build uses them.
+fn Sema.cached_proven(self, std_dir: Str, cache_dir: Str) -> Proven effects {fs, env, ffi, clock} {
+  let solver = solver_version().unwrap_or("")
+  let global = self.global_key(std_dir, solver)
+  let frames = compute_frames(self)
+  var reports: List<FnReport> = []
+  for f in self.prove_targets(false) {
+    let key = self.cache_key(f, global, frames)
+    let fd = self.defs.fns[f]
+    let base = self.pkgs[fd.pkg].files[fd.file].ast.items[fd.item].span.lo
+    match load_cached(join_path(cache_dir, key + ".json"), base) {
+      Some(obs) => reports.push(FnReport { fid: f, name: "", obligations: obs, cached: true })
+      None => {}
+    }
+  }
+  var p = report_proven(reports)
+  p.entries = self.proven_entries(reports)
+  return p
+}

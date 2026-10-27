@@ -92,7 +92,7 @@ Release notes are in [`CHANGELOG.md`](../../CHANGELOG.md).
 
 ## Open
 
-- `jigc`: builds that use proofs, and a full command line (human
+- `jigc`: a full command line (human
   diagnostics, `run` with real effects, `build`, `get`, `trace`, `mcp`); its checker, back end,
   formatter, test runner and prover are done. Until `jigc` passes every test suite the Rust
   compiler stays the `jig` command (D6).
