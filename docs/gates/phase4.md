@@ -84,7 +84,12 @@ is further behind (1.21, the checker 1.71), because jigc touches about twice the
 (64-bit node fields, reference counts) and the bootstrap compiler parses on other threads.
 That also decides a full `jig check`, which the Rust compiler runs on four threads and jigc
 on one: 209 ms against 70 ms on 98k lines, so the 100 ms target is met only by the Rust
-compiler.
+compiler. Parsing a load wave's files with `std/task` does not close it: a program that
+starts tasks counts every reference atomically, which costs jigc about 14% of its CPU time,
+about what parsing on four threads saves (best wall time 169 ms against 180 ms, the median
+unchanged). Checking jigc in parallel needs reference counts that stay cheap on the thread
+that owns a value (biased counting, say), or a checker whose threads share no counted
+values.
 
 **Agent measures.** `bench/agents/run.py --agent CMD` runs an agent per task and language
 and reports tasks solved and turns. Its six tasks have reference solutions in all three
