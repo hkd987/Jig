@@ -1,0 +1,299 @@
+// `jigc trace`, ported from the bootstrap compiler's `tools/trace.rs`: which scenarios
+// exercise which code. The call graph is complete (no reflection or dynamic loading), so
+// reachability from a scenario's steps is exact up to which branches a run takes.
+
+/// Per scenario, its label and every user function its steps (and world) can reach; what is
+/// reachable from `main` (or a library's public API); and every user function with a body, in
+/// source order.
+struct Trace {
+  scenarios: List<(Str, Set<Int>)>
+  from_entry: Set<Int>
+  all: List<Int>
+}
+
+/// What a trace asks.
+enum TraceQuery {
+  /// Coverage per scenario, and what no scenario covers.
+  Summary
+  /// Scenarios that exercise functions whose name contains this.
+  Function(name: Str)
+  /// What one scenario (matched by name) exercises, and what dies without it.
+  Scenario(name: Str)
+  /// Code reachable from the entrypoint that no scenario exercises.
+  Uncovered
+}
+
+/// Every function reachable from `starts`; a call through a generic bound reaches every
+/// method with that name.
+fn Sema.reachable(self, starts: List<Int>) -> Set<Int> {
+  var seen: Set<Int> = Set.new()
+  var dyn_names: Set<Str> = Set.new()
+  var stack = starts
+  for {
+    for !stack.is_empty() {
+      let f = stack[stack.len() - 1]
+      let _ = stack.pop()
+      if seen.contains(f) {
+        continue
+      }
+      seen.insert(f)
+      match self.bodies[f] {
+        Some(b) => {
+          stack.extend(b.refs)
+          for n in b.dyn_methods {
+            dyn_names.insert(n)
+          }
+        }
+        None => {}
+      }
+    }
+    var more: List<Int> = []
+    for (key, f) in self.defs.methods {
+      if dyn_names.contains(key.1) && !seen.contains(f) {
+        more.push(f)
+      }
+    }
+    if more.is_empty() {
+      return seen
+    }
+    stack.extend(more)
+  }
+}
+
+fn Sema.is_user_fn(self, f: Int) -> Bool {
+  let p = self.pkgs[self.defs.fns[f].pkg]
+  return !p.is_std && !p.external
+}
+
+/// The user functions of a set, in source order.
+fn Sema.in_source_order(self, fs: Set<Int>) -> List<Int> {
+  var keyed: List<(Int, Int)> = []
+  for f in fs.items() {
+    keyed.push((self.defs.fns[f].span.lo, f))
+  }
+  keyed.sort()
+  var out: List<Int> = []
+  for (_, f) in keyed {
+    out.push(f)
+  }
+  return out
+}
+
+fn Sema.trace(self) -> Trace {
+  var scenarios: List<(Str, Set<Int>)> = []
+  for sc in self.scenarios {
+    var starts: List<Int> = []
+    for s in sc.steps {
+      starts.push(s.f)
+    }
+    match sc.world {
+      Some((_, new_fn)) => starts.push(new_fn)
+      None => {}
+    }
+    var mine: Set<Int> = Set.new()
+    for f in self.reachable(starts).items() {
+      if self.is_user_fn(f) {
+        mine.insert(f)
+      }
+    }
+    scenarios.push((sc.feature + ": " + sc.name, mine))
+  }
+  var entry: List<Int> = []
+  match self.defs.main {
+    Some(m) => entry.push(m)
+    None => {
+      for f in 0..self.defs.fns.len() {
+        let fd = self.defs.fns[f]
+        if fd.pkg == self.root && fd.is_pub && fd.iface.is_none() {
+          entry.push(f)
+        }
+      }
+    }
+  }
+  var from_entry: Set<Int> = Set.new()
+  for f in self.reachable(entry).items() {
+    if self.is_user_fn(f) {
+      from_entry.insert(f)
+    }
+  }
+  var all: Set<Int> = Set.new()
+  for f in 0..self.defs.fns.len() {
+    let fd = self.defs.fns[f]
+    if self.is_user_fn(f) && fd.has_body && fd.iface.is_none() {
+      all.insert(f)
+    }
+  }
+  return Trace { scenarios: scenarios, from_entry: from_entry, all: self.in_source_order(all) }
+}
+
+fn Sema.fn_location(self, f: Int, cwd: Str) -> Str {
+  return self.location_text(self.defs.fns[f].name_span.lo, cwd)
+}
+
+fn Sema.fn_json(self, f: Int, cwd: Str) -> Str {
+  return "{\"function\":" +
+    json_str(self.fn_display_name(f)) +
+    ",\"location\":" +
+    json_str(self.fn_location(f, cwd))
+}
+
+fn Sema.fns_json(self, fs: List<Int>, cwd: Str) -> Str {
+  var parts: List<Str> = []
+  for f in fs {
+    parts.push(self.fn_json(f, cwd) + "}")
+  }
+  return "[" + parts.join(",") + "]"
+}
+
+/// The answer to a trace query, as text and as JSON.
+fn Sema.trace_query(self, q: TraceQuery, cwd: Str) -> (Str, Str) {
+  let t = self.trace()
+  var covered: Set<Int> = Set.new()
+  for (_, r) in t.scenarios {
+    for f in r.items() {
+      covered.insert(f)
+    }
+  }
+  var uncovered: List<Int> = []
+  var reachable = 0
+  for f in t.all {
+    if t.from_entry.contains(f) {
+      reachable += 1
+      if !covered.contains(f) {
+        uncovered.push(f)
+      }
+    }
+  }
+  match q {
+    Summary => {
+      var text = t.scenarios.len().str() + " scenarios\n"
+      var parts: List<Str> = []
+      for (label, r) in t.scenarios {
+        text += "  " + label + ": exercises " + r.len().str() + " functions\n"
+        parts.push("{\"scenario\":" + json_str(label) + ",\"functions\":" + r.len().str() + "}")
+      }
+      text += uncovered.len().str() +
+        " of " +
+        reachable.str() +
+        " functions reachable from the entrypoint are covered by no scenario" +
+        (if uncovered.is_empty() { "" } else { " (jig trace uncovered)" }) +
+        "\n"
+      return (
+        text,
+        "{\"scenarios\":[" + parts.join(",") + "],\"uncovered\":" + uncovered.len().str() + "}",
+      )
+    }
+    Uncovered => {
+      var text = ""
+      for f in uncovered {
+        text += self.fn_display_name(f) + "  " + self.fn_location(f, cwd) + "\n"
+      }
+      if text.is_empty() {
+        text = "every function reachable from the entrypoint is covered by a scenario\n"
+      }
+      return (text, self.fns_json(uncovered, cwd))
+    }
+    Function(name) => {
+      var text = ""
+      var parts: List<Str> = []
+      for f in t.all {
+        if !self.fn_display_name(f).contains(name) {
+          continue
+        }
+        var scs: List<Str> = []
+        for (label, r) in t.scenarios {
+          if r.contains(f) {
+            scs.push(label)
+          }
+        }
+        text += self.fn_display_name(f) + " (" + self.fn_location(f, cwd) + "):\n"
+        if scs.is_empty() {
+          text += "  no scenario exercises it\n"
+        }
+        var quoted: List<Str> = []
+        for s in scs {
+          text += "  " + s + "\n"
+          quoted.push(json_str(s))
+        }
+        parts.push(self.fn_json(f, cwd) + ",\"scenarios\":[" + quoted.join(",") + "]}")
+      }
+      if text.is_empty() {
+        text = "no function matches `" + name + "`\n"
+      }
+      return (text, "[" + parts.join(",") + "]")
+    }
+    Scenario(name) => {
+      var i = 0
+      for i < t.scenarios.len() && !t.scenarios[i].0.contains(name) {
+        i += 1
+      }
+      if i == t.scenarios.len() {
+        return ("no scenario matches `" + name + "`\n", "null")
+      }
+      let (label, mine) = t.scenarios[i]
+      // What survives without it: the entrypoint and every other scenario.
+      var others = t.from_entry
+      for j in 0..t.scenarios.len() {
+        if j != i {
+          for f in t.scenarios[j].1.items() {
+            others.insert(f)
+          }
+        }
+      }
+      let exercised = self.in_source_order(mine)
+      var dies: List<Int> = []
+      for f in exercised {
+        if !others.contains(f) {
+          dies.push(f)
+        }
+      }
+      var text = label + "\n  exercises " + exercised.len().str() + " functions\n"
+      if dies.is_empty() {
+        text += "  deleting it leaves no dead code\n"
+      } else {
+        text += "  deleting it makes these dead:\n"
+        for f in dies {
+          text += "    " + self.fn_display_name(f) + "  " + self.fn_location(f, cwd) + "\n"
+        }
+      }
+      return (
+        text,
+        "{\"scenario\":" +
+          json_str(label) +
+          ",\"exercises\":" +
+          self.fns_json(exercised, cwd) +
+          ",\"dies_without_it\":" +
+          self.fns_json(dies, cwd) +
+          "}",
+      )
+    }
+  }
+}
+
+/// `jigc trace [PATH] [fn NAME | scenario NAME | uncovered] [--json]`, as `jig trace`.
+fn trace_cmd(o: Opts, std_dir: Str, cwd: Str) -> Output effects {fs, env} {
+  var words: List<Str> = []
+  for a in o.rest {
+    if !a.starts_with("--") {
+      words.push(a)
+    }
+  }
+  let rest = if words.is_empty() { "" } else { words[1..words.len()].join(" ") }
+  let q = if words.is_empty() {
+    TraceQuery.Summary
+  } else if words.len() == 1 && words[0] == "uncovered" {
+    TraceQuery.Uncovered
+  } else if words.len() > 1 && words[0] == "fn" {
+    TraceQuery.Function(rest)
+  } else if words.len() > 1 && words[0] == "scenario" {
+    TraceQuery.Scenario(rest)
+  } else {
+    return output("", "usage: jig trace [fn <name> | scenario <name> | uncovered] [--json]\n", 2)
+  }
+  let (s, _) = analyze(absolute_path(o.path, cwd), std_dir)
+  if !s.diags.is_empty() {
+    return s.error_output(o.json, cwd)
+  }
+  let (text, json) = s.trace_query(q, cwd)
+  return output(if o.json { json + "\n" } else { text }, "", 0)
+}

@@ -1,0 +1,325 @@
+// Type-directed search over function signatures, ported from the bootstrap compiler's
+// `tools/search.rs`: a query is a signature without names (`List<T>, Int -> Option<T>`),
+// single capital letters are type variables, and a method's receiver counts as its first
+// parameter. Candidates are ranked by how well they match.
+
+import "syntax"
+
+/// A structural type pattern: from the query's text, or from a function's types (whose
+/// generic parameters become variables named `'T`).
+enum SPat {
+  Var(name: Str)
+  Con(name: Str, args: List<SPat>)
+  Tuple(elems: List<SPat>)
+  Fn(params: List<SPat>, ret: SPat)
+}
+
+/// One function found: its name, signature and package, and how well it matched.
+struct Hit {
+  name: Str
+  signature: Str
+  package: Str
+  score: Int
+}
+
+/// The query's parameter patterns and its result pattern (if it has `->`), or `None` if it
+/// does not parse as a function type's parts.
+fn parse_query(q: Str) -> Option<(List<SPat>, Option<SPat>)> {
+  let arrow = q.find("->")
+  let src = match arrow {
+    Some(i) => "type Q = fn(" + q[0..i].trim() + ") -> " + q[i + 2..q.len()].trim() + "\n"
+    None => "type Q = fn(" + q.trim() + ")\n"
+  }
+  let parsed = syntax.parse(src, 1)
+  if !parsed.errors.is_empty() {
+    return None
+  }
+  let ast = parsed.ast
+  let item = ast.items[ast.top.first()?]
+  let ty = match item.kind {
+    TypeAlias(_, t) => t
+    _ => {
+      return None
+    }
+  }
+  return match ast.types[ty].kind {
+    Fn(params, ret, _) => {
+      var ps: List<SPat> = []
+      for t in params {
+        ps.push(query_pat(ast, t))
+      }
+      let r = match ret {
+        Some(t) => if arrow.is_some() { Some(query_pat(ast, t)) } else { None }
+        None => None
+      }
+      Some((ps, r))
+    }
+    _ => None
+  }
+}
+
+fn is_type_var(s: Str) -> Bool {
+  return s.len() == 1 && s[0] >= 65 && s[0] <= 90
+}
+
+fn query_pat(ast: syntax.Ast, t: Int) -> SPat {
+  return match ast.types[t].kind {
+    Named(_, name, args, _) => if is_type_var(name.text) && args.is_empty() {
+      SPat.Var(name.text)
+    } else {
+      var xs: List<SPat> = []
+      for a in args {
+        xs.push(query_pat(ast, a))
+      }
+      SPat.Con(name.text, xs)
+    }
+    Tuple(elems) => {
+      var xs: List<SPat> = []
+      for a in elems {
+        xs.push(query_pat(ast, a))
+      }
+      SPat.Tuple(xs)
+    }
+    Fn(params, ret, _) => {
+      var xs: List<SPat> = []
+      for a in params {
+        xs.push(query_pat(ast, a))
+      }
+      SPat.Fn(
+        xs,
+        match ret {
+          Some(r) => query_pat(ast, r)
+          None => SPat.Tuple([])
+        },
+      )
+    }
+    Refined(base, _) => query_pat(ast, base)
+  }
+}
+
+/// A semantic type as a pattern; generic parameters become variables.
+fn Sema.type_pat(self, t: Int) -> SPat {
+  return match self.tys.kinds[t] {
+    Param(_, n) => SPat.Var("'" + n)
+    Int(k, _) => SPat.Con(k.name(), [])
+    Float(_) => SPat.Con("Float", [])
+    Bool => SPat.Con("Bool", [])
+    Char => SPat.Con("Char", [])
+    Str => SPat.Con("Str", [])
+    Never => SPat.Con("Never", [])
+    List(x) => SPat.Con("List", [self.type_pat(x)])
+    Set(x) => SPat.Con("Set", [self.type_pat(x)])
+    Map(k, v) => SPat.Con("Map", [self.type_pat(k), self.type_pat(v)])
+    Adt(a, args) => {
+      var xs: List<SPat> = []
+      for x in args {
+        xs.push(self.type_pat(x))
+      }
+      SPat.Con(self.defs.adts[a].name, xs)
+    }
+    Tuple(ts) => {
+      var xs: List<SPat> = []
+      for x in ts {
+        xs.push(self.type_pat(x))
+      }
+      SPat.Tuple(xs)
+    }
+    Fn(ps, r, _) => {
+      var xs: List<SPat> = []
+      for x in ps {
+        xs.push(self.type_pat(x))
+      }
+      SPat.Fn(xs, self.type_pat(r))
+    }
+    Infer(_) | Error => SPat.Tuple([])
+  }
+}
+
+/// Unify a query pattern with a candidate's. Query variables and candidate variables each
+/// bind consistently.
+fn unify(q: SPat, c: SPat, env: &mut Map<Str, SPat>) -> Bool {
+  let bound = match q {
+    Var(v) => Some((v, c))
+    _ => match c {
+      Var(v) => Some((v, q))
+      _ => None
+    }
+  }
+  match bound {
+    Some((v, other)) => {
+      return match env.get(v) {
+        Some(b) => b == other || is_var(other) || is_var(b)
+        None => {
+          env.insert(v, other)
+          true
+        }
+      }
+    }
+    None => {}
+  }
+  return match (q, c) {
+    (Con(a, xs), Con(b, ys)) => a == b && unify_all(xs, ys, &mut env)
+    (Tuple(xs), Tuple(ys)) => unify_all(xs, ys, &mut env)
+    (Fn(xs, r1), Fn(ys, r2)) => unify_all(xs, ys, &mut env) && unify(r1, r2, &mut env)
+    _ => false
+  }
+}
+
+fn is_var(p: SPat) -> Bool {
+  return match p {
+    Var(_) => true
+    _ => false
+  }
+}
+
+/// Pairwise, in order, with one environment.
+fn unify_all(xs: List<SPat>, ys: List<SPat>, env: &mut Map<Str, SPat>) -> Bool {
+  if xs.len() != ys.len() {
+    return false
+  }
+  for i in 0..xs.len() {
+    if !unify(xs[i], ys[i], &mut env) {
+      return false
+    }
+  }
+  return true
+}
+
+/// Does `q` unify with `c` without binding anything for later?
+fn unifies(q: SPat, c: SPat, env: Map<Str, SPat>) -> Bool {
+  var e = env
+  return unify(q, c, &mut e)
+}
+
+/// `(params) -> ret effects {...}` as search results show it.
+fn Sema.search_sig(self, fd: FnDef) -> Str {
+  var parts: List<Str> = []
+  match (fd.self_mode, fd.self_ty) {
+    (Some(m), Some(st)) => parts.push(
+      (if m == Mode.MutRef { "&mut " } else { "" }) + "self: " + self.tys.display(st),
+    )
+    _ => {}
+  }
+  for p in fd.params {
+    parts.push(
+      p.name + ": " + (if p.mode == Mode.MutRef { "&mut " } else { "" }) + self.tys.display(p.ty),
+    )
+  }
+  var s = "(" + parts.join(", ") + ")"
+  if fd.ret != self.tys.unit_ty {
+    s += " -> " + self.tys.display(fd.ret)
+  }
+  if fd.eff != 0 {
+    s += " effects " + effects_render(fd.eff)
+  }
+  return s
+}
+
+/// The functions matching `query`, best first, at most `limit`.
+fn Sema.search(self, query: Str, limit: Int) -> Result<List<Hit>, Str> {
+  let (qparams, qret) = match parse_query(query) {
+    Some(q) => q
+    None => {
+      return Err("cannot parse the query `" + query + "`; write e.g. `List<T>, Int -> Option<T>`")
+    }
+  }
+  var hits: List<Hit> = []
+  for f in 0..self.defs.fns.len() {
+    let fd = self.defs.fns[f]
+    if fd.iface.is_some() || (!fd.is_pub && self.pkgs[fd.pkg].is_std) {
+      continue
+    }
+    var cparams: List<SPat> = []
+    match (fd.self_mode, fd.self_ty) {
+      (Some(_), Some(st)) => cparams.push(self.type_pat(st))
+      _ => {}
+    }
+    for p in fd.params {
+      cparams.push(self.type_pat(p.ty))
+    }
+    let cret = self.type_pat(fd.ret)
+    var score = 0
+    var env: Map<Str, SPat> = Map.new()
+    match qret {
+      Some(r) => {
+        if !unify(r, cret, &mut env) {
+          continue
+        }
+        score += 40
+      }
+      None => {}
+    }
+    let same_len = cparams.len() == qparams.len()
+    var each = same_len
+    for i in 0..qparams.len() {
+      each = each && unifies(qparams[i], cparams[i], env)
+    }
+    if each {
+      // In order: all at once, or each on its own.
+      var env2 = env
+      score += if unify_all(qparams, cparams, &mut env2) { 60 } else { 45 }
+    } else if same_len {
+      // Any order.
+      var used = [false].repeat(cparams.len())
+      var all = true
+      for q in qparams {
+        var found = false
+        for i in 0..cparams.len() {
+          if !found && !used[i] && unifies(q, cparams[i], env) {
+            used[i] = true
+            found = true
+          }
+        }
+        if !found {
+          all = false
+          break
+        }
+      }
+      if !all {
+        continue
+      }
+      score += 30
+    } else {
+      var matched = 0
+      for q in qparams {
+        var any = false
+        for c in cparams {
+          any = any || unifies(q, c, env)
+        }
+        if any {
+          matched += 1
+        }
+      }
+      if matched < qparams.len() || (qparams.is_empty() && qret.is_none()) {
+        continue
+      }
+      score += 10
+    }
+    let path = self.pkgs[fd.pkg].path
+    hits.push(
+      Hit {
+        name: self.fn_display_name(f)
+        signature: self.search_sig(fd)
+        package: if path == "<prelude>" { "prelude" } else { path }
+        score: score
+      },
+    )
+  }
+  hits.sort_by(fn(a, b) { a.score > b.score || (a.score == b.score && a.name < b.name) })
+  return Ok(hits[0..min(limit, hits.len())])
+}
+
+/// `jigc search [PATH] SIGNATURE`: the 20 best matches, as `jig search` prints them.
+fn search_cmd(o: Opts, std_dir: Str, cwd: Str) -> Output effects {fs, env} {
+  let (s, _) = analyze(absolute_path(o.path, cwd), std_dir)
+  return match s.search(o.rest.join(" "), 20) {
+    Ok(hits) => {
+      var out = ""
+      for h in hits {
+        out += h.name + h.signature + "  [" + h.package + "]\n"
+      }
+      output(out, "", 0)
+    }
+    Err(e) => output("", e + "\n", 2)
+  }
+}

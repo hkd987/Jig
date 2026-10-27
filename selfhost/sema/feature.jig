@@ -17,6 +17,8 @@ struct StepLine {
 /// A scenario bound to its steps: what the test runner runs.
 struct ScenarioDef {
   pkg: Int
+  /// The `Feature:` line's text.
+  feature: Str
   name: Str
   span: syntax.Span
   /// The world's type and its `new` function, when any step takes one.
@@ -144,10 +146,10 @@ fn finish_scenario(
 
 /// Parse one `.feature` file whose first byte is at global offset `base`: whether it has a
 /// `Feature:` line, its scenarios, and its errors.
-fn parse_feature(src: Str, base: Int) -> (Bool, List<ScenarioAst>, List<syntax.Diag>) {
+fn parse_feature(src: Str, base: Int) -> (Option<Str>, List<ScenarioAst>, List<syntax.Diag>) {
   let keywords = ["Given", "When", "Then", "And", "But"]
   var diags: List<syntax.Diag> = []
-  var feature = false
+  var feature: Option<Str> = None
   var scenarios: List<ScenarioAst> = []
   var cur: Option<ScenarioAst> = None
   var in_examples = false
@@ -180,11 +182,11 @@ fn parse_feature(src: Str, base: Int) -> (Bool, List<ScenarioAst>, List<syntax.D
       continue
     }
     if trimmed.starts_with("Feature:") {
-      if feature {
+      if feature.is_some() {
         diags.push(diag("E0801", span, "one `Feature:` per file"))
         continue
       }
-      feature = true
+      feature = Some(trim_end_ws(trim_start_ws(trimmed[8..trimmed.len()])))
       continue
     }
     if trimmed.starts_with("Background:") || trimmed.starts_with("Rule:") {
@@ -201,7 +203,7 @@ fn parse_feature(src: Str, base: Int) -> (Bool, List<ScenarioAst>, List<syntax.D
     }
     let outline = trimmed.starts_with("Scenario Outline:")
     if outline || trimmed.starts_with("Scenario:") {
-      if !feature {
+      if feature.is_none() {
         diags.push(diag("E0801", span, "a scenario must follow `Feature:`"))
         continue
       }
@@ -300,7 +302,7 @@ fn parse_feature(src: Str, base: Int) -> (Bool, List<ScenarioAst>, List<syntax.D
       continue
     }
     // Free text: a description, allowed after `Feature:` before the first scenario.
-    if feature && cur.is_none() {
+    if feature.is_some() && cur.is_none() {
       continue
     }
     diags.push(
@@ -310,7 +312,7 @@ fn parse_feature(src: Str, base: Int) -> (Bool, List<ScenarioAst>, List<syntax.D
     )
   }
   finish_scenario(cur, &mut scenarios, &mut diags)
-  if !feature {
+  if feature.is_none() {
     diags.push(
       diag("E0801", syntax.Span { lo: base, hi: base }, "a feature file starts with `Feature:`"),
     )
@@ -658,11 +660,15 @@ fn Sema.bind_features(&mut self) {
     for f in self.pkgs[p].features {
       let (feature, scenarios, ds) = parse_feature(f.text, f.base)
       self.diags.extend(ds)
-      if feature {
-        for sc in scenarios {
-          for (name, lines) in expand(sc) {
-            self.bind_scenario(p, name, sc.span, lines, steps)
-          }
+      let fname = match feature {
+        Some(n) => n
+        None => {
+          continue
+        }
+      }
+      for sc in scenarios {
+        for (name, lines) in expand(sc) {
+          self.bind_scenario(p, fname, name, sc.span, lines, steps)
         }
       }
     }
@@ -786,6 +792,7 @@ fn Sema.step_defs(&mut self, p: Int) -> List<StepDef> {
 fn Sema.bind_scenario(
   &mut self,
   pkg: Int,
+  feature: Str,
   name: Str,
   span: syntax.Span,
   lines: List<StepLine>,
@@ -935,7 +942,9 @@ fn Sema.bind_scenario(
       }
       _ => None
     }
-    self.scenarios.push(ScenarioDef { pkg: pkg, name: name, span: span, world: w, steps: calls })
+    self.scenarios.push(
+      ScenarioDef { pkg: pkg, feature: feature, name: name, span: span, world: w, steps: calls },
+    )
   }
 }
 

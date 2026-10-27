@@ -106,8 +106,8 @@ Release notes are in [`CHANGELOG.md`](../../CHANGELOG.md).
 
 ## Open
 
-- `jigc`: the rest of the command line (`get`, `trace`, `search`, `traces`, `hook`, `mcp`).
-  `check`, `test`, `prove`, `run` (real effects; `--native` too), `build`, `fmt`, `explain`
+- `jigc`: the rest of the command line (`get`, `traces`, `hook`, `mcp`). `check`, `test`,
+  `prove`, `run` (real effects; `--native` too), `build`, `trace`, `search`, `fmt`, `explain`
   and `reference` take `jig`'s arguments and print what it prints, with the standard library,
   runtime, code registry and reference built in. Until `jigc` passes every test suite the Rust
   compiler stays the `jig` command (D6).

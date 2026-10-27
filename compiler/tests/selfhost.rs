@@ -1636,3 +1636,126 @@ fn jigc_run_matches_bootstrap() {
     }
     assert!(failures.is_empty(), "{} runs differ:\n{}", failures.len(), failures.join("\n"));
 }
+
+/// `jigc ARGS` against `jig ARGS` from `cwd`, both with their built-in standard library: the
+/// same exit code, standard output and standard error.
+fn compare_command(exe: &Path, cwd: &Path, args: &[&str]) -> Option<String> {
+    let run = |bin: &Path| {
+        let out = Command::new(bin).args(args).current_dir(cwd).env("PWD", cwd).output().unwrap();
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+    let expected = run(Path::new(env!("CARGO_BIN_EXE_jig")));
+    let actual = run(exe);
+    (expected != actual).then(|| format!("{args:?}: bootstrap {expected:?}, jigc {actual:?}"))
+}
+
+/// `jigc trace` and `jigc search` print what `jig trace` and `jig search` print: every query
+/// form, as text and JSON, on every example, every package with scenarios and `jigc` itself,
+/// and on 60 copies of the scenario packages with their features and step patterns mutated;
+/// and a range of signatures (variables, receivers, any order, too few parameters, functions,
+/// tuples, units, queries that do not parse).
+#[test]
+fn jigc_tools_match_bootstrap() {
+    if !have_cc() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    let root = std::fs::canonicalize(repo_root()).unwrap();
+    let exe = jigc();
+    let work = root.join("target/tmp/selfhost-tools");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    let mut cases: Vec<PathBuf> = Vec::new();
+    let mut scenario_cases: Vec<PathBuf> = Vec::new();
+    for d in ["compiler/tests/ui", "examples"] {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(root.join(d)).unwrap().map(|e| e.unwrap().path()).collect();
+        entries.sort();
+        for p in entries.into_iter().filter(|p| p.is_dir()) {
+            if has_feature_files(&p) {
+                scenario_cases.push(p.clone());
+                cases.push(p);
+            } else if d == "examples" {
+                cases.push(p);
+            }
+        }
+    }
+    cases.push(root.join("selfhost"));
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    for k in 0..60 {
+        let proj = &scenario_cases[rng.below(scenario_cases.len())];
+        let copy = work.join(format!("mut{k}"));
+        copy_dir(proj, &copy);
+        let mut features: Vec<PathBuf> = std::fs::read_dir(&copy)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "feature"))
+            .collect();
+        features.sort();
+        let mut steps: Vec<PathBuf> = Vec::new();
+        jig_files(&copy, &mut steps);
+        steps.retain(|f| std::fs::read_to_string(f).unwrap().contains("step \""));
+        if rng.below(4) != 0 || steps.is_empty() {
+            let f = &features[rng.below(features.len())];
+            let src = std::fs::read_to_string(f).unwrap();
+            std::fs::write(f, mutate_feature(&src, &mut rng)).unwrap();
+        } else {
+            let f = &steps[rng.below(steps.len())];
+            let src = std::fs::read_to_string(f).unwrap();
+            std::fs::write(f, mutate_step_pattern(&src, &mut rng)).unwrap();
+        }
+        cases.push(copy);
+    }
+    let queries: [&[&str]; 8] = [
+        &[],
+        &["uncovered"],
+        &["fn", "new"],
+        &["fn", "e"],
+        &["scenario", "a"],
+        &["scenario", "no such scenario"],
+        &["fn"],
+        &["everything"],
+    ];
+    let mut failures: Vec<String> = Vec::new();
+    for d in &cases {
+        let dir = d.strip_prefix(&root).unwrap().to_string_lossy().to_string();
+        for q in queries {
+            for json in [false, true] {
+                let mut args = vec!["trace", dir.as_str()];
+                args.extend(q.iter().copied());
+                if json {
+                    args.push("--json");
+                }
+                failures.extend(compare_command(exe, &root, &args));
+            }
+        }
+    }
+    let signatures = [
+        "List<T> -> Map<K, List<T>>",
+        "Str -> Option<Int>",
+        "List<T>, Int -> Option<T>",
+        "Int, List<T> -> Option<T>",
+        "Str",
+        "-> Str",
+        "Str, Str -> List<Str>",
+        "Map<K, V>, K -> Option<V>",
+        "fn(T) -> Bool",
+        "List<T>, fn(T) -> Bool -> List<T>",
+        "(Int, Int) -> Int",
+        "T -> T",
+        "Int -> Never",
+        "Float<m> -> Float",
+        "Ledger, Str -> Option<Int>",
+        "List<",
+        "->",
+    ];
+    for d in ["examples/bank", "examples/hello", "selfhost"] {
+        for s in signatures {
+            failures.extend(compare_command(exe, &root, &["search", d, s]));
+        }
+    }
+    assert!(failures.is_empty(), "{} runs differ:\n{}", failures.len(), failures.join("\n"));
+}

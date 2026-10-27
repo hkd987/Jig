@@ -17,12 +17,13 @@ bootstrap compiler on every `.jig` file in the repository plus a few hundred mut
 | MIR lowering, ownership analyses, C back end | `compiler/src/mir/lower.rs`, `compiler/src/codegen/` | `sema/mir.jig`, `sema/lower*.jig`, `sema/own.jig`, `sema/cgen*.jig` | `jigc debug c DIR` = `jig debug c DIR` |
 | Formatter | `compiler/src/fmt/` | `syntax/fmt.jig`, `syntax/fmt_expr.jig` | `jigc fmt [--check] PATH` = `jig fmt [--check] PATH` |
 | Interpreter, test runner, property tests | `compiler/src/mir/interp.rs`, `compiler/src/runner.rs`, `compiler/src/proptest.rs` | `sema/interp.jig`, `sema/intrinsics.jig`, `sema/runner.jig` | `jigc test [--json] DIR` = `jig test [--json] DIR` |
+| `jig trace`, `jig search` | `compiler/src/tools/trace.rs`, `search.rs` | `sema/trace.jig`, `sema/search.jig` | `jigc trace [QUERY] [--json] DIR`, `jigc search DIR SIG` = the same `jig` commands |
 | Real effects (`run`) | `Effects::real` in `compiler/src/mir/interp.rs`, `compiler/src/cli.rs` | `sema/real.jig`, `sema/cli.jig` | `jigc run [--native] DIR -- ARGS` = `jig run [--native] DIR -- ARGS` |
 | Prover: verification conditions | `compiler/src/verify/vc.rs`, `frame.rs` | `sema/vc*.jig`, `sema/frame.jig` | `jigc debug vc DIR` = `jig debug vc DIR` |
 | Prover: solving, replay, reports | `compiler/src/verify/mod.rs`, `smt.rs` | `sema/prove.jig` | `jigc prove --json DIR` = `jig prove --json DIR` |
 
-Its command line is `jig`'s: `jigc check`, `test`, `prove`, `run`, `build` and `fmt` take the
-same arguments and print the same (`run` with real effects, on its interpreter or with
+Its command line is `jig`'s: `jigc check`, `test`, `prove`, `run`, `build`, `trace`, `search`
+and `fmt` take the same arguments and print the same (`run` with real effects, on its interpreter or with
 `--native` built and run), and the dumps the tests compare are `jigc debug ...`, as in
 `jig debug ...`. It carries the standard library and the C runtime (`sema/stdlib.jig`, written
 by `bootstrap/stdlib.py` and kept current by a test); `$JIG_STD` names a directory to read
