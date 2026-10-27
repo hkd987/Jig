@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use vc::{Base, ObKind};
 
 /// Bump when the encoding changes, so stale cached proofs are not reused.
-const VC_VERSION: &str = "vc-5";
+const VC_VERSION: &str = "vc-6";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
@@ -172,7 +172,7 @@ fn in_test_file(prog: &Program, span: Span) -> bool {
 /// The functions to prove: the program's functions with bodies (generic ones with their type
 /// parameters left abstract), or the standard library's, except test helpers (tests are not
 /// proved; their assertions are checked when they run).
-fn targets(prog: &Program, filter: Option<&str>, std: bool) -> Vec<FnId> {
+pub fn targets(prog: &Program, filter: Option<&str>, std: bool) -> Vec<FnId> {
     prog.defs
         .fns
         .iter_enumerated()

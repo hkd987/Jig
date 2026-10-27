@@ -1,0 +1,988 @@
+// Statements, merging, places and loops of the verification-condition generator (see
+// `vc.jig`).
+
+import "syntax"
+
+fn Gen.ast(self, fr: VFrame) -> syntax.Ast {
+  return self.s.pkgs[fr.pkg].files[fr.file].ast
+}
+
+fn Gen.ty(&mut self, fr: VFrame, e: Int) -> Int {
+  let t = self.s.tables[fr.pkg][fr.file].expr_ty[e]
+  return self.s.tys.subst(t, fr.inst)
+}
+
+fn Gen.res(self, fr: VFrame, e: Int) -> Res {
+  return self.s.tables[fr.pkg][fr.file].expr_res[e]
+}
+
+fn Gen.local_ty(&mut self, fr: VFrame, id: Int) -> Int {
+  let t = match fr.body {
+    Some(b) => b.locals[id].ty
+    None => self.s.tys.error
+  }
+  return self.s.tys.subst(t, fr.inst)
+}
+
+/// Evaluate a block; `None` if every path leaves it (return, break, panic).
+fn Gen.block(&mut self, fr: VFrame, st: &mut St, e: Int) -> Option<Sv> {
+  let ast = self.ast(fr)
+  let ids = match ast.exprs[e].kind {
+    Block(stmts) => stmts
+    _ => {
+      return self.expr(fr, &mut st, e)
+    }
+  }
+  var last = Sv.Unit
+  for i in 0..ids.len() {
+    if i + 1 == ids.len() {
+      match ast.stmts[ids[i]].kind {
+        Expr(x) => {
+          last = self.expr(fr, &mut st, x)?
+          continue
+        }
+        _ => {}
+      }
+    }
+    if !self.stmt(fr, &mut st, ids[i]) {
+      return None
+    }
+  }
+  return Some(last)
+}
+
+/// A statement; false if every path leaves it.
+fn Gen.stmt(&mut self, fr: VFrame, st: &mut St, s: Int) -> Bool {
+  let ast = self.ast(fr)
+  let stmt = ast.stmts[s]
+  match stmt.kind {
+    Let(pat, _, init, _) => {
+      let v = match self.expr(fr, &mut st, init) {
+        Some(v) => v
+        None => {
+          return false
+        }
+      }
+      let t = self.ty(fr, init)
+      self.bind(fr, &mut st, pat, v, t)
+      return true
+    }
+    Assign(target, op, value) => {
+      let pl = match self.place(fr, &mut st, target) {
+        Some(p) => p
+        None => {
+          // Not a place we track: evaluate for its obligations only.
+          return self.expr(fr, &mut st, value).is_some()
+        }
+      }
+      let tt = pl.tys[pl.tys.len() - 1]
+      let new = match op {
+        None => match self.expr(fr, &mut st, value) {
+          Some(v) => v
+          None => {
+            return false
+          }
+        }
+        Some(o) => {
+          let old = self.read_place(&mut st, pl)
+          let rhs = match self.expr(fr, &mut st, value) {
+            Some(v) => v
+            None => {
+              return false
+            }
+          }
+          let is_str = match self.s.tys.kinds[tt] {
+            Str => true
+            _ => false
+          }
+          if is_str {
+            self.concat(old, rhs)
+          } else {
+            match self.binary_vals(fr, &mut st, o, old, rhs, tt, stmt.span) {
+              Some(v) => v
+              None => {
+                return false
+              }
+            }
+          }
+        }
+      }
+      self.write_place(fr, &mut st, pl, new, stmt.span)
+      return true
+    }
+    Expr(e) => {
+      return self.expr(fr, &mut st, e).is_some()
+    }
+    Return(v) => {
+      let rv = match v {
+        Some(e) => match self.expr(fr, &mut st, e) {
+          Some(x) => x
+          None => {
+            return false
+          }
+        }
+        None => Sv.Unit
+      }
+      self.returns.push((st, rv))
+      return false
+    }
+    Break => {
+      let n = self.loops.len()
+      if n > 0 {
+        self.loops[n - 1].breaks.push(st)
+      }
+      return false
+    }
+    Continue => {
+      let n = self.loops.len()
+      if n > 0 {
+        self.loops[n - 1].conts.push(st)
+      }
+      return false
+    }
+    For(head, invariants, body) => {
+      return self.for_loop(fr, &mut st, head, invariants, body)
+    }
+  }
+}
+
+/// Bind an irrefutable pattern.
+fn Gen.bind(&mut self, fr: VFrame, st: &mut St, pat: Int, v: Sv, t: Int) {
+  let ast = self.ast(fr)
+  match ast.pats[pat].kind {
+    Bind(_) | Variant(_, _, _) => match self.s.tables[fr.pkg][fr.file].pat_local.get(pat) {
+      Some(id) => st.env.insert(id, v)
+      None => {}
+    }
+    Tuple(subs) => {
+      let fts = self.field_tys(t)
+      for i in 0..subs.len() {
+        let ft = if i < fts.len() { fts[i] } else { self.s.tys.error }
+        let fv = match v {
+          Tuple(xs) => if i < xs.len() { xs[i] } else { self.fresh(ft, "pat") }
+          _ => self.fresh(ft, "pat")
+        }
+        self.bind(fr, &mut st, subs[i], fv, ft)
+      }
+    }
+    _ => {}
+  }
+}
+
+// ---------- merging ----------
+
+/// Join states that forked from a common prefix of `base` path facts.
+fn Gen.merge(&mut self, base: Int, states: List<(St, Sv)>, t: Int) -> Option<(St, Sv)> {
+  if states.is_empty() {
+    return None
+  }
+  var (acc, accv) = states[0]
+  for si in 1..states.len() {
+    let (s, v) = states[si]
+    let ga0 = smt_and(acc.pc[min(base, acc.pc.len())..acc.pc.len()])
+    let gb = smt_and(s.pc[min(base, s.pc.len())..s.pc.len()])
+    let ga = self.define_bool(ga0)
+    var env: Map<Int, Sv> = Map.new()
+    var keys: List<Int> = []
+    for (k, _) in acc.env {
+      keys.push(k)
+    }
+    keys.sort()
+    for k in keys {
+      let (a, b) = match (acc.env.get(k), s.env.get(k)) {
+        (Some(a), Some(b)) => (a, b)
+        _ => {
+          continue
+        }
+      }
+      if same_sv(a, b) {
+        env.insert(k, a)
+        continue
+      }
+      let lt = self.s.tys.error
+      let m = match zip_leaves(a, b, Zip.Ite(ga)) {
+        Some(m) => self.name_leaves(m)
+        None => self.fresh(lt, "merge")
+      }
+      env.insert(k, m)
+    }
+    let nv = if same_sv(accv, v) { accv } else { self.ite(ga, accv, v, t) }
+    var pc = acc.pc[0..min(base, acc.pc.len())]
+    let joined = smt_or2(ga, gb)
+    if joined != "true" {
+      pc.push(self.define_bool(joined))
+    }
+    acc = St { env: env, pc: pc }
+    accv = nv
+  }
+  return Some((acc, accv))
+}
+
+// ---------- places ----------
+
+fn Gen.place(&mut self, fr: VFrame, st: &mut St, e: Int) -> Option<PlaceRef> {
+  let ast = self.ast(fr)
+  match ast.exprs[e].kind {
+    Name(_) => match self.res(fr, e) {
+      Local(id) => {
+        let t = self.local_ty(fr, id)
+        return Some(PlaceRef { local: id, path: [], tys: [t] })
+      }
+      _ => {
+        return None
+      }
+    }
+    Paren(x) | MutArg(x) => {
+      return self.place(fr, &mut st, x)
+    }
+    Field(base, _) => {
+      let i = match self.res(fr, e) {
+        Field(i) => i
+        _ => {
+          return None
+        }
+      }
+      var p = self.place(fr, &mut st, base)?
+      let t = self.ty(fr, e)
+      p.path.push(Seg.Field(i))
+      p.tys.push(t)
+      return Some(p)
+    }
+    TupleField(base, index, _) => {
+      var p = self.place(fr, &mut st, base)?
+      let t = self.ty(fr, e)
+      p.path.push(Seg.Field(index))
+      p.tys.push(t)
+      return Some(p)
+    }
+    Index(base, index) => {
+      match ast.exprs[index].kind {
+        Range(_, _) => {
+          return None
+        }
+        _ => {}
+      }
+      let bt = self.ty(fr, base)
+      match self.s.tys.kinds[bt] {
+        List(_) => {}
+        _ => {
+          return None
+        }
+      }
+      var p = self.place(fr, &mut st, base)?
+      let i = self.expr(fr, &mut st, index)?
+      let it = sv_term(i)?
+      let t = self.ty(fr, e)
+      p.path.push(Seg.Index(it, ast.exprs[e].span))
+      p.tys.push(t)
+      return Some(p)
+    }
+    _ => {
+      return None
+    }
+  }
+}
+
+fn Gen.read_place(&mut self, st: &mut St, p: PlaceRef) -> Sv {
+  var v = match st.env.get(p.local) {
+    Some(v) => v
+    None => {
+      let v = self.fresh(p.tys[0], "local")
+      st.env.insert(p.local, v)
+      v
+    }
+  }
+  for k in 0..p.path.len() {
+    let t = p.tys[k + 1]
+    v = match (p.path[k], v) {
+      (Field(i), Struct(_, xs)) | (Field(i), Tuple(xs)) => if i < xs.len() {
+        xs[i]
+      } else {
+        self.fresh(t, "part")
+      }
+      (Index(i, _), List(_, elems)) => self.select(&mut st, elems, i, t)
+      _ => self.fresh(t, "part")
+    }
+  }
+  return v
+}
+
+fn Gen.read_place_raw(&mut self, st: St, p: PlaceRef) -> Sv {
+  var v = match st.env.get(p.local) {
+    Some(v) => v
+    None => {
+      return self.fresh(p.tys[p.tys.len() - 1], "part")
+    }
+  }
+  for k in 0..p.path.len() {
+    v = match (p.path[k], v) {
+      (Field(i), Struct(_, xs)) | (Field(i), Tuple(xs)) => if i < xs.len() {
+        xs[i]
+      } else {
+        self.fresh(p.tys[k + 1], "part")
+      }
+      (Index(i, _), List(_, elems)) => self.name_leaves(select_raw(elems, i))
+      _ => self.fresh(p.tys[k + 1], "part")
+    }
+  }
+  return v
+}
+
+/// Bounds obligations for each index on the path (the read or write traps otherwise).
+fn Gen.oblige_place_bounds(&mut self, fr: VFrame, st: &mut St, p: PlaceRef) {
+  var v = st.env.get(p.local)
+  for k in 0..p.path.len() {
+    let t = p.tys[k + 1]
+    v = match (p.path[k], v) {
+      (Field(i), Some(Struct(_, xs))) | (Field(i), Some(Tuple(xs))) => if i < xs.len() {
+        Some(xs[i])
+      } else {
+        None
+      }
+      (Index(i, span), Some(List(len, elems))) => {
+        let goal = "(and (<= 0 " + i + ") (< " + i + " " + len.t + "))"
+        let msg = "index in bounds: " + self.src(span)
+        self.oblige(fr, st, ObKind.Bounds, span, msg, goal)
+        self.assume(&mut st, goal)
+        Some(self.select(&mut st, elems, i, t))
+      }
+      _ => None
+    }
+  }
+}
+
+fn Gen.write_place(&mut self, fr: VFrame, st: &mut St, p: PlaceRef, new: Sv, span: syntax.Span) {
+  self.oblige_place_bounds(fr, &mut st, p)
+  let root = match st.env.get(p.local) {
+    Some(v) => v
+    None => self.fresh(p.tys[0], "local")
+  }
+  let updated = self.update(&mut st, root, p.path, p.tys, 0, new)
+  st.env.insert(p.local, updated)
+  if p.path.is_empty() {
+    return
+  }
+  // Mirror the runtime: the assigned field's refinement alias, then the predicates of every
+  // struct on the path, innermost first.
+  match (p.path[p.path.len() - 1], self.s.tys.kinds[p.tys[p.tys.len() - 2]]) {
+    (Field(i), Adt(adt, _)) => {
+      let fs = self.s.defs.adts[adt].fields
+      if i < fs.len() {
+        match fs[i].refine {
+          Some(al) => match self.alias_pred(&mut st, al, new) {
+            Some((msg, term)) => {
+              self.oblige(fr, st, ObKind.StructInvariant, span, msg, term)
+              self.assume(&mut st, term)
+            }
+            None => {}
+          }
+          None => {}
+        }
+      }
+    }
+    _ => {}
+  }
+  var k = p.path.len()
+  for k > 0 {
+    k -= 1
+    let q = PlaceRef { local: p.local, path: p.path[0..k], tys: p.tys[0..k + 1] }
+    let t = q.tys[k]
+    match self.s.tys.kinds[t] {
+      Adt(adt, _) => if !self.s.defs.adts[adt].is_enum {
+        // Read without assuming the predicates we are about to check.
+        let v = self.read_place_raw(st, q)
+        self.oblige_struct_preds(fr, &mut st, t, v, span)
+      }
+      _ => {}
+    }
+  }
+}
+
+fn Gen.update(
+  &mut self,
+  st: &mut St,
+  v: Sv,
+  path: List<Seg>,
+  tys: List<Int>,
+  k: Int,
+  new: Sv,
+) -> Sv {
+  if k >= path.len() {
+    return new
+  }
+  match (path[k], v) {
+    (Field(i), Struct(a, xs0)) => if i < xs0.len() {
+      var xs = xs0
+      xs[i] = self.update(&mut st, xs0[i], path, tys, k + 1, new)
+      return Sv.Struct(a, xs)
+    }
+    (Field(i), Tuple(xs0)) => if i < xs0.len() {
+      var xs = xs0
+      xs[i] = self.update(&mut st, xs0[i], path, tys, k + 1, new)
+      return Sv.Tuple(xs)
+    }
+    (Index(i, _), List(len, elems)) => {
+      let cur = self.select(&mut st, elems, i, tys[k + 1])
+      let inner = self.update(&mut st, cur, path, tys, k + 1, new)
+      return match self.store(elems, i, inner) {
+        Some(e) => Sv.List(len, e)
+        None => match self.fresh(tys[k], "list") {
+          List(_, es) => Sv.List(len, es)
+          other => other
+        }
+      }
+    }
+    _ => {}
+  }
+  return self.fresh(tys[k], "part")
+}
+
+// ---------- loops ----------
+
+/// The places a loop body may modify: (local, path of field indices, whether the change may
+/// alter list lengths below that path).
+fn Gen.modified(self, fr: VFrame, e: Int, out: &mut List<(Int, List<Int>, Bool)>) {
+  let ast = self.ast(fr)
+  var stack = [e]
+  for !stack.is_empty() {
+    let x = stack.pop().unwrap_or(0)
+    match ast.exprs[x].kind {
+      Block(stmts) => {
+        for s in stmts {
+          match ast.stmts[s].kind {
+            Assign(target, _, _) => match self.place_root(fr, target) {
+              Some(m) => out.push(m)
+              None => {}
+            }
+            _ => {}
+          }
+        }
+      }
+      _ => {}
+    }
+    match ast.exprs[x].kind {
+      MutArg(p) => match self.place_root(fr, p) {
+        Some((l, path, _)) => out.push((l, path, true))
+        None => {}
+      }
+      Call(callee, _) => match (self.res(fr, callee), ast.exprs[callee].kind) {
+        (Method(f), Field(base, _)) => {
+          let fd = self.s.defs.fns[f]
+          if fd.self_mode == Some(Mode.MutRef) {
+            // Reordering a list in place keeps its length.
+            let reorders = !fd.has_body &&
+              fd.pkg == self.prelude &&
+              (fd.name == "swap" ||
+                fd.name == "reverse" ||
+                fd.name == "sort" ||
+                fd.name == "sort_by")
+            match self.place_root(fr, base) {
+              Some((l, path, whole)) => out.push((l, path, whole && !reorders))
+              None => {}
+            }
+          }
+        }
+        _ => {}
+      }
+      Closure(_, _, _) => {
+        continue
+      }
+      _ => {}
+    }
+    visit_children(ast, x, &mut stack)
+  }
+}
+
+/// The root local of a place expression and the field path down to the first index. The flag
+/// says whether the assignment may change a list's length at that path.
+fn Gen.place_root(self, fr: VFrame, e: Int) -> Option<(Int, List<Int>, Bool)> {
+  let ast = self.ast(fr)
+  match ast.exprs[e].kind {
+    Name(_) => {
+      return match self.res(fr, e) {
+        Local(id) => Some((id, [], true))
+        _ => None
+      }
+    }
+    Paren(x) => {
+      return self.place_root(fr, x)
+    }
+    Field(base, _) => {
+      let i = match self.res(fr, e) {
+        Field(i) => i
+        _ => {
+          return None
+        }
+      }
+      let (l, p0, whole) = self.place_root(fr, base)?
+      var p = p0
+      if whole {
+        p.push(i)
+      }
+      return Some((l, p, whole))
+    }
+    TupleField(base, index, _) => {
+      let (l, p0, whole) = self.place_root(fr, base)?
+      var p = p0
+      if whole {
+        p.push(index)
+      }
+      return Some((l, p, whole))
+    }
+    Index(base, _) => {
+      // Writing an element keeps the list's length.
+      let (l, p, _) = self.place_root(fr, base)?
+      return Some((l, p, false))
+    }
+    _ => {
+      return None
+    }
+  }
+}
+
+/// Locals a loop body changes only by unconditional top-level `push` statements, with how many
+/// per iteration. Requires a body with no early exit, so every iteration that starts runs every
+/// push: then a list's length at iteration `i` is `len0 + k*(i - lo)`.
+fn Gen.push_counts(
+  self,
+  fr: VFrame,
+  body: Int,
+  mods: List<(Int, List<Int>, Bool)>,
+) -> List<(Int, Int)> {
+  let ast = self.ast(fr)
+  let stmts = match ast.exprs[body].kind {
+    Block(ss) => ss
+    _ => {
+      return []
+    }
+  }
+  // No break, continue, return or `?` anywhere inside.
+  var stack = [body]
+  for !stack.is_empty() {
+    let x = stack.pop().unwrap_or(0)
+    match ast.exprs[x].kind {
+      Try(_) => {
+        return []
+      }
+      Block(ss) => {
+        for s in ss {
+          match ast.stmts[s].kind {
+            Break | Continue | Return(_) => {
+              return []
+            }
+            _ => {}
+          }
+        }
+      }
+      Closure(_, _, _) => {
+        continue
+      }
+      _ => {}
+    }
+    visit_children(ast, x, &mut stack)
+  }
+  var counts: Map<Int, Int> = Map.new()
+  for s in stmts {
+    let e = match ast.stmts[s].kind {
+      Expr(e) => e
+      _ => {
+        continue
+      }
+    }
+    let callee = match ast.exprs[e].kind {
+      Call(c, _) => c
+      _ => {
+        continue
+      }
+    }
+    let (base, name) = match ast.exprs[callee].kind {
+      Field(b, n) => (b, n)
+      _ => {
+        continue
+      }
+    }
+    let f = match self.res(fr, callee) {
+      Method(f) => f
+      _ => {
+        continue
+      }
+    }
+    let fd = self.s.defs.fns[f]
+    if name.text != "push" || fd.has_body || fd.pkg != self.prelude {
+      continue
+    }
+    match (ast.exprs[base].kind, self.res(fr, base)) {
+      (Name(_), Local(l)) => counts.insert(l, counts.get(l).unwrap_or(0) + 1)
+      _ => {}
+    }
+  }
+  // Every modification of the local must be one of those pushes.
+  var out: List<(Int, Int)> = []
+  for (l, k) in counts {
+    var n = 0
+    for (m, _, _) in mods {
+      if m == l {
+        n += 1
+      }
+    }
+    if n == k {
+      out.push((l, k))
+    }
+  }
+  out.sort()
+  return out
+}
+
+fn Gen.havoc(&mut self, fr: VFrame, st: &mut St, mods: List<(Int, List<Int>, Bool)>) {
+  for (l, path, whole) in mods {
+    let cur = match st.env.get(l) {
+      Some(v) => v
+      None => {
+        continue
+      }
+    }
+    let t = self.local_ty(fr, l)
+    let new = self.havoc_at(&mut st, cur, t, path, whole)
+    st.env.insert(l, new)
+  }
+}
+
+fn Gen.havoc_at(&mut self, st: &mut St, v: Sv, t: Int, path: List<Int>, whole: Bool) -> Sv {
+  if !path.is_empty() {
+    let i = path[0]
+    let rest = path[1..path.len()]
+    let fts = self.field_tys(t)
+    match v {
+      Struct(a, xs0) => if i < xs0.len() {
+        var xs = xs0
+        xs[i] = self.havoc_at(&mut st, xs0[i], fts[i], rest, whole)
+        return Sv.Struct(a, xs)
+      }
+      Tuple(xs0) => if i < xs0.len() {
+        var xs = xs0
+        xs[i] = self.havoc_at(&mut st, xs0[i], fts[i], rest, whole)
+        return Sv.Tuple(xs)
+      }
+      _ => {}
+    }
+    return self.fresh_assumed(&mut st, t)
+  }
+  if !whole {
+    // Only list elements change: keep the length.
+    match (v, self.s.tys.kinds[t]) {
+      (List(len, _), List(e)) => {
+        let elems = self.fresh_elems(e, "elems", len.depth + 1)
+        return Sv.List(len, elems)
+      }
+      _ => {}
+    }
+  }
+  return self.fresh_assumed(&mut st, t)
+}
+
+fn Gen.fresh_assumed(&mut self, st: &mut St, t: Int) -> Sv {
+  let v = self.fresh(t, "havoc")
+  self.assume_type_preds(&mut st, t, v, 0)
+  return v
+}
+
+/// The iteration space of a loop: an index range, an optional element source and pattern.
+enum VIter {
+  Range(lo: Str, hi: Str, k: IntTy, pat: Int)
+  Coll(list: Sv, n: Str, pat: Int, elem: Int)
+  Cond(c: Option<Int>)
+}
+
+/// Bind the iteration variable for index `i` in state `s`.
+fn Gen.bind_iter(&mut self, fr: VFrame, s: &mut St, iter: VIter, i: Str) {
+  match iter {
+    Range(_, _, k, pat) => {
+      let t = self.s.tys.int_ty(k, 0)
+      self.bind(fr, &mut s, pat, sv_int(i, k), t)
+    }
+    Coll(list, _, pat, elem) => match list {
+      List(_, elems) => {
+        let x = self.select(&mut s, elems, i, elem)
+        self.bind(fr, &mut s, pat, x, elem)
+      }
+      _ => {}
+    }
+    _ => {}
+  }
+}
+
+fn Gen.for_loop(
+  &mut self,
+  fr: VFrame,
+  st: &mut St,
+  head: syntax.ForHead,
+  invs: List<Int>,
+  body: Int,
+) -> Bool {
+  let ast = self.ast(fr)
+  var mods: List<(Int, List<Int>, Bool)> = []
+  self.modified(fr, body, &mut mods)
+  match head {
+    While(c) => self.modified(fr, c, &mut mods)
+    _ => {}
+  }
+  let base = st.pc.len()
+  var exits: List<(St, Sv)> = []
+  var iter = VIter.Cond(None)
+  match head {
+    In(pat, it_e) => {
+      match ast.exprs[it_e].kind {
+        Range(Some(lo), Some(hi)) => {
+          let t = self.ty(fr, lo)
+          let k = match self.s.tys.kinds[t] {
+            Int(k, _) => k
+            _ => IntTy.I64
+          }
+          let l = match self.expr(fr, &mut st, lo) {
+            Some(v) => v
+            None => {
+              return false
+            }
+          }
+          let h = match self.expr(fr, &mut st, hi) {
+            Some(v) => v
+            None => {
+              return false
+            }
+          }
+          match (sv_term(l), sv_term(h)) {
+            (Some(lt), Some(ht)) => iter = VIter.Range(lt, ht, k, pat)
+            _ => {
+              return self.opaque_loop(fr, &mut st, mods)
+            }
+          }
+        }
+        _ => {
+          let it = self.ty(fr, it_e)
+          let v = match self.expr(fr, &mut st, it_e) {
+            Some(v) => v
+            None => {
+              return false
+            }
+          }
+          match (self.s.tys.kinds[it], v) {
+            (List(e), List(len, elems)) => iter = VIter.Coll(Sv.List(len, elems), len.t, pat, e)
+            (Set(e), _) => {
+              let lt = self.s.tys.list(e)
+              let l = self.fresh(lt, "items")
+              match l {
+                List(len, _) => iter = VIter.Coll(l, len.t, pat, e)
+                _ => {
+                  return self.opaque_loop(fr, &mut st, mods)
+                }
+              }
+            }
+            (Map(k, v2), _) => {
+              let tup = self.s.tys.tuple([k, v2])
+              let lt = self.s.tys.list(tup)
+              let l = self.fresh(lt, "entries")
+              match l {
+                List(len, _) => iter = VIter.Coll(l, len.t, pat, tup)
+                _ => {
+                  return self.opaque_loop(fr, &mut st, mods)
+                }
+              }
+            }
+            _ => {
+              return self.opaque_loop(fr, &mut st, mods)
+            }
+          }
+        }
+      }
+    }
+    While(c) => iter = VIter.Cond(Some(c))
+    Forever => iter = VIter.Cond(None)
+  }
+  let (lo, hi) = match iter {
+    Range(l, h, _, _) => (l, h)
+    Coll(_, n, _, _) => ("0", n)
+    Cond(_) => ("", "")
+  }
+  let indexed = match iter {
+    Cond(_) => false
+    _ => true
+  }
+  let cond = match iter {
+    Cond(c) => c
+    _ => None
+  }
+  // First iteration: the invariants must hold on entry.
+  var entry = st
+  if indexed {
+    let enter = "(< " + lo + " " + hi + ")"
+    var skip = st
+    self.assume(&mut skip, smt_not(enter))
+    exits.push((skip, Sv.Unit))
+    self.assume(&mut entry, enter)
+    self.bind_iter(fr, &mut entry, iter, lo)
+  } else {
+    match cond {
+      Some(c) => {
+        let cv = match self.expr(fr, &mut entry, c) {
+          Some(v) => v
+          None => {
+            return false
+          }
+        }
+        let ct = sv_term(cv).unwrap_or("true")
+        var skip = entry
+        self.assume(&mut skip, smt_not(ct))
+        exits.push((skip, Sv.Unit))
+        self.assume(&mut entry, ct)
+      }
+      None => {}
+    }
+  }
+  for inv in invs {
+    let span = ast.exprs[inv].span
+    let text = self.src(span)
+    var s2 = entry
+    match self.expr(fr, &mut s2, inv) {
+      Some(v) => match sv_term(v) {
+        Some(t) => self.oblige(fr, s2, ObKind.LoopInvariant, span, text + " (on entry)", t)
+        None => {}
+      }
+      None => {}
+    }
+  }
+  // Lists the body only pushes to: their length is known at every iteration.
+  var counted: List<(Int, Int, Str)> = []
+  if indexed {
+    for (l, k) in self.push_counts(fr, body, mods) {
+      match st.env.get(l) {
+        Some(List(len, _)) => if len.depth == 0 { counted.push((l, k, len.t)) }
+        _ => {}
+      }
+    }
+  }
+  // An arbitrary iteration: havoc what the loop modifies, assume the invariants.
+  var it = st
+  self.havoc(fr, &mut it, mods)
+  var idx = ""
+  if indexed {
+    let i = self.konst("Int", "i")
+    self.assume(&mut it, "(and (<= " + lo + " " + i + ") (< " + i + " " + hi + "))")
+    self.bind_iter(fr, &mut it, iter, i)
+    for (l, k, len0) in counted {
+      match it.env.get(l) {
+        Some(List(len, _)) => {
+          let fact = "(= " +
+            len.t +
+            " (+ " +
+            len0 +
+            " (* " +
+            k.str() +
+            " (- " +
+            i +
+            " " +
+            lo +
+            "))))"
+          self.assume(&mut it, fact)
+        }
+        _ => {}
+      }
+    }
+    idx = i
+  }
+  // The invariants hold at the top of every iteration, before the condition runs.
+  for inv in invs {
+    match self.expr(fr, &mut it, inv) {
+      Some(v) => match sv_term(v) {
+        Some(t) => self.assume(&mut it, t)
+        None => {}
+      }
+      None => {}
+    }
+  }
+  match cond {
+    Some(c) => {
+      let cv = match self.expr(fr, &mut it, c) {
+        Some(v) => v
+        None => {
+          return false
+        }
+      }
+      self.assume(&mut it, sv_term(cv).unwrap_or("true"))
+    }
+    None => {}
+  }
+  let it_base = it.pc.len()
+  self.loops.push(VLoop { breaks: [], conts: [] })
+  let end = self.block(fr, &mut it, body)
+  let frame = self.loops.pop().unwrap_or(VLoop { breaks: [], conts: [] })
+  var latch_states: List<(St, Sv)> = []
+  for s in frame.conts {
+    latch_states.push((s, Sv.Unit))
+  }
+  if end.is_some() {
+    latch_states.push((it, Sv.Unit))
+  }
+  let unit_t = self.s.tys.unit_ty
+  match self.merge(it_base, latch_states, unit_t) {
+    Some((latch, _)) => {
+      // The next iteration (if any) must satisfy the invariants again.
+      var next = latch
+      var cont = "true"
+      var next_idx = ""
+      if indexed {
+        next_idx = self.define_int("(+ " + idx + " 1)")
+        cont = "(< " + next_idx + " " + hi + ")"
+      } else {
+        match cond {
+          Some(c) => {
+            let cv = match self.expr(fr, &mut next, c) {
+              Some(v) => v
+              None => {
+                return false
+              }
+            }
+            cont = sv_term(cv).unwrap_or("true")
+          }
+          None => {}
+        }
+      }
+      var again = next
+      self.assume(&mut again, cont)
+      if indexed {
+        self.bind_iter(fr, &mut again, iter, next_idx)
+      }
+      for inv in invs {
+        let span = ast.exprs[inv].span
+        let text = self.src(span)
+        var s2 = again
+        match self.expr(fr, &mut s2, inv) {
+          Some(v) => match sv_term(v) {
+            Some(t) => self.oblige(fr, s2, ObKind.LoopInvariant, span, text + " (preserved)", t)
+            None => {}
+          }
+          None => {}
+        }
+      }
+      var done = next
+      self.assume(&mut done, smt_not(cont))
+      exits.push((done, Sv.Unit))
+    }
+    None => {}
+  }
+  for s in frame.breaks {
+    exits.push((s, Sv.Unit))
+  }
+  return match self.merge(base, exits, unit_t) {
+    Some((s, _)) => {
+      st = s
+      true
+    }
+    None => false
+  }
+}
+
+/// A loop we cannot model: havoc what it modifies and continue.
+fn Gen.opaque_loop(&mut self, fr: VFrame, st: &mut St, mods: List<(Int, List<Int>, Bool)>) -> Bool {
+  self.havoc(fr, &mut st, mods)
+  return true
+}

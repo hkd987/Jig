@@ -12,7 +12,8 @@ import "syntax"
 // compiler alone builds, which is how `bootstrap/jigc.c` is made. `jigc fmt FILE` prints
 // the file as `jig fmt` writes it. `jigc test DIR STD [FILTER]` runs DIR's tests and
 // scenarios on the interpreter and prints the lines of `jig test --json`; `jigc sim DIR STD`
-// runs `main` there with simulated effects.
+// runs `main` there with simulated effects. `jigc vc DIR STD [std]` prints the verification
+// conditions `jig debug vc DIR [std]` prints.
 
 fn main() effects {io, fs, env, ffi} {
   let args = os.args()
@@ -52,6 +53,16 @@ fn main() effects {io, fs, env, ffi} {
     }
     return
   }
+  if (args.len() == 4 || args.len() == 5) && args[1] == "vc" {
+    match sema.vc_dump(args[2], args[3], args.len() == 5 && args[4] == "std") {
+      Ok(out) => io.print(out)
+      Err(e) => {
+        io.eprintln("error: " + e)
+        os.exit(1)
+      }
+    }
+    return
+  }
   if args.len() == 4 && args[1] == "sim" {
     match sema.sim_main(args[2], args[3], os.env("PWD").unwrap_or("")) {
       Ok(out) => io.print(out)
@@ -78,7 +89,7 @@ fn main() effects {io, fs, env, ffi} {
   }
   if args.len() < 3 || (args[1] != "tokens" && args[1] != "ast") {
     io.eprintln(
-      "usage: jigc tokens|ast|fmt FILE, jigc check|c|cc|sim DIR STD, jigc test DIR STD [FILTER]",
+      "usage: jigc tokens|ast|fmt FILE, jigc check|c|cc|sim DIR STD, jigc vc DIR STD [std], jigc test DIR STD [FILTER]",
     )
     os.exit(2)
   }

@@ -1,0 +1,961 @@
+// Calls in the verification-condition generator (see `vc.jig`): callee contracts stand in for
+// their bodies, and builtins have models.
+
+import "syntax"
+
+fn Gen.call(
+  &mut self,
+  fr: VFrame,
+  st: &mut St,
+  e: Int,
+  callee: Int,
+  arg_ids: List<Int>,
+  t: Int,
+) -> Option<Sv> {
+  let ast = self.ast(fr)
+  let span = ast.exprs[e].span
+  let res = self.res(fr, callee)
+  match res {
+    Old => {
+      if arg_ids.is_empty() {
+        return None
+      }
+      let a = arg_ids[0]
+      return match fr.old {
+        Some(old) => {
+          var s2 = St { env: old, pc: st.pc }
+          let v = self.expr(fr, &mut s2, a)
+          st.pc = s2.pc
+          v
+        }
+        None => self.expr(fr, &mut st, a)
+      }
+    }
+    Variant(adt, v) => {
+      var fields: List<Sv> = []
+      for a in arg_ids {
+        fields.push(self.expr(fr, &mut st, a)?)
+      }
+      return Some(self.construct(t, adt, v, fields))
+    }
+    Fn(f) | Method(f) => {
+      let fd = self.s.defs.fns[f]
+      if fd.name == "assert" && !fd.has_body && fd.pkg == self.prelude {
+        if arg_ids.is_empty() {
+          return None
+        }
+        let c = arg_ids[0]
+        let v = self.expr(fr, &mut st, c)?
+        let ct = sv_term(v).unwrap_or("false")
+        let cspan = ast.exprs[c].span
+        let text = self.src(cspan)
+        self.oblige(fr, st, ObKind.Assert, cspan, text, ct)
+        self.assume(&mut st, ct)
+        return Some(Sv.Unit)
+      }
+      var inst: List<Int> = []
+      for x in self.s.tables[fr.pkg][fr.file].expr_inst.get(callee).unwrap_or([]) {
+        inst.push(self.s.tys.subst(x, fr.inst))
+      }
+      var call_args: List<VArg> = []
+      let is_method = match res {
+        Method(_) => true
+        _ => false
+      }
+      match ast.exprs[callee].kind {
+        Field(base, _) => if is_method {
+          call_args.push(self.arg(fr, &mut st, base, fd.self_mode == Some(Mode.MutRef))?)
+        }
+        _ => {}
+      }
+      for i in 0..arg_ids.len() {
+        let m = i < fd.params.len() && fd.params[i].mode == Mode.MutRef
+        call_args.push(self.arg(fr, &mut st, arg_ids[i], m)?)
+      }
+      return self.invoke(fr, &mut st, span, f, inst, call_args, t)
+    }
+    IfaceMethod(iid, mi) => {
+      let base = match ast.exprs[callee].kind {
+        Field(b, _) => b
+        _ => {
+          return Some(self.fresh(t, "call"))
+        }
+      }
+      let rt = self.ty(fr, base)
+      let mf = self.s.defs.ifaces[iid].methods[mi]
+      let mname = self.s.defs.fns[mf].name
+      let found = match ty_key(self.s.tys, rt) {
+        Some(k) => self.s.defs.methods.get((k, mname))
+        None => None
+      }
+      let f = match found {
+        Some(f) => f
+        None => {
+          for a in arg_ids {
+            let _ = self.expr(fr, &mut st, a)?
+          }
+          return Some(self.unit_or_fresh(t, "call"))
+        }
+      }
+      let recv_args = match self.s.tys.kinds[rt] {
+        Adt(_, a) => a
+        List(x) | Set(x) => [x]
+        Map(k, v) => [k, v]
+        _ => []
+      }
+      let fd = self.s.defs.fns[f]
+      var call_args = [self.arg(fr, &mut st, base, fd.self_mode == Some(Mode.MutRef))?]
+      for i in 0..arg_ids.len() {
+        let m = i < fd.params.len() && fd.params[i].mode == Mode.MutRef
+        call_args.push(self.arg(fr, &mut st, arg_ids[i], m)?)
+      }
+      return self.invoke(fr, &mut st, span, f, recv_args, call_args, t)
+    }
+    _ => {
+      // Function values, bound methods (`x.str()`), fields holding functions.
+      match ast.exprs[callee].kind {
+        Field(base, _) => {
+          let _ = self.expr(fr, &mut st, base)?
+        }
+        _ => {
+          let _ = self.expr(fr, &mut st, callee)?
+        }
+      }
+      for a in arg_ids {
+        let _ = self.expr(fr, &mut st, a)?
+      }
+      if self.is_never(t) {
+        return None
+      }
+      return Some(self.unit_or_fresh(t, "call"))
+    }
+  }
+}
+
+fn Gen.arg(&mut self, fr: VFrame, st: &mut St, a: Int, mutref: Bool) -> Option<VArg> {
+  if mutref {
+    match self.place(fr, &mut st, a) {
+      Some(p) => {
+        self.oblige_place_bounds(fr, &mut st, p)
+        let v = self.read_place(&mut st, p)
+        return Some(VArg.Place(p, v))
+      }
+      None => {}
+    }
+  }
+  return Some(VArg.Value(self.expr(fr, &mut st, a)?))
+}
+
+/// A call: the callee's contract (or a model of a builtin) stands in for its body.
+fn Gen.invoke(
+  &mut self,
+  fr: VFrame,
+  st: &mut St,
+  span: syntax.Span,
+  f: Int,
+  inst: List<Int>,
+  args: List<VArg>,
+  t: Int,
+) -> Option<Sv> {
+  let fd = self.s.defs.fns[f]
+  if !fd.has_body {
+    match lookup_intrinsic(self.s.pkgs[fd.pkg].path, fd.recv, fd.name) {
+      Some((op, _)) => {
+        return self.intrinsic(fr, &mut st, span, op, args, t)
+      }
+      None => {}
+    }
+  }
+  if fd.pkg == self.prelude {
+    let (handled, v) = self.prelude_model(fr, &mut st, span, f, args, t)
+    if handled {
+      return v
+    }
+  }
+  return self.contract_call(fr, &mut st, span, f, inst, args, t)
+}
+
+fn Gen.contract_call(
+  &mut self,
+  fr: VFrame,
+  st: &mut St,
+  span: syntax.Span,
+  f: Int,
+  inst: List<Int>,
+  args: List<VArg>,
+  t: Int,
+) -> Option<Sv> {
+  let fname = self.s.fn_display_name(f)
+  let body = match self.s.bodies[f] {
+    Some(b) => b
+    None => {
+      return self.havoc_call(&mut st, args, t)
+    }
+  }
+  if self.depth > 2 {
+    return self.havoc_call(&mut st, args, t)
+  }
+  self.depth += 1
+  let r = self.contract_call_inner(fr, &mut st, span, f, fname, body, inst, args, t)
+  self.depth -= 1
+  return r
+}
+
+fn Gen.contract_call_inner(
+  &mut self,
+  fr: VFrame,
+  st: &mut St,
+  span: syntax.Span,
+  f: Int,
+  fname: Str,
+  body: Body,
+  inst: List<Int>,
+  args: List<VArg>,
+  t: Int,
+) -> Option<Sv> {
+  let fd = self.s.defs.fns[f]
+  let ast = self.ast_of(fd.pkg, fd.file)
+  let decl = match ast.items[fd.item].kind {
+    Fn(d) => d
+    _ => {
+      return self.havoc_call(&mut st, args, t)
+    }
+  }
+  let offset = if fd.self_mode.is_some() { 1 } else { 0 }
+  let pure = fd.eff == 0
+  var cfr = VFrame {
+    pkg: fd.pkg
+    file: fd.file
+    body: Some(body)
+    inst: inst
+    result: None
+    old: None
+    names: []
+    own: false
+  }
+  var cst = St { env: Map.new(), pc: st.pc }
+  st.pc = []
+  for i in 0..body.param_locals.len() {
+    if i < args.len() {
+      cst.env.insert(body.param_locals[i], args[i].value())
+    }
+  }
+  // Preconditions at the call site.
+  for i in 0..args.len() {
+    if i < offset || i - offset >= fd.params.len() {
+      continue
+    }
+    match fd.params[i - offset].refine {
+      Some(al) => match self.alias_pred(&mut cst, al, args[i].value()) {
+        Some((msg, term)) => {
+          self.oblige(
+            fr,
+            cst,
+            ObKind.Precondition,
+            span,
+            "argument of `" + fname + "`: " + msg,
+            term,
+          )
+          self.assume(&mut cst, term)
+        }
+        None => {}
+      }
+      None => {}
+    }
+  }
+  for p in decl.params {
+    match p.refine {
+      Some(pred) => {
+        let text = self.src(ast.exprs[pred].span)
+        match self.expr(cfr, &mut cst, pred) {
+          Some(v) => match sv_term(v) {
+            Some(term) => {
+              self.oblige(
+                fr,
+                cst,
+                ObKind.Precondition,
+                span,
+                "`" + fname + "` requires " + text,
+                term,
+              )
+              self.assume(&mut cst, term)
+            }
+            None => {}
+          }
+          None => {}
+        }
+      }
+      None => {}
+    }
+  }
+  for r in decl.pre {
+    let text = self.src(ast.exprs[r].span)
+    match self.expr(cfr, &mut cst, r) {
+      Some(v) => match sv_term(v) {
+        Some(term) => {
+          self.oblige(fr, cst, ObKind.Precondition, span, "`" + fname + "` requires " + text, term)
+          self.assume(&mut cst, term)
+        }
+        None => {}
+      }
+      None => {}
+    }
+  }
+  // The result: an uninterpreted function of the arguments when the callee is pure and
+  // everything is scalar (so equal arguments give equal results), else fresh.
+  var has_mut = false
+  for a in args {
+    match a {
+      Place(_, _) => has_mut = true
+      _ => {}
+    }
+  }
+  var sargs: List<(Str, Str)> = []
+  var all_scalar = true
+  for a in args {
+    match a.value() {
+      Leaf(l) => if l.depth == 0 {
+        sargs.push((l.t, self.sort(l.base, 0)))
+      } else {
+        all_scalar = false
+        break
+      }
+      _ => {
+        all_scalar = false
+        break
+      }
+    }
+  }
+  let fresh_r = self.fresh_at(t, "r", 0)
+  var result = Sv.Unit
+  var modeled = false
+  if pure && !has_mut && all_scalar && inst.is_empty() {
+    match fresh_r {
+      Leaf(rl) => {
+        let rs = self.sort(rl.base, 0)
+        var sorts: List<Str> = []
+        var terms: List<Str> = []
+        for (tm, so) in sargs {
+          sorts.push(so)
+          terms.push(tm)
+        }
+        let fnum = self.fn_num(f)
+        let fname_smt = self.fun("fn_" + fnum.str(), sorts, rs)
+        let app = if sargs.is_empty() {
+          fname_smt
+        } else {
+          "(" + fname_smt + " " + terms.join(" ") + ")"
+        }
+        let v = Sv.Leaf(Leaf { t: self.define(rs, app), base: rl.base, depth: 0 })
+        for fct in self.wf_facts(v) {
+          self.assume(&mut cst, fct)
+        }
+        result = v
+        modeled = true
+      }
+      _ => {}
+    }
+  }
+  if !modeled {
+    let facts = self.wf_facts_deep(fresh_r)
+    self.axioms.extend(facts)
+    result = fresh_r
+  }
+  self.assume_type_preds(&mut cst, t, result, 0)
+  match fd.ret_refine {
+    Some(al) => match self.alias_pred(&mut cst, al, result) {
+      Some((_, term)) => self.assume(&mut cst, term)
+      None => {}
+    }
+    None => {}
+  }
+  // `&mut` arguments come back changed, satisfying their types' predicates.
+  let pre_env = cst.env
+  var writes: List<(PlaceRef, Sv)> = []
+  for i in 0..args.len() {
+    match args[i] {
+      Place(p, cur) => {
+        let pt = p.tys[p.tys.len() - 1]
+        // Only what the callee's body can write changes; the rest is kept.
+        let nv = match self.frames.get((f, i)) {
+          Some(Paths(paths)) => {
+            var v = cur
+            for path in paths {
+              v = self.havoc_at(&mut cst, v, pt, path, true)
+            }
+            v
+          }
+          _ => self.fresh(pt, "out")
+        }
+        self.assume_type_preds(&mut cst, pt, nv, 0)
+        if i < body.param_locals.len() {
+          cst.env.insert(body.param_locals[i], nv)
+        }
+        writes.push((p, nv))
+      }
+      _ => {}
+    }
+  }
+  // Postconditions as facts.
+  cfr.result = Some(result)
+  cfr.old = Some(pre_env)
+  for en in decl.post {
+    match self.expr(cfr, &mut cst, en) {
+      Some(v) => match sv_term(v) {
+        Some(term) => self.assume(&mut cst, term)
+        None => {}
+      }
+      None => {}
+    }
+  }
+  st.pc = cst.pc
+  for (p, nv) in writes {
+    let root = match st.env.get(p.local) {
+      Some(v) => v
+      None => self.fresh(p.tys[0], "local")
+    }
+    let updated = self.update(&mut st, root, p.path, p.tys, 0, nv)
+    st.env.insert(p.local, updated)
+  }
+  if self.is_never(t) {
+    return None
+  }
+  return Some(result)
+}
+
+/// An unknown call: fresh result, `&mut` arguments havocked.
+fn Gen.havoc_call(&mut self, st: &mut St, args: List<VArg>, t: Int) -> Option<Sv> {
+  for a in args {
+    match a {
+      Place(p, _) => {
+        let pt = p.tys[p.tys.len() - 1]
+        let nv = self.fresh_assumed(&mut st, pt)
+        let root = match st.env.get(p.local) {
+          Some(v) => v
+          None => self.fresh(p.tys[0], "local")
+        }
+        let updated = self.update(&mut st, root, p.path, p.tys, 0, nv)
+        st.env.insert(p.local, updated)
+      }
+      _ => {}
+    }
+  }
+  if self.is_never(t) {
+    return None
+  }
+  return Some(self.unit_or_fresh(t, "call"))
+}
+
+fn Gen.write_arg(&mut self, st: &mut St, a: VArg, v: Sv) {
+  match a {
+    Place(p, _) => {
+      let root = match st.env.get(p.local) {
+        Some(x) => x
+        None => self.fresh(p.tys[0], "local")
+      }
+      let updated = self.update(&mut st, root, p.path, p.tys, 0, v)
+      st.env.insert(p.local, updated)
+    }
+    _ => {}
+  }
+}
+
+/// Models of prelude functions written in Jig (`Option.unwrap`, `min`, ...): whether one
+/// applies, and the result.
+fn Gen.prelude_model(
+  &mut self,
+  fr: VFrame,
+  st: &mut St,
+  span: syntax.Span,
+  f: Int,
+  args: List<VArg>,
+  t: Int,
+) -> (Bool, Option<Sv>) {
+  let fd = self.s.defs.fns[f]
+  let name = fd.name
+  let is_opt = fd.recv == Some(TyKey.Adt(self.s.defs.option))
+  let is_res = fd.recv == Some(TyKey.Adt(self.s.defs.result))
+  if is_opt || is_res {
+    if args.is_empty() {
+      return (false, None)
+    }
+    let (tag, vars) = match args[0].value() {
+      Enum(_, tag, vars) => (tag, vars)
+      _ => {
+        return (false, None)
+      }
+    }
+    let ok = "(= " + tag.t + " 0)"
+    let payload = if !vars.is_empty() && !vars[0].is_empty() { Some(vars[0][0]) } else { None }
+    if name == "is_some" || name == "is_ok" {
+      return (true, Some(sv_bool(self.define_bool(ok))))
+    }
+    if name == "is_none" || name == "is_err" {
+      return (true, Some(sv_bool(self.define_bool(smt_not(ok)))))
+    }
+    if name == "unwrap" {
+      let what = if is_opt { "`None`" } else { "an `Err`" }
+      self.oblige(fr, st, ObKind.Unwrap, span, "not " + what + ": " + self.src(span), ok)
+      self.assume(&mut st, ok)
+      return (
+        true,
+        Some(
+          match payload {
+            Some(p) => p
+            None => self.fresh(t, "unwrap")
+          },
+        ),
+      )
+    }
+    if name == "unwrap_or" {
+      if args.len() < 2 {
+        return (false, None)
+      }
+      let d = args[1].value()
+      let p = match payload {
+        Some(p) => p
+        None => self.fresh(t, "p")
+      }
+      return (true, Some(self.ite(ok, p, d, t)))
+    }
+    if name == "ok_or" && is_opt {
+      if args.len() < 2 {
+        return (false, None)
+      }
+      let err = args[1].value()
+      let radt = match self.s.tys.kinds[t] {
+        Adt(a, _) => a
+        _ => {
+          return (false, None)
+        }
+      }
+      let p = match payload {
+        Some(p) => p
+        None => {
+          let vts = self.variant_tys(t)
+          let pt = if !vts.is_empty() && !vts[0].is_empty() { vts[0][0] } else { t }
+          self.fresh(pt, "p")
+        }
+      }
+      let okv = self.construct(t, radt, 0, [p])
+      let errv = self.construct(t, radt, 1, [err])
+      return (true, Some(self.ite(ok, okv, errv, t)))
+    }
+    return (false, None)
+  }
+  if fd.recv.is_none() && (name == "min" || name == "max") && args.len() == 2 {
+    let a = args[0].value()
+    let b = args[1].value()
+    match (sv_term(a), sv_term(b), self.s.tys.kinds[t]) {
+      (Some(x), Some(y), Int(_, _)) => {
+        let c = if name == "min" { "(<= " + x + " " + y + ")" } else { "(>= " + x + " " + y + ")" }
+        return (true, Some(self.ite(c, a, b, t)))
+      }
+      _ => {}
+    }
+  }
+  return (false, None)
+}
+
+/// The term of argument `i`, if it is a scalar.
+fn arg_term(args: List<VArg>, i: Int) -> Option<Str> {
+  if i >= args.len() {
+    return None
+  }
+  return sv_term(args[i].value())
+}
+
+/// The type of an `&mut` argument's place.
+fn arg_place_ty(a: VArg) -> Option<Int> {
+  return match a {
+    Place(p, _) => Some(p.tys[p.tys.len() - 1])
+    _ => None
+  }
+}
+
+/// Models of builtins: list and string lengths, element access, integer helpers.
+fn Gen.intrinsic(
+  &mut self,
+  fr: VFrame,
+  st: &mut St,
+  span: syntax.Span,
+  op: Op,
+  args: List<VArg>,
+  t: Int,
+) -> Option<Sv> {
+  let v0 = if args.is_empty() { None } else { Some(args[0].value()) }
+  match op {
+    Panic => {
+      self.oblige(fr, st, ObKind.Panic, span, "unreachable: " + self.src(span), "false")
+      return None
+    }
+    IntAbs => {
+      let x = arg_term(args, 0)?
+      let k = match self.s.tys.kinds[t] {
+        Int(k, _) => k
+        _ => {
+          return Some(self.fresh(t, "abs"))
+        }
+      }
+      let r = self.define_int("(ite (< " + x + " 0) (- " + x + ") " + x + ")")
+      self.arith_result(fr, &mut st, r, k, span)
+      return Some(sv_int(r, k))
+    }
+    IntMin | IntMax => {
+      let x = arg_term(args, 0)?
+      let y = arg_term(args, 1)?
+      let k = match self.s.tys.kinds[t] {
+        Int(k, _) => k
+        _ => {
+          return Some(self.fresh(t, "m"))
+        }
+      }
+      let c = if op == Op.IntMin { "<=" } else { ">=" }
+      return Some(
+        sv_int(self.define_int("(ite (" + c + " " + x + " " + y + ") " + x + " " + y + ")"), k),
+      )
+    }
+    StrLen => {
+      let x = arg_term(args, 0)?
+      let len = self.str_len(x)
+      return Some(sv_int(self.define_int(len), IntTy.I64))
+    }
+    StrIsEmpty => {
+      let x = arg_term(args, 0)?
+      let len = self.str_len(x)
+      return Some(sv_bool(self.define_bool("(= " + len + " 0)")))
+    }
+    StrConcat => {
+      if args.len() < 2 {
+        return None
+      }
+      return Some(self.concat(args[0].value(), args[1].value()))
+    }
+    // What string searches imply about lengths.
+    StartsWith | EndsWith | StrContains => {
+      let x = arg_term(args, 0)?
+      let y = arg_term(args, 1)?
+      let lx = self.str_len(x)
+      let ly = self.str_len(y)
+      let r = self.fresh(t, "has")
+      let rt = sv_term(r)?
+      self.assume(&mut st, "(=> " + rt + " (<= " + ly + " " + lx + "))")
+      self.assume(&mut st, "(=> (= " + ly + " 0) " + rt + ")")
+      return Some(r)
+    }
+    StrFind => {
+      let x = arg_term(args, 0)?
+      let y = arg_term(args, 1)?
+      let lx = self.str_len(x)
+      let ly = self.str_len(y)
+      let r = self.fresh(t, "find")
+      match r {
+        Enum(_, tag, vars) => if !vars.is_empty() && !vars[0].is_empty() {
+          match sv_term(vars[0][0]) {
+            Some(i) => self.assume(
+              &mut st,
+              "(=> (= " +
+                tag.t +
+                " 0) (and (>= " +
+                i +
+                " 0) (<= (+ " +
+                i +
+                " " +
+                ly +
+                ") " +
+                lx +
+                ")))",
+            )
+            None => {}
+          }
+        }
+        _ => {}
+      }
+      return Some(r)
+    }
+    Trim => {
+      let x = arg_term(args, 0)?
+      let r = self.fresh(t, "trim")
+      match sv_term(r) {
+        Some(rt) => {
+          let lr = self.str_len(rt)
+          let lx = self.str_len(x)
+          self.assume(&mut st, "(<= " + lr + " " + lx + ")")
+        }
+        None => {}
+      }
+      return Some(r)
+    }
+    Bytes | Chars | Split => {
+      let x = arg_term(args, 0)?
+      let lx = self.str_len(x)
+      let r = self.fresh(t, "parts")
+      match r {
+        List(len, _) => {
+          let n = len.t
+          let fact = match op {
+            // One byte each.
+            Bytes => "(= " + n + " " + lx + ")"
+            // One to four bytes each.
+            Chars => "(and (<= " + n + " " + lx + ") (=> (> " + lx + " 0) (> " + n + " 0)))"
+            // Always at least one piece.
+            _ => "(>= " + n + " 1)"
+          }
+          self.assume(&mut st, fact)
+        }
+        _ => {}
+      }
+      return Some(r)
+    }
+    StrConcatN => {
+      if args.is_empty() {
+        return None
+      }
+      var acc = args[0].value()
+      for i in 1..args.len() {
+        acc = self.concat(acc, args[i].value())
+      }
+      return Some(acc)
+    }
+    ListNew => {
+      let elem = self.elem_ty(t)
+      let elems = self.fresh_elems(elem, "e", 1)
+      return Some(Sv.List(int_leaf("0"), elems))
+    }
+    ListLen => {
+      return match v0? {
+        List(len, _) => Some(sv_int(len.t, IntTy.I64))
+        _ => Some(self.fresh(t, "len"))
+      }
+    }
+    ListIsEmpty => {
+      return match v0? {
+        List(len, _) => Some(sv_bool(self.define_bool("(= " + len.t + " 0)")))
+        _ => Some(self.fresh(t, "empty"))
+      }
+    }
+    Push => {
+      let (len, elems) = match v0 {
+        Some(List(len, elems)) => (len, elems)
+        _ => {
+          return self.havoc_call(&mut st, args, t)
+        }
+      }
+      if args.len() < 2 {
+        return None
+      }
+      let x = args[1].value()
+      let n = len.t
+      let new_elems = self.store(elems, n, x)
+      let new_len = self.define_int("(+ " + n + " 1)")
+      let new = match new_elems {
+        Some(e) => Sv.List(int_leaf(new_len), e)
+        None => {
+          return self.havoc_call(&mut st, args, t)
+        }
+      }
+      self.write_arg(&mut st, args[0], new)
+      return Some(Sv.Unit)
+    }
+    Pop => {
+      let (len, elems) = match v0 {
+        Some(List(len, elems)) => (len, elems)
+        _ => {
+          return self.havoc_call(&mut st, args, t)
+        }
+      }
+      let oadt = match self.s.tys.kinds[t] {
+        Adt(a, _) => a
+        _ => {
+          return self.havoc_call(&mut st, args, t)
+        }
+      }
+      let n = len.t
+      let last = self.define_int("(- " + n + " 1)")
+      let vts = self.variant_tys(t)
+      let elem = if !vts.is_empty() && !vts[0].is_empty() { vts[0][0] } else { t }
+      let nonempty = "(> " + n + " 0)"
+      var s2 = st
+      self.assume(&mut s2, nonempty)
+      let x = self.select(&mut s2, elems, last, elem)
+      let some = self.construct(t, oadt, 0, [x])
+      let none = self.construct(t, oadt, 1, [])
+      let r = self.ite(nonempty, some, none, t)
+      let new_len = self.define_int("(ite " + nonempty + " " + last + " 0)")
+      self.write_arg(&mut st, args[0], Sv.List(int_leaf(new_len), elems))
+      return Some(r)
+    }
+    Get => {
+      let (len, elems) = match v0 {
+        Some(List(len, elems)) => (len, elems)
+        _ => {
+          return Some(self.fresh(t, "get"))
+        }
+      }
+      let oadt = match self.s.tys.kinds[t] {
+        Adt(a, _) => a
+        _ => {
+          return Some(self.fresh(t, "get"))
+        }
+      }
+      let i = arg_term(args, 1)?
+      let inb = "(and (<= 0 " + i + ") (< " + i + " " + len.t + "))"
+      let vts = self.variant_tys(t)
+      let elem = if !vts.is_empty() && !vts[0].is_empty() { vts[0][0] } else { t }
+      var s2 = st
+      self.assume(&mut s2, inb)
+      let x = self.select(&mut s2, elems, i, elem)
+      let some = self.construct(t, oadt, 0, [x])
+      let none = self.construct(t, oadt, 1, [])
+      return Some(self.ite(inb, some, none, t))
+    }
+    Swap => {
+      let (len, elems) = match v0 {
+        Some(List(len, elems)) => (len, elems)
+        _ => {
+          return self.havoc_call(&mut st, args, t)
+        }
+      }
+      let i = arg_term(args, 1)?
+      let j = arg_term(args, 2)?
+      let lt = match arg_place_ty(args[0]) {
+        Some(x) => x
+        None => {
+          return self.havoc_call(&mut st, args, t)
+        }
+      }
+      let elem = self.elem_ty(lt)
+      let l = len.t
+      let goal = "(and (<= 0 " +
+        i +
+        ") (< " +
+        i +
+        " " +
+        l +
+        ") (<= 0 " +
+        j +
+        ") (< " +
+        j +
+        " " +
+        l +
+        "))"
+      self.oblige(fr, st, ObKind.Bounds, span, "swap indices in bounds: " + self.src(span), goal)
+      self.assume(&mut st, goal)
+      let xi = self.select(&mut st, elems, i, elem)
+      let xj = self.select(&mut st, elems, j, elem)
+      let e1 = self.store(elems, i, xj)?
+      let e2 = self.store(e1, j, xi)?
+      self.write_arg(&mut st, args[0], Sv.List(len, e2))
+      return Some(Sv.Unit)
+    }
+    Remove | Insert => {
+      let len = match v0 {
+        Some(List(len, _)) => len
+        _ => {
+          return self.havoc_call(&mut st, args, t)
+        }
+      }
+      let i = arg_term(args, 1)?
+      let (goal, new_len) = if op == Op.Remove {
+        ("(and (<= 0 " + i + ") (< " + i + " " + len.t + "))", "(- " + len.t + " 1)")
+      } else {
+        ("(and (<= 0 " + i + ") (<= " + i + " " + len.t + "))", "(+ " + len.t + " 1)")
+      }
+      self.oblige(fr, st, ObKind.Bounds, span, "index in bounds: " + self.src(span), goal)
+      self.assume(&mut st, goal)
+      let lt = match arg_place_ty(args[0]) {
+        Some(x) => x
+        None => {
+          return self.havoc_call(&mut st, args, t)
+        }
+      }
+      match self.fresh(lt, "list") {
+        List(_, elems) => {
+          let nl = self.define_int(new_len)
+          self.write_arg(&mut st, args[0], Sv.List(int_leaf(nl), elems))
+        }
+        _ => {}
+      }
+      return Some(self.unit_or_fresh(t, "removed"))
+    }
+    Clear => {
+      let lt = match arg_place_ty(args[0]) {
+        Some(x) => x
+        None => {
+          return Some(Sv.Unit)
+        }
+      }
+      match self.fresh(lt, "list") {
+        List(_, elems) => self.write_arg(&mut st, args[0], Sv.List(int_leaf("0"), elems))
+        _ => {}
+      }
+      return Some(Sv.Unit)
+    }
+    Reverse | Sort | SortBy => {
+      // Same length, unknown order.
+      let len = match v0 {
+        Some(List(len, _)) => len
+        _ => {
+          return self.havoc_call(&mut st, args, t)
+        }
+      }
+      let lt = match arg_place_ty(args[0]) {
+        Some(x) => x
+        None => {
+          return Some(Sv.Unit)
+        }
+      }
+      match self.fresh(lt, "list") {
+        List(_, elems) => self.write_arg(&mut st, args[0], Sv.List(len, elems))
+        _ => {}
+      }
+      return Some(Sv.Unit)
+    }
+    TaskAll | TaskMap => {
+      // One result per job (item), in order; their values are unknown.
+      let len = match v0 {
+        Some(List(len, _)) => len
+        _ => {
+          return Some(self.fresh(t, "tasks"))
+        }
+      }
+      return match self.fresh(t, "tasks") {
+        List(_, elems) => Some(Sv.List(len, elems))
+        _ => Some(self.fresh(t, "tasks"))
+      }
+    }
+    ListRepeat => {
+      let len = match v0 {
+        Some(List(len, _)) => len
+        _ => {
+          return Some(self.fresh(t, "repeat"))
+        }
+      }
+      let n = arg_term(args, 1)?
+      self.oblige(
+        fr,
+        st,
+        ObKind.Panic,
+        span,
+        "repeat count is not negative: " + self.src(span),
+        "(>= " + n + " 0)",
+      )
+      self.assume(&mut st, "(>= " + n + " 0)")
+      // Same elements over and over; only the length is modeled.
+      let elems = match self.fresh(t, "repeat") {
+        List(_, es) => es
+        _ => {
+          return Some(self.fresh(t, "repeat"))
+        }
+      }
+      let new_len = self.define_int("(* " + len.t + " " + n + ")")
+      return Some(Sv.List(int_leaf(new_len), elems))
+    }
+    ListSlice | StrSlice => {
+      return Some(self.fresh(t, "slice"))
+    }
+    _ => {
+      return self.havoc_call(&mut st, args, t)
+    }
+  }
+}

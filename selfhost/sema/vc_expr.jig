@@ -1,0 +1,1018 @@
+// Expressions of the verification-condition generator (see `vc.jig`).
+
+import "syntax"
+
+fn Gen.str_lit(&mut self, s: Str) -> Sv {
+  match self.str_lits.get(s) {
+    Some(t) => {
+      return Sv.Leaf(Leaf { t: t, base: Base.Str, depth: 0 })
+    }
+    None => {}
+  }
+  let sort = self.opaque_sort("JStr")
+  let t = self.konst(sort, "str")
+  let len = self.str_len(t)
+  self.axioms.push("(= " + len + " " + s.len().str() + ")")
+  self.str_lits.insert(s, t)
+  self.str_order.push(t)
+  return Sv.Leaf(Leaf { t: t, base: Base.Str, depth: 0 })
+}
+
+fn Gen.float_lit(&mut self, f: Float) -> Sv {
+  // Keyed by value (the bootstrap compiler keys by bits: -0.0 is its own constant).
+  let key = if f == 0.0 && 1.0 / f < 0.0 { "-0" } else { f.str() }
+  match self.float_lits.get(key) {
+    Some(t) => {
+      return Sv.Leaf(Leaf { t: t, base: Base.Float, depth: 0 })
+    }
+    None => {}
+  }
+  let sort = self.opaque_sort("JFloat")
+  let t = self.konst(sort, "flt")
+  self.float_lits.insert(key, t)
+  return Sv.Leaf(Leaf { t: t, base: Base.Float, depth: 0 })
+}
+
+fn Gen.concat(&mut self, a: Sv, b: Sv) -> Sv {
+  let (x, y) = match (sv_term(a), sv_term(b)) {
+    (Some(x), Some(y)) => (x, y)
+    _ => {
+      let t = self.s.tys.str
+      return self.fresh(t, "str")
+    }
+  }
+  let s = self.opaque_sort("JStr")
+  let f = self.fun("str_cat", [s, s], s)
+  let t = self.define(s, "(" + f + " " + x + " " + y + ")")
+  let lt = self.str_len(t)
+  let lx = self.str_len(x)
+  let ly = self.str_len(y)
+  self.axioms.push("(= " + lt + " (+ " + lx + " " + ly + "))")
+  return Sv.Leaf(Leaf { t: t, base: Base.Str, depth: 0 })
+}
+
+/// An integer literal (sign and magnitude) as a value of type `t`.
+fn Gen.lit_of_ty(&mut self, neg: Bool, mag: U64, t: Int) -> Sv {
+  let text = smt_lit(neg, mag)
+  return match self.s.tys.kinds[t] {
+    Int(k, _) => sv_int(text, k)
+    Float(_) => self.float_lit(if neg { 0.0 - (mag as Float) } else { mag as Float })
+    Char => Sv.Leaf(Leaf { t: text, base: Base.Char, depth: 0 })
+    _ => sv_int(text, IntTy.I64)
+  }
+}
+
+fn Gen.expr(&mut self, fr: VFrame, st: &mut St, e: Int) -> Option<Sv> {
+  let ast = self.ast(fr)
+  let ex = ast.exprs[e]
+  let t = self.ty(fr, e)
+  match ex.kind {
+    Int(v) => {
+      return Some(self.lit_of_ty(false, v, t))
+    }
+    Float => {
+      let f = self.float_text(fr, e)
+      return Some(self.float_lit(f))
+    }
+    Bool(b) => {
+      return Some(sv_bool(if b { "true" } else { "false" }))
+    }
+    Str(s) => {
+      return Some(self.str_lit(s))
+    }
+    Char(c) => {
+      return Some(self.lit_of_ty(false, c as U64, t))
+    }
+    Paren(x) | MutArg(x) => {
+      return self.expr(fr, &mut st, x)
+    }
+    Name(n) => {
+      return Some(self.name_value(fr, &mut st, e, n, t))
+    }
+    Tuple(ids) => {
+      if ids.is_empty() {
+        return Some(Sv.Unit)
+      }
+      var xs: List<Sv> = []
+      for x in ids {
+        xs.push(self.expr(fr, &mut st, x)?)
+      }
+      return Some(Sv.Tuple(xs))
+    }
+    List(ids) => {
+      var vals: List<Sv> = []
+      for x in ids {
+        vals.push(self.expr(fr, &mut st, x)?)
+      }
+      let elem = self.elem_ty(t)
+      var elems = self.fresh_elems(elem, "lit", 1)
+      for i in 0..vals.len() {
+        match self.store(elems, i.str(), vals[i]) {
+          Some(x) => elems = x
+          None => {
+            return Some(self.fresh(t, "list"))
+          }
+        }
+      }
+      return Some(Sv.List(int_leaf(ids.len().str()), elems))
+    }
+    Field(base, _) => match self.res(fr, e) {
+      Field(i) => {
+        let b = self.expr(fr, &mut st, base)?
+        return Some(
+          match b {
+            Struct(_, xs) => if i < xs.len() { xs[i] } else { self.fresh(t, "field") }
+            _ => self.fresh(t, "field")
+          },
+        )
+      }
+      _ => {
+        return Some(self.name_value(fr, &mut st, e, "", t))
+      }
+    }
+    TupleField(base, index, _) => {
+      let b = self.expr(fr, &mut st, base)?
+      return Some(
+        match b {
+          Tuple(xs) => if index < xs.len() { xs[index] } else { self.fresh(t, "tuple") }
+          _ => self.fresh(t, "tuple")
+        },
+      )
+    }
+    TypeArgs(base, _) => {
+      return self.expr(fr, &mut st, base)
+    }
+    Call(callee, args) => {
+      return self.call(fr, &mut st, e, callee, args, t)
+    }
+    Index(base, index) => {
+      return self.index(fr, &mut st, e, base, index, t)
+    }
+    Range(_, _) => {
+      return Some(self.fresh(t, "range"))
+    }
+    Unary(op, x) => {
+      if op == syntax.UnOp.Neg {
+        match ast.exprs[x].kind {
+          Int(v) => {
+            return Some(self.lit_of_ty(true, v, t))
+          }
+          _ => {}
+        }
+      }
+      let v = self.expr(fr, &mut st, x)?
+      return self.unary(fr, &mut st, op, v, t, ex.span)
+    }
+    Binary(op, lhs, rhs) => {
+      return self.binary(fr, &mut st, op, lhs, rhs, t, ex.span)
+    }
+    Cast(x, _) => {
+      let from = self.ty(fr, x)
+      let v = self.expr(fr, &mut st, x)?
+      return self.cast(fr, &mut st, v, from, t, ex.span)
+    }
+    Try(inner) => {
+      let v = self.expr(fr, &mut st, inner)?
+      let (adt, tag, vars) = match v {
+        Enum(a, tag, vars) => (a, tag, vars)
+        _ => {
+          return Some(self.fresh(t, "try"))
+        }
+      }
+      let is_result = adt == self.s.defs.result
+      // Failure path: return the error (or None) from this function.
+      let ok = "(= " + tag.t + " 0)"
+      var fail = st
+      self.assume(&mut fail, smt_not(ok))
+      let ret_ty = self.cur_ret
+      match self.s.tys.kinds[ret_ty] {
+        Adt(radt, _) => {
+          let fields = if is_result && vars.len() > 1 { vars[1] } else { [] }
+          let rv = self.construct(ret_ty, radt, 1, fields)
+          self.returns.push((fail, rv))
+        }
+        _ => {}
+      }
+      self.assume(&mut st, ok)
+      if !vars.is_empty() && !vars[0].is_empty() {
+        return Some(vars[0][0])
+      }
+      return Some(self.fresh(t, "ok"))
+    }
+    If(cond, then, els) => {
+      return self.if_expr(fr, &mut st, cond, then, els, t)
+    }
+    Match(scrut, arms) => {
+      return self.match_expr(fr, &mut st, scrut, arms, t)
+    }
+    Block(_) => {
+      return self.block(fr, &mut st, e)
+    }
+    StructLit(_, inits) => {
+      let adt = match self.s.tys.kinds[t] {
+        Adt(a, _) => a
+        _ => {
+          return Some(self.fresh(t, "struct"))
+        }
+      }
+      let decl = self.s.defs.adts[adt].fields
+      let fts = self.field_tys(t)
+      var vals: List<Option<Sv>> = [None].repeat(decl.len())
+      for init in inits {
+        let v = self.expr(fr, &mut st, init.value)?
+        for i in 0..decl.len() {
+          if decl[i].name == init.name.text {
+            vals[i] = Some(v)
+            break
+          }
+        }
+      }
+      var xs: List<Sv> = []
+      for i in 0..vals.len() {
+        xs.push(
+          match vals[i] {
+            Some(v) => v
+            None => self.fresh(fts[i], "f")
+          },
+        )
+      }
+      let v = Sv.Struct(adt, xs)
+      self.oblige_struct_preds(fr, &mut st, t, v, ex.span)
+      return Some(v)
+    }
+    Closure(_, _, _) => {
+      return Some(self.fresh(t, "closure"))
+    }
+    Quant(forall, binder, lo, hi, body) => {
+      return self.quant(fr, &mut st, forall, binder, lo, hi, body)
+    }
+  }
+}
+
+/// A float literal's value, from its source text.
+fn Gen.float_text(self, fr: VFrame, e: Int) -> Float {
+  let sp = self.ast(fr).exprs[e].span
+  let file = self.s.pkgs[fr.pkg].files[fr.file]
+  return float_value(file.text[sp.lo - file.base..sp.hi - file.base])
+}
+
+fn Gen.name_value(&mut self, fr: VFrame, st: &mut St, e: Int, n: Str, t: Int) -> Sv {
+  if fr.body.is_none() && n != "" {
+    var i = fr.names.len()
+    for i > 0 {
+      i -= 1
+      if fr.names[i].0 == n {
+        return fr.names[i].1
+      }
+    }
+  }
+  match self.res(fr, e) {
+    Local(id) => {
+      return match st.env.get(id) {
+        Some(v) => v
+        None => {
+          let v = self.fresh(t, n)
+          st.env.insert(id, v)
+          v
+        }
+      }
+    }
+    Const(c) => {
+      return match self.s.defs.consts[c].value {
+        Some(cv) => match cv {
+          Int(v) => if v < 0 {
+            self.lit_of_ty(true, neg_mag(v), t)
+          } else {
+            self.lit_of_ty(false, v as U64, t)
+          }
+          Big(u) => self.lit_of_ty(false, u, t)
+          Bool(b) => sv_bool(if b { "true" } else { "false" })
+          Str(s) => self.str_lit(s)
+          Char(ch) => self.lit_of_ty(false, ch as U64, t)
+          Float(f) => self.float_lit(f)
+        }
+        None => self.fresh(t, "const")
+      }
+    }
+    Variant(adt, v) => {
+      if self.s.defs.adts[adt].variants[v].fields.is_empty() {
+        return self.construct(t, adt, v, [])
+      }
+      return self.fresh(t, "value")
+    }
+    ResultVal => {
+      return match fr.result {
+        Some(r) => r
+        None => self.fresh(t, "result")
+      }
+    }
+    _ => {
+      return self.fresh(t, "value")
+    }
+  }
+}
+
+/// Construct an enum value.
+fn Gen.construct(&mut self, t: Int, adt: Int, v: Int, fields: List<Sv>) -> Sv {
+  let ad = self.s.defs.adts[adt]
+  let n = ad.variants.len()
+  if ad.recursive {
+    let leaf = self.leaf(Base.Opaque(t), 0, "rec")
+    let tag = self.rec_tag(t, leaf.t)
+    self.axioms.push("(= " + tag + " " + v.str() + ")")
+    for i in 0..fields.len() {
+      match fields[i] {
+        Leaf(fl) => if fl.depth == 0 {
+          let ft = self.rec_field_fn(t, v, i, fl)
+          self.axioms.push("(= (" + ft + " " + leaf.t + ") " + fl.t + ")")
+        }
+        _ => {}
+      }
+      self.rec_fields.insert((leaf.t, v, i), fields[i])
+    }
+    return Sv.Leaf(leaf)
+  }
+  let vts = self.variant_tys(t)
+  var vars: List<List<Sv>> = []
+  for vi in 0..vts.len() {
+    if vi == v {
+      vars.push(fields)
+    } else {
+      var fs: List<Sv> = []
+      for f in vts[vi] {
+        fs.push(self.fresh_at(f, "pad", 0))
+      }
+      vars.push(fs)
+    }
+  }
+  return Sv.Enum(adt, Leaf { t: v.str(), base: Base.Tag(n), depth: 0 }, vars)
+}
+
+fn Gen.rec_tag(&mut self, t: Int, x: Str) -> Str {
+  let s = self.sort(Base.Opaque(t), 0)
+  let n = self.ty_num(t)
+  let f = self.fun("tag_" + n.str(), [s], "Int")
+  return "(" + f + " " + x + ")"
+}
+
+fn Gen.rec_field_fn(&mut self, t: Int, v: Int, i: Int, l: Leaf) -> Str {
+  let s = self.sort(Base.Opaque(t), 0)
+  let r = self.sort(l.base, 0)
+  let n = self.ty_num(t)
+  return self.fun("fld_" + n.str() + "_" + v.str() + "_" + i.str(), [s], r)
+}
+
+/// Field `i` of variant `v` of a recursive enum value.
+fn Gen.rec_field(&mut self, st: &mut St, t: Int, x: Str, v: Int, i: Int, ft: Int) -> Sv {
+  match self.rec_fields.get((x, v, i)) {
+    Some(f) => {
+      return f
+    }
+    None => {}
+  }
+  let f = self.fresh(ft, "fld")
+  match f {
+    Leaf(fl) => {
+      let fname = self.rec_field_fn(t, v, i, fl)
+      self.assume(&mut st, "(= (" + fname + " " + x + ") " + fl.t + ")")
+    }
+    _ => {}
+  }
+  self.assume_type_preds(&mut st, ft, f, 0)
+  self.rec_fields.insert((x, v, i), f)
+  return f
+}
+
+fn Gen.unary(
+  &mut self,
+  fr: VFrame,
+  st: &mut St,
+  op: syntax.UnOp,
+  v: Sv,
+  t: Int,
+  span: syntax.Span,
+) -> Option<Sv> {
+  let x = match sv_term(v) {
+    Some(x) => x
+    None => {
+      return Some(self.fresh(t, "un"))
+    }
+  }
+  match (op, self.s.tys.kinds[t]) {
+    (Not, _) => {
+      return Some(sv_bool(self.define_bool(smt_not(x))))
+    }
+    (Neg, Int(k, _)) => {
+      let r = self.define_int("(- " + x + ")")
+      self.arith_result(fr, &mut st, r, k, span)
+      return Some(sv_int(r, k))
+    }
+    (Neg, Float(_)) => {
+      let s = self.opaque_sort("JFloat")
+      let f = self.fun("fneg", [s], s)
+      return Some(
+        Sv.Leaf(Leaf { t: self.define(s, "(" + f + " " + x + ")"), base: Base.Float, depth: 0 }),
+      )
+    }
+    _ => {
+      return Some(self.fresh(t, "un"))
+    }
+  }
+}
+
+/// The overflow obligation for an arithmetic result, then its range as a fact.
+fn Gen.arith_result(&mut self, fr: VFrame, st: &mut St, r: Str, k: IntTy, span: syntax.Span) {
+  let goal = int_range(r, k)
+  let msg = "`" + self.src(span) + "` does not overflow " + k.name()
+  self.oblige(fr, st, ObKind.Overflow, span, msg, goal)
+  self.assume(&mut st, goal)
+}
+
+fn Gen.binary(
+  &mut self,
+  fr: VFrame,
+  st: &mut St,
+  op: syntax.BinOp,
+  lhs: Int,
+  rhs: Int,
+  t: Int,
+  span: syntax.Span,
+) -> Option<Sv> {
+  if op == syntax.BinOp.And || op == syntax.BinOp.Or {
+    let a = self.expr(fr, &mut st, lhs)?
+    let at = sv_term(a).unwrap_or("true")
+    // The right side only runs when the left does not decide.
+    let base = st.pc.len()
+    var rs = st
+    var skip = st
+    if op == syntax.BinOp.And {
+      self.assume(&mut rs, at)
+      self.assume(&mut skip, smt_not(at))
+    } else {
+      self.assume(&mut rs, smt_not(at))
+      self.assume(&mut skip, at)
+    }
+    let b = match self.expr(fr, &mut rs, rhs) {
+      Some(b) => b
+      None => {
+        st = skip
+        return Some(sv_bool(if op == syntax.BinOp.And { "false" } else { "true" }))
+      }
+    }
+    let bt = sv_term(b).unwrap_or("true")
+    let val = if op == syntax.BinOp.And {
+      "(and " + at + " " + bt + ")"
+    } else {
+      "(or " + at + " " + bt + ")"
+    }
+    let unit_t = self.s.tys.unit_ty
+    match self.merge(base, [(rs, Sv.Unit), (skip, Sv.Unit)], unit_t) {
+      Some((s, _)) => st = s
+      None => {}
+    }
+    return Some(sv_bool(self.define_bool(val)))
+  }
+  let lt = self.ty(fr, lhs)
+  let a = self.expr(fr, &mut st, lhs)?
+  let b = self.expr(fr, &mut st, rhs)?
+  let is_str = match self.s.tys.kinds[t] {
+    Str => true
+    _ => false
+  }
+  if op == syntax.BinOp.Add && is_str {
+    return Some(self.concat(a, b))
+  }
+  return self.binary_vals(fr, &mut st, op, a, b, lt, span)
+}
+
+/// `op` on two values whose operand type is `t`.
+fn Gen.binary_vals(
+  &mut self,
+  fr: VFrame,
+  st: &mut St,
+  op: syntax.BinOp,
+  a: Sv,
+  b: Sv,
+  t: Int,
+  span: syntax.Span,
+) -> Option<Sv> {
+  let k = self.s.tys.kinds[t]
+  if op == syntax.BinOp.Eq || op == syntax.BinOp.Ne {
+    let eq = match self.eq_term(a, b) {
+      Some(x) => x
+      None => {
+        return Some(self.fresh_bool("eq"))
+      }
+    }
+    let r = if op == syntax.BinOp.Eq { eq } else { smt_not(eq) }
+    return Some(sv_bool(self.define_bool(r)))
+  }
+  let (x, y) = match (sv_term(a), sv_term(b)) {
+    (Some(x), Some(y)) => (x, y)
+    _ => {
+      return Some(if is_comparison(op) { self.fresh_bool("cmp") } else { self.fresh(t, "bin") })
+    }
+  }
+  if is_comparison(op) {
+    let sym = match op {
+      Lt => "<"
+      Le => "<="
+      Gt => ">"
+      _ => ">="
+    }
+    match k {
+      Int(_, _) | Char => {
+        return Some(sv_bool(self.define_bool("(" + sym + " " + x + " " + y + ")")))
+      }
+      Float(_) => {
+        let s = self.opaque_sort("JFloat")
+        let (name, swap) = match op {
+          Lt => ("flt", false)
+          Le => ("fle", false)
+          Gt => ("flt", true)
+          _ => ("fle", true)
+        }
+        let f = self.fun(name, [s, s], "Bool")
+        let (p, q) = if swap { (y, x) } else { (x, y) }
+        return Some(sv_bool(self.define_bool("(" + f + " " + p + " " + q + ")")))
+      }
+      _ => {
+        return Some(self.fresh_bool("cmp"))
+      }
+    }
+  }
+  match k {
+    Int(ik, _) => {
+      var r = ""
+      match op {
+        Add => r = "(+ " + x + " " + y + ")"
+        Sub => r = "(- " + x + " " + y + ")"
+        Mul => r = "(* " + x + " " + y + ")"
+        Div | Rem => {
+          let nz = "(not (= " + y + " 0))"
+          let msg = "`" + self.src(span) + "` divides by a nonzero value"
+          self.oblige(fr, st, ObKind.DivZero, span, msg, nz)
+          self.assume(&mut st, nz)
+          // Truncating division, as in C and Rust.
+          let q = self.define_int(
+            "(ite (>= " +
+              x +
+              " 0) (ite (> " +
+              y +
+              " 0) (div " +
+              x +
+              " " +
+              y +
+              ") (- (div " +
+              x +
+              " (- " +
+              y +
+              ")))) (ite (> " +
+              y +
+              " 0) (- (div (- " +
+              x +
+              ") " +
+              y +
+              ")) (div (- " +
+              x +
+              ") (- " +
+              y +
+              "))))",
+          )
+          if op == syntax.BinOp.Div {
+            r = q
+          } else {
+            // MIN % -1 is 0 at run time; the formula gives 0 too.
+            let rm = self.define_int("(- " + x + " (* " + y + " " + q + "))")
+            return Some(sv_int(rm, ik))
+          }
+        }
+        Shl | Shr => {
+          let ok = range_fact(y, "0", smt_int(int_bits(ik) - 1))
+          let msg = "shift amount in range: " + self.src(span)
+          self.oblige(fr, st, ObKind.Shift, span, msg, ok)
+          self.assume(&mut st, ok)
+          return Some(self.fresh(t, "shift"))
+        }
+        _ => {
+          return Some(self.fresh(t, "bits"))
+        }
+      }
+      let rd = self.define_int(r)
+      self.arith_result(fr, &mut st, rd, ik, span)
+      return Some(sv_int(rd, ik))
+    }
+    Float(_) => {
+      let s = self.opaque_sort("JFloat")
+      let name = match op {
+        Add => "fadd"
+        Sub => "fsub"
+        Mul => "fmul"
+        Div => "fdiv"
+        _ => "frem"
+      }
+      let f = self.fun(name, [s, s], s)
+      return Some(
+        Sv.Leaf(
+          Leaf { t: self.define(s, "(" + f + " " + x + " " + y + ")"), base: Base.Float, depth: 0 },
+        ),
+      )
+    }
+    _ => {
+      return Some(self.fresh(t, "bin"))
+    }
+  }
+}
+
+fn Gen.cast(
+  &mut self,
+  fr: VFrame,
+  st: &mut St,
+  v: Sv,
+  from: Int,
+  to: Int,
+  span: syntax.Span,
+) -> Option<Sv> {
+  let x = match sv_term(v) {
+    Some(x) => x
+    None => {
+      return Some(self.fresh(to, "cast"))
+    }
+  }
+  match (self.s.tys.kinds[from], self.s.tys.kinds[to]) {
+    (Int(_, _), Int(k, _)) | (Char, Int(k, _)) => {
+      let goal = int_range(x, k)
+      let msg = "`" + self.src(span) + "` fits in " + k.name()
+      self.oblige(fr, st, ObKind.Cast, span, msg, goal)
+      self.assume(&mut st, goal)
+      return Some(sv_int(x, k))
+    }
+    (Int(_, _), Char) => {
+      let goal = "(and " +
+        range_fact(x, "0", "1114111") +
+        " (not (and (<= 55296 " +
+        x +
+        ") (<= " +
+        x +
+        " 57343))))"
+      let msg = "`" + self.src(span) + "` is a valid character"
+      self.oblige(fr, st, ObKind.Cast, span, msg, goal)
+      self.assume(&mut st, goal)
+      return Some(Sv.Leaf(Leaf { t: x, base: Base.Char, depth: 0 }))
+    }
+    (Int(_, _), Float(_)) | (Char, Float(_)) => {
+      let s = self.opaque_sort("JFloat")
+      let f = self.fun("i2f", ["Int"], s)
+      return Some(
+        Sv.Leaf(Leaf { t: self.define(s, "(" + f + " " + x + ")"), base: Base.Float, depth: 0 }),
+      )
+    }
+    (Float(_), Float(_)) => {
+      return Some(v)
+    }
+    _ => {
+      return Some(self.fresh(to, "cast"))
+    }
+  }
+}
+
+fn Gen.index(
+  &mut self,
+  fr: VFrame,
+  st: &mut St,
+  e: Int,
+  base: Int,
+  index: Int,
+  t: Int,
+) -> Option<Sv> {
+  let ast = self.ast(fr)
+  let span = ast.exprs[e].span
+  let b = self.expr(fr, &mut st, base)?
+  match ast.exprs[index].kind {
+    Range(lo, hi) => {
+      let lo_v = match lo {
+        Some(l) => self.expr(fr, &mut st, l)?
+        None => sv_int("0", IntTy.I64)
+      }
+      let len = match b {
+        List(l, _) => Some(l.t)
+        Leaf(l) => if l.base == Base.Str { Some(self.str_len(l.t)) } else { None }
+        _ => None
+      }
+      let hi_v = match hi {
+        Some(h) => self.expr(fr, &mut st, h)?
+        None => match len {
+          Some(l) => sv_int(l, IntTy.I64)
+          None => self.fresh(self.s.tys.int, "hi")
+        }
+      }
+      let r = self.fresh(t, "slice")
+      match (len, sv_term(lo_v), sv_term(hi_v)) {
+        (Some(l), Some(lt), Some(ht)) => {
+          let goal = "(and (<= 0 " + lt + ") (<= " + lt + " " + ht + ") (<= " + ht + " " + l + "))"
+          let msg = "slice in bounds: " + self.src(span)
+          self.oblige(fr, st, ObKind.Bounds, span, msg, goal)
+          self.assume(&mut st, goal)
+          let rlen = match r {
+            List(rl, _) => Some(rl.t)
+            Leaf(x) => if x.base == Base.Str { Some(self.str_len(x.t)) } else { None }
+            _ => None
+          }
+          // A slice that returns has exactly the bytes or elements in its range.
+          match rlen {
+            Some(rl) => self.assume(&mut st, "(= " + rl + " (- " + ht + " " + lt + "))")
+            None => {}
+          }
+        }
+        _ => {}
+      }
+      return Some(r)
+    }
+    _ => {}
+  }
+  let i = self.expr(fr, &mut st, index)?
+  let it = match sv_term(i) {
+    Some(x) => x
+    None => {
+      return Some(self.fresh(t, "idx"))
+    }
+  }
+  match b {
+    List(len, elems) => {
+      let goal = "(and (<= 0 " + it + ") (< " + it + " " + len.t + "))"
+      let msg = "index in bounds: " + self.src(span)
+      self.oblige(fr, st, ObKind.Bounds, span, msg, goal)
+      self.assume(&mut st, goal)
+      return Some(self.select(&mut st, elems, it, t))
+    }
+    Leaf(l) => {
+      if l.base == Base.Str {
+        let len = self.str_len(l.t)
+        let goal = "(and (<= 0 " + it + ") (< " + it + " " + len + "))"
+        let msg = "index in bounds: " + self.src(span)
+        self.oblige(fr, st, ObKind.Bounds, span, msg, goal)
+        self.assume(&mut st, goal)
+        return Some(self.fresh(t, "byte"))
+      }
+      return Some(self.fresh(t, "idx"))
+    }
+    _ => {
+      return Some(self.fresh(t, "idx"))
+    }
+  }
+}
+
+fn Gen.if_expr(
+  &mut self,
+  fr: VFrame,
+  st: &mut St,
+  cond: Int,
+  then: Int,
+  els: Option<Int>,
+  t: Int,
+) -> Option<Sv> {
+  let c = self.expr(fr, &mut st, cond)?
+  let ct = sv_term(c).unwrap_or("true")
+  let base = st.pc.len()
+  var ts = st
+  self.assume(&mut ts, ct)
+  var es = st
+  self.assume(&mut es, smt_not(ct))
+  var outs: List<(St, Sv)> = []
+  match self.block(fr, &mut ts, then) {
+    Some(v) => outs.push((ts, v))
+    None => {}
+  }
+  let ev = match els {
+    Some(el) => self.block(fr, &mut es, el)
+    None => Some(Sv.Unit)
+  }
+  match ev {
+    Some(v) => outs.push((es, v))
+    None => {}
+  }
+  let (s, v) = self.merge(base, outs, t)?
+  st = s
+  return Some(if self.is_unit(t) { Sv.Unit } else { v })
+}
+
+fn Gen.match_expr(
+  &mut self,
+  fr: VFrame,
+  st: &mut St,
+  scrut: Int,
+  arms: List<syntax.Arm>,
+  t: Int,
+) -> Option<Sv> {
+  let ast = self.ast(fr)
+  let stt = self.ty(fr, scrut)
+  let s = self.expr(fr, &mut st, scrut)?
+  let base = st.pc.len()
+  var outs: List<(St, Sv)> = []
+  var rest = st
+  for arm in arms {
+    var a = rest
+    let test_cond = self.test_pat(fr, &mut a, arm.pat, s, stt)
+    let tested = self.define_bool(test_cond)
+    self.assume(&mut a, tested)
+    var fail = rest
+    match arm.guard {
+      Some(g) => {
+        let gv = self.expr(fr, &mut a, g)?
+        let gt = sv_term(gv).unwrap_or("true")
+        self.assume(&mut a, gt)
+        // Pattern bindings feed the guard; a failed guard falls through.
+        let both = self.define_bool("(and " + tested + " " + gt + ")")
+        self.assume(&mut fail, smt_not(both))
+      }
+      None => self.assume(&mut fail, smt_not(tested))
+    }
+    let v = match ast.exprs[arm.body].kind {
+      Block(_) => self.block(fr, &mut a, arm.body)
+      _ => self.expr(fr, &mut a, arm.body)
+    }
+    match v {
+      Some(x) => outs.push((a, x))
+      None => {}
+    }
+    rest = fail
+  }
+  let (s2, v) = self.merge(base, outs, t)?
+  st = s2
+  return Some(if self.is_unit(t) { Sv.Unit } else { v })
+}
+
+/// The condition under which `pat` matches `v`; bindings go into `st`.
+fn Gen.test_pat(&mut self, fr: VFrame, st: &mut St, pat: Int, v: Sv, t: Int) -> Str {
+  let ast = self.ast(fr)
+  match ast.pats[pat].kind {
+    Wild => {
+      return "true"
+    }
+    Bind(_) => {
+      match self.s.tables[fr.pkg][fr.file].pat_local.get(pat) {
+        Some(id) => st.env.insert(id, v)
+        None => {}
+      }
+      return "true"
+    }
+    Lit(e) => {
+      let lit = match self.expr(fr, &mut st, e) {
+        Some(l) => l
+        None => {
+          return "false"
+        }
+      }
+      return match self.eq_term(v, lit) {
+        Some(x) => x
+        None => sv_term(self.fresh_bool("lit")).unwrap_or("true")
+      }
+    }
+    Variant(_, subs, _) => {
+      let vi = match self.s.tables[fr.pkg][fr.file].pat_variant.get(pat) {
+        Some((_, vi)) => vi
+        None => {
+          return "true"
+        }
+      }
+      let vts = self.variant_tys(t)
+      let fts = if vi < vts.len() { vts[vi] } else { [] }
+      match v {
+        Enum(_, tag, vars) => {
+          var parts = ["(= " + tag.t + " " + vi.str() + ")"]
+          let fields = if vi < vars.len() { vars[vi] } else { [] }
+          for i in 0..subs.len() {
+            let ft = if i < fts.len() { fts[i] } else { self.s.tys.error }
+            let fv = if i < fields.len() { fields[i] } else { self.fresh(ft, "f") }
+            parts.push(self.test_pat(fr, &mut st, subs[i], fv, ft))
+          }
+          return smt_and(parts)
+        }
+        Leaf(l) => match l.base {
+          Opaque(_) => {
+            let x = l.t
+            let tag = self.rec_tag(t, x)
+            var parts = ["(= " + tag + " " + vi.str() + ")"]
+            for i in 0..subs.len() {
+              let ft = if i < fts.len() { fts[i] } else { self.s.tys.error }
+              let fv = self.rec_field(&mut st, t, x, vi, i, ft)
+              parts.push(self.test_pat(fr, &mut st, subs[i], fv, ft))
+            }
+            return smt_and(parts)
+          }
+          _ => {}
+        }
+        _ => {}
+      }
+      return sv_term(self.fresh_bool("pat")).unwrap_or("true")
+    }
+    Tuple(subs) => {
+      let fts = self.field_tys(t)
+      var parts: List<Str> = []
+      for i in 0..subs.len() {
+        let ft = if i < fts.len() { fts[i] } else { self.s.tys.error }
+        let fv = match v {
+          Tuple(xs) => if i < xs.len() { xs[i] } else { self.fresh(ft, "f") }
+          _ => self.fresh(ft, "f")
+        }
+        parts.push(self.test_pat(fr, &mut st, subs[i], fv, ft))
+      }
+      return smt_and(parts)
+    }
+    Or(alts) => {
+      var parts: List<Str> = []
+      for a in alts {
+        parts.push(self.test_pat(fr, &mut st, a, v, t))
+      }
+      if parts.is_empty() {
+        return "false"
+      }
+      if parts.len() == 1 {
+        return parts[0]
+      }
+      return "(or " + parts.join(" ") + ")"
+    }
+  }
+}
+
+fn Gen.quant(
+  &mut self,
+  fr: VFrame,
+  st: &mut St,
+  forall: Bool,
+  var_name: syntax.Name,
+  lo: Int,
+  hi: Int,
+  body: Int,
+) -> Option<Sv> {
+  let lv = self.expr(fr, &mut st, lo)?
+  let hv = self.expr(fr, &mut st, hi)?
+  let (l, h) = match (sv_term(lv), sv_term(hv)) {
+    (Some(l), Some(h)) => (l, h)
+    _ => {
+      return Some(self.fresh_bool("quant"))
+    }
+  }
+  var qid = -1
+  match fr.body {
+    Some(b) => {
+      for i in 0..b.locals.len() {
+        let d = b.locals[i]
+        if d.span.lo == var_name.span.lo &&
+          d.span.hi == var_name.span.hi &&
+          d.kind == LocalKind.Quant {
+          qid = i
+          break
+        }
+      }
+    }
+    None => {}
+  }
+  let lt = self.ty(fr, lo)
+  let k = match self.s.tys.kinds[lt] {
+    Int(k, _) => k
+    _ => IntTy.I64
+  }
+  // Obligations inside the body hold for an arbitrary index in range.
+  let i = self.konst("Int", var_name.text)
+  var s2 = st
+  self.assume(&mut s2, "(and (<= " + l + " " + i + ") (< " + i + " " + h + "))")
+  var fr2 = fr
+  if qid >= 0 {
+    s2.env.insert(qid, sv_int(i, k))
+  } else {
+    fr2.names.push((var_name.text, sv_int(i, k)))
+  }
+  let _ = self.expr(fr2, &mut s2, body)
+  // The value: a real quantifier over the body, evaluated without definitions.
+  let b = self.name("q")
+  var s3 = St { env: st.env, pc: [] }
+  var fr3 = fr
+  if qid >= 0 {
+    s3.env.insert(qid, sv_int(b, k))
+  } else {
+    fr3.names.push((var_name.text, sv_int(b, k)))
+  }
+  self.inline += 1
+  let v = self.expr(fr3, &mut s3, body)
+  self.inline -= 1
+  let bt = match v {
+    Some(x) => match sv_term(x) {
+      Some(t) => t
+      None => {
+        return Some(self.fresh_bool("quant"))
+      }
+    }
+    None => {
+      return Some(self.fresh_bool("quant"))
+    }
+  }
+  let facts = smt_and(s3.pc)
+  let range = "(and (<= " + l + " " + b + ") (< " + b + " " + h + "))"
+  let term = if forall {
+    "(forall ((" + b + " Int)) (=> (and " + range + " " + facts + ") " + bt + "))"
+  } else {
+    "(exists ((" + b + " Int)) (and " + range + " " + facts + " " + bt + "))"
+  }
+  return Some(sv_bool(self.define_bool(term)))
+}

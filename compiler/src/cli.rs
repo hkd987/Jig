@@ -477,8 +477,21 @@ pub fn main() -> i32 {
                     1
                 }
             },
+            [what, dir, rest @ ..] if what == "vc" => {
+                let std = rest.iter().any(|a| a == "std");
+                match crate::tools::debug_check::vc(std::path::Path::new(dir), std) {
+                    Ok(v) => {
+                        print!("{v}");
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        1
+                    }
+                }
+            }
             _ => {
-                eprintln!("usage: jig debug tokens|ast FILE, jig debug check|c DIR");
+                eprintln!("usage: jig debug tokens|ast FILE, jig debug check|c|vc DIR");
                 2
             }
         },

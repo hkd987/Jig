@@ -366,6 +366,12 @@ pub struct Gen<'a> {
     axioms: Vec<String>,
     n: usize,
     str_lits: FxHashMap<Symbol, String>,
+    /// The string literals' constants in order of first use (asserted distinct).
+    str_order: Vec<String>,
+    /// Types and functions numbered in order of first use: SMT names derived from them
+    /// (`O3`, `tag_3`, `fn_2`) must not depend on the type or function tables' ids.
+    ty_nums: FxHashMap<Ty, usize>,
+    fn_nums: FxHashMap<FnId, usize>,
     float_lits: FxHashMap<u64, String>,
     obligations: Vec<Obligation>,
     returns: Vec<(St, Sv)>,
@@ -404,6 +410,9 @@ impl<'a> Gen<'a> {
             axioms: Vec::new(),
             n: 0,
             str_lits: FxHashMap::default(),
+            str_order: Vec::new(),
+            ty_nums: FxHashMap::default(),
+            fn_nums: FxHashMap::default(),
             float_lits: FxHashMap::default(),
             obligations: Vec::new(),
             returns: Vec::new(),
@@ -427,6 +436,9 @@ impl<'a> Gen<'a> {
         self.axioms.clear();
         self.n = 0;
         self.str_lits.clear();
+        self.str_order.clear();
+        self.ty_nums.clear();
+        self.fn_nums.clear();
         self.float_lits.clear();
         self.obligations.clear();
         self.returns.clear();
@@ -444,13 +456,26 @@ impl<'a> Gen<'a> {
         format!("{clean}!{}", self.n)
     }
 
+    fn ty_num(&mut self, t: Ty) -> usize {
+        let n = self.ty_nums.len();
+        *self.ty_nums.entry(t).or_insert(n)
+    }
+
+    fn fn_num(&mut self, f: FnId) -> usize {
+        let n = self.fn_nums.len();
+        *self.fn_nums.entry(f).or_insert(n)
+    }
+
     fn sort(&mut self, b: &Base, depth: u8) -> String {
         let base = match b {
             Base::Bool => "Bool".to_string(),
             Base::Int(_) | Base::Char | Base::Tag(_) => "Int".to_string(),
             Base::Str => self.opaque_sort("JStr"),
             Base::Float => self.opaque_sort("JFloat"),
-            Base::Opaque(t) => self.opaque_sort(&format!("O{}", t.0)),
+            Base::Opaque(t) => {
+                let n = self.ty_num(*t);
+                self.opaque_sort(&format!("O{n}"))
+            }
         };
         let mut s = base;
         for _ in 0..depth {
@@ -1119,7 +1144,7 @@ impl<'a> Gen<'a> {
         let mut decls = std::mem::take(&mut self.sorts);
         decls.append(&mut self.funs);
         decls.append(&mut self.decls);
-        let lits: Vec<String> = self.str_lits.values().cloned().collect();
+        let lits = std::mem::take(&mut self.str_order);
         if lits.len() > 1 {
             decls.push(format!("(assert (distinct {}))", lits.join(" ")));
         }
@@ -1293,7 +1318,8 @@ impl<'a> Gen<'a> {
             let gb = and(&s.pc[base.min(s.pc.len())..]);
             let ga = self.define_bool(ga);
             let mut env = FxHashMap::default();
-            let keys: Vec<LocalId> = acc.env.keys().copied().collect();
+            let mut keys: Vec<LocalId> = acc.env.keys().copied().collect();
+            keys.sort();
             for k in keys {
                 let (Some(a), Some(b)) = (acc.env.get(&k), s.env.get(&k)) else { continue };
                 if a.same(b) {
@@ -1621,7 +1647,10 @@ impl<'a> Gen<'a> {
             }
         }
         // Every modification of the local must be one of those pushes.
-        counts.into_iter().filter(|(l, k)| mods.iter().filter(|(m, _, _)| m == l).count() == *k).collect()
+        let mut out: Vec<(LocalId, usize)> =
+            counts.into_iter().filter(|(l, k)| mods.iter().filter(|(m, _, _)| m == l).count() == *k).collect();
+        out.sort();
+        out
     }
 
     fn havoc(&mut self, fr: &Frame, st: &mut St, mods: &[(LocalId, Vec<u32>, bool)]) {
@@ -1903,6 +1932,7 @@ impl<'a> Gen<'a> {
         let len = self.str_len(&t);
         self.axioms.push(format!("(= {len} {})", s.as_str().len()));
         self.str_lits.insert(s, t.clone());
+        self.str_order.push(t.clone());
         Sv::Leaf(Leaf { t, base: Base::Str, depth: 0 })
     }
 
@@ -2134,14 +2164,16 @@ impl<'a> Gen<'a> {
 
     fn rec_tag(&mut self, t: Ty, x: &str) -> String {
         let s = self.sort(&Base::Opaque(t), 0);
-        let f = self.fun(&format!("tag_{}", t.0), &[s], "Int");
+        let n = self.ty_num(t);
+        let f = self.fun(&format!("tag_{n}"), &[s], "Int");
         format!("({f} {x})")
     }
 
     fn rec_field_fn(&mut self, t: Ty, v: u32, i: u32, l: &Leaf) -> String {
         let s = self.sort(&Base::Opaque(t), 0);
         let r = self.sort(&l.base, 0);
-        self.fun(&format!("fld_{}_{v}_{i}", t.0), &[s], &r)
+        let n = self.ty_num(t);
+        self.fun(&format!("fld_{n}_{v}_{i}"), &[s], &r)
     }
 
     /// Field `i` of variant `v` of a recursive enum value.
@@ -2917,7 +2949,8 @@ impl<'a> Gen<'a> {
             (true, Some(sargs), Sv::Leaf(rl)) if inst.is_empty() => {
                 let rs = self.sort(&rl.base, 0);
                 let sorts: Vec<String> = sargs.iter().map(|(_, s)| s.clone()).collect();
-                let fname_smt = self.fun(&format!("fn_{}", f.0), &sorts, &rs);
+                let fnum = self.fn_num(f);
+                let fname_smt = self.fun(&format!("fn_{fnum}"), &sorts, &rs);
                 let app = if sargs.is_empty() {
                     fname_smt
                 } else {

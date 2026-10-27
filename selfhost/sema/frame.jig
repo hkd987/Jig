@@ -1,0 +1,287 @@
+// Frames, ported from the bootstrap compiler's `verify/frame.rs`: which parts of each `&mut`
+// parameter a function may change.
+//
+// After a call, the prover keeps everything about an `&mut` argument except the parts the
+// callee can write, so callers need no `ensures self.x == old(self.x)` for fields a method
+// never touches. A frame is read off the callee's body: assignments to the parameter's fields,
+// `&mut` methods called on them, and `&mut` arguments passed on to other functions (through
+// their frames). Anything else (recursion, function values, generic calls) changes the whole
+// parameter.
+
+import "syntax"
+
+/// The parts of a parameter a function may change: field-index paths from the parameter (the
+/// whole subtree under each), or all of it.
+enum MutFrame {
+  Whole
+  Paths(ps: List<List<Int>>)
+}
+
+fn starts_with_path(p: List<Int>, q: List<Int>) -> Bool {
+  if q.len() > p.len() {
+    return false
+  }
+  for i in 0..q.len() {
+    if p[i] != q[i] {
+      return false
+    }
+  }
+  return true
+}
+
+/// -1, 0 or 1: paths in lexicographic order.
+fn cmp_path(p: List<Int>, q: List<Int>) -> Int {
+  for i in 0..min(p.len(), q.len()) {
+    if p[i] != q[i] {
+      return if p[i] < q[i] { -1 } else { 1 }
+    }
+  }
+  return if p.len() < q.len() { -1 } else if p.len() > q.len() { 1 } else { 0 }
+}
+
+fn frame_add(f: MutFrame, path: List<Int>) -> MutFrame {
+  let ps = match f {
+    Whole => {
+      return MutFrame.Whole
+    }
+    Paths(ps) => ps
+  }
+  if path.is_empty() {
+    return MutFrame.Whole
+  }
+  for p in ps {
+    if starts_with_path(path, p) {
+      return MutFrame.Paths(ps)
+    }
+  }
+  var out: List<List<Int>> = []
+  for p in ps {
+    if !starts_with_path(p, path) {
+      out.push(p)
+    }
+  }
+  // Sorted insertion.
+  var i = 0
+  for i < out.len() && cmp_path(out[i], path) <= 0 {
+    i += 1
+  }
+  out.insert(i, path)
+  return MutFrame.Paths(out)
+}
+
+fn frame_add_frame(f: MutFrame, prefix: List<Int>, g: MutFrame) -> MutFrame {
+  return match g {
+    Whole => frame_add(f, prefix)
+    Paths(ps) => {
+      var out = f
+      for p in ps {
+        var q = prefix
+        q.extend(p)
+        out = frame_add(out, q)
+      }
+      out
+    }
+  }
+}
+
+struct Frames {
+  s: Sema
+  done: Map<(Int, Int), MutFrame>
+  active: Set<Int>
+}
+
+/// The frame of parameter `i` of `f` (the receiver of a method is parameter 0).
+fn Frames.of(&mut self, f: Int, i: Int) -> MutFrame {
+  match self.done.get((f, i)) {
+    Some(fr) => {
+      return fr
+    }
+    None => {}
+  }
+  let fr = self.compute(f, i)
+  self.done.insert((f, i), fr)
+  return fr
+}
+
+fn Frames.compute(&mut self, f: Int, i: Int) -> MutFrame {
+  let fd = self.s.defs.fns[f]
+  let body = match self.s.bodies[f] {
+    Some(b) => b
+    None => {
+      return MutFrame.Whole
+    }
+  }
+  if !fd.has_body || i >= body.param_locals.len() {
+    return MutFrame.Whole
+  }
+  let param = body.param_locals[i]
+  let ast = self.s.pkgs[fd.pkg].files[fd.file].ast
+  let root = match ast.items[fd.item].kind {
+    Fn(d) => match d.body {
+      Some(b) => b
+      None => {
+        return MutFrame.Whole
+      }
+    }
+    _ => {
+      return MutFrame.Whole
+    }
+  }
+  // Recursion: assume the worst.
+  if self.active.contains(f) {
+    return MutFrame.Whole
+  }
+  self.active.insert(f)
+  let tab = self.s.tables[fd.pkg][fd.file]
+  var frame = MutFrame.Paths([])
+  var stack = [root]
+  for !stack.is_empty() {
+    if frame == MutFrame.Whole {
+      break
+    }
+    let x = stack.pop().unwrap_or(0)
+    match ast.exprs[x].kind {
+      Block(stmts) => {
+        for st in stmts {
+          match ast.stmts[st].kind {
+            Assign(target, _, _) => match place_path(ast, tab, target, param) {
+              Some(p) => frame = frame_add(frame, p)
+              None => {}
+            }
+            _ => {}
+          }
+        }
+      }
+      _ => {}
+    }
+    match ast.exprs[x].kind {
+      Call(callee, args) => {
+        let target = match tab.expr_res[callee] {
+          Fn(g) | Method(g) => Some(g)
+          _ => None
+        }
+        // The receiver of a method taking `&mut self` (known or through a bound).
+        var offset = 0
+        match ast.exprs[callee].kind {
+          Field(base, _) => {
+            // `Type.method(x, ...)` passes the receiver as the first argument.
+            let on_type = match tab.expr_res[base] {
+              Type(_) => true
+              _ => false
+            }
+            let method = !on_type &&
+              match tab.expr_res[callee] {
+                Method(_) | IfaceMethod(_, _) => true
+                _ => false
+              }
+            let recv_mode = match target {
+              Some(g) => self.s.defs.fns[g].self_mode
+              None => match tab.expr_res[callee] {
+                IfaceMethod(iid, mi) => self.s.defs.fns[self.s.defs.ifaces[iid].methods[mi]].self_mode
+                _ => None
+              }
+            }
+            let has_self = match target {
+              Some(g) => self.s.defs.fns[g].self_mode.is_some()
+              None => true
+            }
+            if method && has_self {
+              offset = 1
+            }
+            // The receiver is passed `&mut` (the bootstrap checker's `autoref`).
+            if method && recv_mode == Some(Mode.MutRef) {
+              match place_path(ast, tab, base, param) {
+                Some(p) => {
+                  frame = match target {
+                    Some(g) => frame_add_frame(frame, p, self.of(g, 0))
+                    None => frame_add(frame, p)
+                  }
+                }
+                None => {}
+              }
+            }
+          }
+          _ => {}
+        }
+        for k in 0..args.len() {
+          match ast.exprs[args[k]].kind {
+            MutArg(inner) => match place_path(ast, tab, inner, param) {
+              Some(p) => {
+                frame = match target {
+                  Some(g) => frame_add_frame(frame, p, self.of(g, k + offset))
+                  None => frame_add(frame, p)
+                }
+              }
+              None => {}
+            }
+            _ => {}
+          }
+        }
+      }
+      Closure(_, _, _) => {
+        continue
+      }
+      _ => {}
+    }
+    visit_children(ast, x, &mut stack)
+  }
+  let _ = self.active.remove(f)
+  return frame
+}
+
+/// The field path from `param` to the place `e`, up to the first index (writing an element
+/// may change everything under the list).
+fn place_path(ast: syntax.Ast, tab: Tables, e: Int, param: Int) -> Option<List<Int>> {
+  match ast.exprs[e].kind {
+    Name(_) => {
+      return match tab.expr_res[e] {
+        Local(id) => if id == param { Some([]) } else { None }
+        _ => None
+      }
+    }
+    Paren(x) => {
+      return place_path(ast, tab, x, param)
+    }
+    Field(base, _) => {
+      let i = match tab.expr_res[e] {
+        Field(i) => i
+        _ => {
+          return None
+        }
+      }
+      var p = place_path(ast, tab, base, param)?
+      p.push(i)
+      return Some(p)
+    }
+    TupleField(base, index, _) => {
+      var p = place_path(ast, tab, base, param)?
+      p.push(index)
+      return Some(p)
+    }
+    // Below an index the path stops: the whole list may change.
+    Index(base, _) => {
+      return place_path(ast, tab, base, param)
+    }
+    _ => {
+      return None
+    }
+  }
+}
+
+/// Every function's frames, for each `&mut` parameter (the receiver of a method is 0).
+fn compute_frames(s: Sema) -> Map<(Int, Int), MutFrame> {
+  var fr = Frames { s: s, done: Map.new(), active: Set.new() }
+  for f in 0..fr.s.defs.fns.len() {
+    let fd = fr.s.defs.fns[f]
+    let recv = if fd.self_mode.is_some() { 1 } else { 0 }
+    if fd.self_mode == Some(Mode.MutRef) {
+      let _ = fr.of(f, 0)
+    }
+    for i in 0..fd.params.len() {
+      if fd.params[i].mode == Mode.MutRef {
+        let _ = fr.of(f, i + recv)
+      }
+    }
+  }
+  return fr.done
+}

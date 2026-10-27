@@ -1077,3 +1077,92 @@ fn jigc_tests_match_bootstrap() {
     assert!(compared >= 80, "only {compared} mutations checked");
     assert!(failures.is_empty(), "{} cases differ:\n{}", failures.len(), failures.join("\n"));
 }
+
+/// `jigc vc DIR` against `jig debug vc DIR` (with `std`, the standard library's functions).
+fn compare_vc(exe: &Path, std_dir: &Path, dir: &Path, std: bool) -> Option<String> {
+    let dir = std::fs::canonicalize(dir).unwrap();
+    let expected = jig::tools::debug_check::vc(&dir, std).ok();
+    let mut cmd = Command::new(exe);
+    cmd.arg("vc").arg(&dir).arg(std_dir);
+    if std {
+        cmd.arg("std");
+    }
+    let out = cmd.output().unwrap();
+    let actual = out.status.success().then(|| String::from_utf8_lossy(&out.stdout).to_string());
+    if actual == expected {
+        return None;
+    }
+    let (e, a) = (expected.unwrap_or_default(), actual.unwrap_or_default());
+    let (el, al): (Vec<&str>, Vec<&str>) = (e.lines().collect(), a.lines().collect());
+    let first = el.iter().zip(&al).position(|(x, y)| x != y).unwrap_or(el.len().min(al.len()));
+    Some(format!(
+        "{}: line {} differs (bootstrap {:?}, jigc {:?}) {}",
+        dir.display(),
+        first + 1,
+        el.get(first),
+        al.get(first),
+        String::from_utf8_lossy(&out.stderr)
+    ))
+}
+
+/// jigc's prover generates the bootstrap's verification conditions byte for byte: every
+/// declaration, obligation, path fact and goal, the counterexample terms and the replayable
+/// inputs, for every example, run test, prover test, agent benchmark solution and the standard
+/// library, and for mutated copies that still check.
+#[test]
+fn jigc_vcs_match_bootstrap() {
+    if !have_cc() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    let root = repo_root();
+    let exe = jigc();
+    let std_dir = std::fs::canonicalize(root.join("compiler/std")).unwrap();
+    let work = std::fs::canonicalize(PathBuf::from(env!("CARGO_TARGET_TMPDIR"))).unwrap().join("selfhost-vc");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    let mut cases: Vec<PathBuf> = Vec::new();
+    let mut entries: Vec<PathBuf> =
+        std::fs::read_dir(root.join("compiler/tests/run")).unwrap().map(|e| e.unwrap().path()).collect();
+    entries.sort();
+    for p in entries.iter().filter(|p| p.extension().is_some_and(|x| x == "jig")) {
+        let d = work.join(format!("run-{}", p.file_stem().unwrap().to_string_lossy()));
+        write_file(&d.join("main.jig"), &std::fs::read_to_string(p).unwrap());
+        cases.push(d);
+    }
+    for dir in ["examples", "compiler/tests/prove", "bench/agents/reference/jig"] {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(root.join(dir)).unwrap().map(|e| e.unwrap().path()).collect();
+        entries.sort();
+        cases.extend(entries.into_iter().filter(|p| p.is_dir()));
+    }
+    let mut failures: Vec<String> = Vec::new();
+    for d in &cases {
+        failures.extend(compare_vc(exe, &std_dir, d, false));
+    }
+    failures.extend(compare_vc(exe, &std_dir, &work.join("run-std_all"), true));
+    let originals = cases.len();
+    let mut rng = Rng(0x6a09_e667_f3bc_c908);
+    let mut compared = 0;
+    for k in 0..800 {
+        if compared == 200 {
+            break;
+        }
+        let proj = &cases[rng.below(originals)];
+        let copy = work.join(format!("mut{k}"));
+        copy_dir(proj, &copy);
+        let mut files = Vec::new();
+        jig_files(&copy, &mut files);
+        for _ in 0..1 + rng.below(2) {
+            let f = &files[rng.below(files.len())];
+            let src = std::fs::read_to_string(f).unwrap();
+            std::fs::write(f, mutate(&src, &mut rng)).unwrap();
+        }
+        if jig::sema::analyze(&Sources::Disk, &copy).diags.has_errors() {
+            continue;
+        }
+        compared += 1;
+        failures.extend(compare_vc(exe, &std_dir, &copy, false).map(|m| format!("mutation {k}: {m}")));
+    }
+    assert!(compared >= 100, "only {compared} mutations checked");
+    assert!(failures.is_empty(), "{} cases differ:\n{}", failures.len(), failures.join("\n"));
+}

@@ -16,7 +16,8 @@ bootstrap compiler on every `.jig` file in the repository plus a few hundred mut
 | MIR lowering, ownership analyses, C back end | `compiler/src/mir/lower.rs`, `compiler/src/codegen/` | `sema/mir.jig`, `sema/lower*.jig`, `sema/own.jig`, `sema/cgen*.jig` | `jigc c DIR STD` = `jig debug c DIR` |
 | Formatter | `compiler/src/fmt/` | `syntax/fmt.jig`, `syntax/fmt_expr.jig` | `jigc fmt FILE` = `jig fmt FILE` |
 | Interpreter, test runner, property tests | `compiler/src/mir/interp.rs`, `compiler/src/runner.rs`, `compiler/src/proptest.rs` | `sema/interp.jig`, `sema/intrinsics.jig`, `sema/runner.jig` | `jigc test DIR STD` = `jig test --json DIR` |
-| Prover | `compiler/src/verify/` | not yet | |
+| Prover: verification conditions | `compiler/src/verify/vc.rs`, `frame.rs` | `sema/vc*.jig`, `sema/frame.jig` | `jigc vc DIR STD` = `jig debug vc DIR` |
+| Prover: solving, replay, reports | `compiler/src/verify/mod.rs`, `smt.rs` | not yet | |
 
 `jigc` compiles itself: `jigc cc selfhost compiler/std` prints a self-contained C file that a
 C compiler builds into a `jigc` printing the same file again. That file is checked in as

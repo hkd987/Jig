@@ -1,0 +1,1488 @@
+// Verification conditions by symbolic evaluation of the typed AST, ported from the bootstrap
+// compiler's `verify/vc.rs`.
+//
+// Each function is evaluated once with symbolic parameters. Values are trees of SMT terms
+// (`Sv`): integers are mathematical integers with range facts, strings and floats are
+// uninterpreted, lists are a length plus one SMT array per leaf of the element type, and enums
+// are a tag plus every variant's fields. Branches merge with `ite`, loops are cut with their
+// invariants (modified state is havocked), and calls use only the callee's contract. Every
+// place a run could trap or a contract could fail becomes an obligation under the path
+// condition that reaches it. Anything not modeled evaluates to a fresh unconstrained value,
+// which is always sound: it can only make proofs fail, never succeed wrongly.
+//
+// This file: values, terms, declarations, fresh values, value operations, obligations, type
+// predicates and functions. `vc_stmt.jig`: statements, merging, places and loops.
+// `vc_expr.jig`: expressions. `vc_call.jig`: calls and the models of builtins.
+
+import "syntax"
+
+/// The most elements a list (or bytes a string) can hold: 2^60 (see the bootstrap compiler).
+const MAX_LEN: Str = "1152921504606846976"
+
+enum ObKind {
+  /// A callee's `requires` or parameter refinement, at a call site.
+  Precondition
+  Postcondition
+  LoopInvariant
+  /// A struct invariant or field refinement, at construction or mutation.
+  StructInvariant
+  /// A refinement alias or `where` clause.
+  Refinement
+  Assert
+  Overflow
+  DivZero
+  Bounds
+  Unwrap
+  Panic
+  Cast
+  Shift
+}
+
+fn ObKind.name(self) -> Str {
+  return match self {
+    Precondition => "precondition"
+    Postcondition => "postcondition"
+    LoopInvariant => "loop invariant"
+    StructInvariant => "struct invariant"
+    Refinement => "refinement"
+    Assert => "assertion"
+    Overflow => "overflow"
+    DivZero => "division by zero"
+    Bounds => "bounds"
+    Unwrap => "unwrap"
+    Panic => "panic"
+    Cast => "conversion"
+    Shift => "shift"
+  }
+}
+
+/// Contracts are what people write; safety obligations are the runtime traps.
+fn ObKind.is_contract(self) -> Bool {
+  return match self {
+    Precondition | Postcondition | LoopInvariant | StructInvariant | Refinement | Assert => true
+    _ => false
+  }
+}
+
+struct Obligation {
+  kind: ObKind
+  span: syntax.Span
+  msg: Str
+  pc: List<Str>
+  goal: Str
+  /// Whether proving it may remove the runtime check at `span`.
+  elidable: Bool
+}
+
+/// The verification conditions of one function.
+struct FnVcs {
+  decls: List<Str>
+  obligations: List<Obligation>
+  /// Parameter leaves to show in counterexamples: (label, term, kind).
+  show: List<(Str, Str, Base)>
+  /// When every parameter is built from integers, booleans and characters: each parameter's
+  /// type and leaf terms, so a counterexample can be replayed.
+  inputs: Option<List<(Int, List<(Str, Base)>)>>
+}
+
+// ---------- symbolic values ----------
+
+enum Base {
+  Bool
+  Int(k: IntTy)
+  Char
+  /// An enum tag with this many variants.
+  Tag(n: Int)
+  Str
+  Float
+  /// An uninterpreted value of this type (maps, sets, functions, recursive enums).
+  Opaque(t: Int)
+}
+
+struct Leaf {
+  t: Str
+  base: Base
+  /// How many `(Array Int _)` wrappers: list elements are lifted to arrays.
+  depth: Int
+}
+
+enum Sv {
+  Unit
+  Leaf(l: Leaf)
+  List(len: Leaf, elems: Sv)
+  Tuple(xs: List<Sv>)
+  Struct(adt: Int, xs: List<Sv>)
+  Enum(adt: Int, tag: Leaf, vars: List<List<Sv>>)
+}
+
+fn sv_bool(t: Str) -> Sv {
+  return Sv.Leaf(Leaf { t: t, base: Base.Bool, depth: 0 })
+}
+
+fn sv_int(t: Str, k: IntTy) -> Sv {
+  return Sv.Leaf(Leaf { t: t, base: Base.Int(k), depth: 0 })
+}
+
+fn int_leaf(t: Str) -> Leaf {
+  return Leaf { t: t, base: Base.Int(IntTy.I64), depth: 0 }
+}
+
+/// The term of a scalar.
+fn sv_term(v: Sv) -> Option<Str> {
+  return match v {
+    Leaf(l) => Some(l.t)
+    _ => None
+  }
+}
+
+fn sv_leaves(v: Sv, out: &mut List<Leaf>) {
+  match v {
+    Unit => {}
+    Leaf(l) => out.push(l)
+    List(len, elems) => {
+      out.push(len)
+      sv_leaves(elems, &mut out)
+    }
+    Tuple(xs) | Struct(_, xs) => {
+      for x in xs {
+        sv_leaves(x, &mut out)
+      }
+    }
+    Enum(_, tag, vars) => {
+      out.push(tag)
+      for vr in vars {
+        for x in vr {
+          sv_leaves(x, &mut out)
+        }
+      }
+    }
+  }
+}
+
+fn leaves_of(v: Sv) -> List<Leaf> {
+  var out: List<Leaf> = []
+  sv_leaves(v, &mut out)
+  return out
+}
+
+/// `v` with its leaves replaced, in order, by `ls[k..]`.
+fn with_leaves(v: Sv, ls: List<Leaf>, k: &mut Int) -> Sv {
+  match v {
+    Unit => {
+      return Sv.Unit
+    }
+    Leaf(_) => {
+      k += 1
+      return Sv.Leaf(ls[k - 1])
+    }
+    List(_, elems) => {
+      k += 1
+      let len = ls[k - 1]
+      return Sv.List(len, with_leaves(elems, ls, &mut k))
+    }
+    Tuple(xs) => {
+      var ys: List<Sv> = []
+      for x in xs {
+        ys.push(with_leaves(x, ls, &mut k))
+      }
+      return Sv.Tuple(ys)
+    }
+    Struct(a, xs) => {
+      var ys: List<Sv> = []
+      for x in xs {
+        ys.push(with_leaves(x, ls, &mut k))
+      }
+      return Sv.Struct(a, ys)
+    }
+    Enum(a, _, vars) => {
+      k += 1
+      let tag = ls[k - 1]
+      var vs: List<List<Sv>> = []
+      for vr in vars {
+        var ys: List<Sv> = []
+        for x in vr {
+          ys.push(with_leaves(x, ls, &mut k))
+        }
+        vs.push(ys)
+      }
+      return Sv.Enum(a, tag, vs)
+    }
+  }
+}
+
+fn same_sv(a: Sv, b: Sv) -> Bool {
+  let la = leaves_of(a)
+  let lb = leaves_of(b)
+  if la.len() != lb.len() {
+    return false
+  }
+  for i in 0..la.len() {
+    if la[i].t != lb[i].t {
+      return false
+    }
+  }
+  return true
+}
+
+/// How `zip_leaves` combines two leaves.
+enum Zip {
+  /// `(store a i b)`.
+  Store(i: Str)
+  /// `(ite c a b)`, or the leaf itself when both sides are the same.
+  Ite(c: Str)
+}
+
+fn zip_leaf(a: Leaf, b: Leaf, z: Zip) -> Leaf {
+  return match z {
+    Store(i) => Leaf {
+      t: "(store " + a.t + " " + i + " " + b.t + ")"
+      base: a.base
+      depth: a.depth
+    }
+    Ite(c) => if a.t == b.t {
+      a
+    } else {
+      Leaf { t: "(ite " + c + " " + a.t + " " + b.t + ")", base: a.base, depth: a.depth }
+    }
+  }
+}
+
+/// Combine two values of the same shape leaf by leaf; `None` if the shapes differ.
+fn zip_leaves(a: Sv, b: Sv, z: Zip) -> Option<Sv> {
+  match (a, b) {
+    (Unit, Unit) => {
+      return Some(Sv.Unit)
+    }
+    (Leaf(x), Leaf(y)) => {
+      return Some(Sv.Leaf(zip_leaf(x, y, z)))
+    }
+    (List(la, ea), List(lb, eb)) => {
+      let e = zip_leaves(ea, eb, z)?
+      return Some(Sv.List(zip_leaf(la, lb, z), e))
+    }
+    (Tuple(xs), Tuple(ys)) => {
+      if xs.len() != ys.len() {
+        return None
+      }
+      var out: List<Sv> = []
+      for i in 0..xs.len() {
+        out.push(zip_leaves(xs[i], ys[i], z)?)
+      }
+      return Some(Sv.Tuple(out))
+    }
+    (Struct(p, xs), Struct(q, ys)) => {
+      if p != q || xs.len() != ys.len() {
+        return None
+      }
+      var out: List<Sv> = []
+      for i in 0..xs.len() {
+        out.push(zip_leaves(xs[i], ys[i], z)?)
+      }
+      return Some(Sv.Struct(p, out))
+    }
+    (Enum(p, ta, va), Enum(q, tb, vb)) => {
+      if p != q || va.len() != vb.len() {
+        return None
+      }
+      var vars: List<List<Sv>> = []
+      for vi in 0..va.len() {
+        if va[vi].len() != vb[vi].len() {
+          return None
+        }
+        var fs: List<Sv> = []
+        for i in 0..va[vi].len() {
+          fs.push(zip_leaves(va[vi][i], vb[vi][i], z)?)
+        }
+        vars.push(fs)
+      }
+      return Some(Sv.Enum(p, zip_leaf(ta, tb, z), vars))
+    }
+    _ => {
+      return None
+    }
+  }
+}
+
+/// Element `i` of lifted elements, as terms.
+fn select_raw(v: Sv, i: Str) -> Sv {
+  var ls: List<Leaf> = []
+  for l in leaves_of(v) {
+    ls.push(Leaf { t: "(select " + l.t + " " + i + ")", base: l.base, depth: l.depth - 1 })
+  }
+  var k = 0
+  return with_leaves(v, ls, &mut k)
+}
+
+/// The leaves of a value made only of integers, booleans and characters (in `fresh` order).
+fn scalar_leaves(v: Sv) -> Option<List<(Str, Base)>> {
+  match v {
+    List(_, _) | Enum(_, _, _) => {
+      return None
+    }
+    _ => {}
+  }
+  var out: List<(Str, Base)> = []
+  for l in leaves_of(v) {
+    let ok = l.depth == 0 &&
+      match l.base {
+        Bool | Int(_) | Char => true
+        _ => false
+      }
+    if !ok {
+      return None
+    }
+    out.push((l.t, l.base))
+  }
+  return if plain_sv(v) { Some(out) } else { None }
+}
+
+fn plain_sv(v: Sv) -> Bool {
+  return match v {
+    Unit | Leaf(_) => true
+    Tuple(xs) | Struct(_, xs) => {
+      var ok = true
+      for x in xs {
+        ok = ok && plain_sv(x)
+      }
+      ok
+    }
+    _ => false
+  }
+}
+
+// ---------- terms ----------
+
+fn smt_lit(neg: Bool, mag: U64) -> Str {
+  return if neg && mag != 0 { "(- " + mag.str() + ")" } else { mag.str() }
+}
+
+fn smt_int(v: Int) -> Str {
+  return if v < 0 { smt_lit(true, neg_mag(v)) } else { v.str() }
+}
+
+fn smt_and(xs: List<Str>) -> Str {
+  var ys: List<Str> = []
+  for x in xs {
+    if x != "true" {
+      ys.push(x)
+    }
+  }
+  if ys.is_empty() {
+    return "true"
+  }
+  if ys.len() == 1 {
+    return ys[0]
+  }
+  return "(and " + ys.join(" ") + ")"
+}
+
+fn smt_not(x: Str) -> Str {
+  if x == "true" {
+    return "false"
+  }
+  if x == "false" {
+    return "true"
+  }
+  return "(not " + x + ")"
+}
+
+fn smt_or2(a: Str, b: Str) -> Str {
+  if a == "true" || b == "true" {
+    return "true"
+  }
+  if a == "false" {
+    return b
+  }
+  if b == "false" {
+    return a
+  }
+  return "(or " + a + " " + b + ")"
+}
+
+fn range_fact(t: Str, lo: Str, hi: Str) -> Str {
+  return "(and (<= " + lo + " " + t + ") (<= " + t + " " + hi + "))"
+}
+
+/// The bounds of an integer type as SMT literals.
+fn int_min_smt(k: IntTy) -> Str {
+  return match k {
+    I64 => "(- 9223372036854775808)"
+    I32 => "(- 2147483648)"
+    _ => "0"
+  }
+}
+
+fn int_range(t: Str, k: IntTy) -> Str {
+  return range_fact(t, int_min_smt(k), k.max_text())
+}
+
+// ---------- the generator ----------
+
+/// A path state: what each local holds, and the facts that hold on the path.
+struct St {
+  env: Map<Int, Sv>
+  pc: List<Str>
+}
+
+fn empty_st() -> St {
+  return St { env: Map.new(), pc: [] }
+}
+
+/// Where a value lives, for writes: a local and a path into it.
+struct PlaceRef {
+  local: Int
+  path: List<Seg>
+  /// The type at each step: `tys[0]` is the local's type, `tys[i+1]` after `path[i]`.
+  tys: List<Int>
+}
+
+enum Seg {
+  Field(i: Int)
+  Index(i: Str, span: syntax.Span)
+}
+
+enum VArg {
+  Value(v: Sv)
+  Place(p: PlaceRef, v: Sv)
+}
+
+fn VArg.value(self) -> Sv {
+  return match self {
+    Value(v) | Place(_, v) => v
+  }
+}
+
+/// What expressions are evaluated against.
+struct VFrame {
+  pkg: Int
+  file: Int
+  body: Option<Body>
+  inst: List<Int>
+  result: Option<Sv>
+  old: Option<Map<Int, Sv>>
+  /// Names bound by name (struct and alias predicates are checked outside any body).
+  names: List<(Str, Sv)>
+  /// Obligations from this frame may remove runtime checks.
+  own: Bool
+}
+
+struct VLoop {
+  breaks: List<St>
+  conts: List<St>
+}
+
+struct Gen {
+  s: Sema
+  sorts: List<Str>
+  funs: List<Str>
+  decls: List<Str>
+  declared: Set<Str>
+  axioms: List<Str>
+  n: Int
+  str_lits: Map<Str, Str>
+  /// The string literals' constants in order of first use (asserted distinct).
+  str_order: List<Str>
+  /// Types and functions numbered in order of first use, for the SMT names derived from them.
+  ty_nums: Map<Int, Int>
+  fn_nums: Map<Int, Int>
+  float_lits: Map<Str, Str>
+  obligations: List<Obligation>
+  returns: List<(St, Sv)>
+  loops: List<VLoop>
+  /// Inside a quantifier body evaluated for its value: no definitions or obligations.
+  inline: Int
+  rec_fields: Map<(Str, Int, Int), Sv>
+  /// The types `fresh_at` is building values of, outermost first.
+  expanding: List<Int>
+  /// Memo for `holds_itself`.
+  holds: Map<Int, Bool>
+  prelude: Int
+  /// The return type of the function being verified (for `?`).
+  cur_ret: Int
+  /// Nesting of callee contracts being evaluated.
+  depth: Int
+  /// What each function may change in each `&mut` parameter (see `frame.jig`).
+  frames: Map<(Int, Int), MutFrame>
+}
+
+fn new_gen(s: Sema, frames: Map<(Int, Int), MutFrame>) -> Gen {
+  var prelude = -1
+  for p in 0..s.pkgs.len() {
+    if s.pkgs[p].path == "<prelude>" {
+      prelude = p
+      break
+    }
+  }
+  let err = s.tys.error
+  return Gen {
+    s: s
+    sorts: []
+    funs: []
+    decls: []
+    declared: Set.new()
+    axioms: []
+    n: 0
+    str_lits: Map.new()
+    str_order: []
+    ty_nums: Map.new()
+    fn_nums: Map.new()
+    float_lits: Map.new()
+    obligations: []
+    returns: []
+    loops: []
+    inline: 0
+    rec_fields: Map.new()
+    expanding: []
+    holds: Map.new()
+    prelude: prelude
+    cur_ret: err
+    depth: 0
+    frames: frames
+  }
+}
+
+fn Gen.reset(&mut self) {
+  self.sorts = []
+  self.funs = []
+  self.decls = []
+  self.declared = Set.new()
+  self.axioms = []
+  self.n = 0
+  self.str_lits = Map.new()
+  self.str_order = []
+  self.ty_nums = Map.new()
+  self.fn_nums = Map.new()
+  self.float_lits = Map.new()
+  self.obligations = []
+  self.returns = []
+  self.loops = []
+  self.inline = 0
+  self.rec_fields = Map.new()
+  self.depth = 0
+}
+
+// ---------- SMT declarations ----------
+
+fn Gen.name(&mut self, hint: Str) -> Str {
+  self.n += 1
+  var clean: List<Char> = []
+  for c in hint.chars() {
+    let v = c as Int
+    let ok = (v >= 48 && v <= 57) || (v >= 65 && v <= 90) || (v >= 97 && v <= 122) || v == 95
+    if ok && clean.len() < 24 {
+      clean.push(c)
+    }
+  }
+  return Str.from_chars(clean) + "!" + self.n.str()
+}
+
+fn Gen.ty_num(&mut self, t: Int) -> Int {
+  match self.ty_nums.get(t) {
+    Some(n) => {
+      return n
+    }
+    None => {}
+  }
+  let n = self.ty_nums.len()
+  self.ty_nums.insert(t, n)
+  return n
+}
+
+fn Gen.fn_num(&mut self, f: Int) -> Int {
+  match self.fn_nums.get(f) {
+    Some(n) => {
+      return n
+    }
+    None => {}
+  }
+  let n = self.fn_nums.len()
+  self.fn_nums.insert(f, n)
+  return n
+}
+
+fn Gen.sort(&mut self, b: Base, depth: Int) -> Str {
+  var s = match b {
+    Bool => "Bool"
+    Int(_) | Char | Tag(_) => "Int"
+    Str => self.opaque_sort("JStr")
+    Float => self.opaque_sort("JFloat")
+    Opaque(t) => {
+      let n = self.ty_num(t)
+      self.opaque_sort("O" + n.str())
+    }
+  }
+  for _ in 0..depth {
+    s = "(Array Int " + s + ")"
+  }
+  return s
+}
+
+fn Gen.opaque_sort(&mut self, name: Str) -> Str {
+  let key = "sort " + name
+  if !self.declared.contains(key) {
+    self.declared.insert(key)
+    self.sorts.push("(declare-sort " + name + " 0)")
+  }
+  return name
+}
+
+fn Gen.fun(&mut self, name: Str, args: List<Str>, ret: Str) -> Str {
+  let key = "fun " + name
+  if !self.declared.contains(key) {
+    self.declared.insert(key)
+    self.funs.push("(declare-fun " + name + " (" + args.join(" ") + ") " + ret + ")")
+  }
+  return name
+}
+
+fn Gen.str_len(&mut self, t: Str) -> Str {
+  let s = self.opaque_sort("JStr")
+  let f = self.fun("str_len", [s], "Int")
+  return "(" + f + " " + t + ")"
+}
+
+fn Gen.konst(&mut self, sort: Str, hint: Str) -> Str {
+  let n = self.name(hint)
+  self.decls.push("(declare-const " + n + " " + sort + ")")
+  return n
+}
+
+/// Name a term (keeps terms small); inline mode returns the term itself.
+fn Gen.define(&mut self, sort: Str, term: Str) -> Str {
+  if self.inline > 0 || !term.starts_with("(") {
+    return term
+  }
+  let n = self.name("v")
+  self.decls.push("(define-fun " + n + " () " + sort + " " + term + ")")
+  return n
+}
+
+fn Gen.define_bool(&mut self, term: Str) -> Str {
+  return self.define("Bool", term)
+}
+
+fn Gen.define_int(&mut self, term: Str) -> Str {
+  return self.define("Int", term)
+}
+
+/// Facts about a scalar implied by its type.
+fn Gen.wf_fact(&mut self, l: Leaf) -> Option<Str> {
+  if l.depth > 0 {
+    return None
+  }
+  match l.base {
+    Int(k) => {
+      return Some(int_range(l.t, k))
+    }
+    Char => {
+      return Some(range_fact(l.t, "0", "1114111"))
+    }
+    Tag(n) => {
+      return Some(range_fact(l.t, "0", smt_int(n - 1)))
+    }
+    Str => {
+      let len = self.str_len(l.t)
+      return Some(range_fact(len, "0", MAX_LEN))
+    }
+    _ => {
+      return None
+    }
+  }
+}
+
+fn Gen.wf_facts(&mut self, v: Sv) -> List<Str> {
+  var out: List<Str> = []
+  for l in leaves_of(v) {
+    match self.wf_fact(l) {
+      Some(f) => out.push(f)
+      None => {}
+    }
+  }
+  match v {
+    List(len, _) => if len.depth == 0 { out.push(range_fact(len.t, "0", MAX_LEN)) }
+    _ => {}
+  }
+  return out
+}
+
+fn Gen.wf_facts_deep(&mut self, v: Sv) -> List<Str> {
+  var out = self.wf_facts(v)
+  match v {
+    Tuple(xs) | Struct(_, xs) => {
+      for x in xs {
+        match x {
+          List(_, _) => out.extend(self.wf_facts_deep(x))
+          _ => {}
+        }
+      }
+    }
+    Enum(_, _, vars) => {
+      for vr in vars {
+        for x in vr {
+          match x {
+            List(_, _) => out.extend(self.wf_facts_deep(x))
+            _ => {}
+          }
+        }
+      }
+    }
+    _ => {}
+  }
+  // Consecutive duplicates removed (as `Vec::dedup`).
+  var d: List<Str> = []
+  for f in out {
+    if d.is_empty() || d[d.len() - 1] != f {
+      d.push(f)
+    }
+  }
+  return d
+}
+
+// ---------- types ----------
+
+fn Gen.field_tys(&mut self, t: Int) -> List<Int> {
+  match self.s.tys.kinds[t] {
+    Tuple(ts) => {
+      return ts
+    }
+    Adt(a, args) => {
+      var out: List<Int> = []
+      for f in self.s.defs.adts[a].fields {
+        out.push(self.s.tys.subst(f.ty, args))
+      }
+      return out
+    }
+    _ => {
+      return []
+    }
+  }
+}
+
+fn Gen.variant_tys(&mut self, t: Int) -> List<List<Int>> {
+  match self.s.tys.kinds[t] {
+    Adt(a, args) => {
+      var out: List<List<Int>> = []
+      for v in self.s.defs.adts[a].variants {
+        var fs: List<Int> = []
+        for f in v.fields {
+          fs.push(self.s.tys.subst(f.ty, args))
+        }
+        out.push(fs)
+      }
+      return out
+    }
+    _ => {
+      return []
+    }
+  }
+}
+
+fn Gen.elem_ty(self, t: Int) -> Int {
+  return match self.s.tys.kinds[t] {
+    List(e) => e
+    _ => self.s.tys.error
+  }
+}
+
+fn Gen.is_unit(self, t: Int) -> Bool {
+  return t == self.s.tys.unit_ty
+}
+
+fn Gen.is_never(self, t: Int) -> Bool {
+  return t == self.s.tys.never
+}
+
+/// A fresh unconstrained value of a type. Type facts about scalars at depth 0 become global
+/// axioms (the constant is otherwise free).
+fn Gen.fresh(&mut self, t: Int, hint: Str) -> Sv {
+  let v = self.fresh_at(t, hint, 0)
+  let facts = self.wf_facts_deep(v)
+  self.axioms.extend(facts)
+  return v
+}
+
+fn Gen.leaf(&mut self, base: Base, depth: Int, hint: Str) -> Leaf {
+  let sort = self.sort(base, depth)
+  let t = self.konst(sort, hint)
+  return Leaf { t: t, base: base, depth: depth }
+}
+
+fn Gen.fresh_at(&mut self, t: Int, hint: Str, depth: Int) -> Sv {
+  match self.s.tys.kinds[t] {
+    Int(k, _) => {
+      return Sv.Leaf(self.leaf(Base.Int(k), depth, hint))
+    }
+    Float(_) => {
+      return Sv.Leaf(self.leaf(Base.Float, depth, hint))
+    }
+    Bool => {
+      return Sv.Leaf(self.leaf(Base.Bool, depth, hint))
+    }
+    Char => {
+      return Sv.Leaf(self.leaf(Base.Char, depth, hint))
+    }
+    Str => {
+      return Sv.Leaf(self.leaf(Base.Str, depth, hint))
+    }
+    Never | Error | Infer(_) => {
+      return Sv.Unit
+    }
+    Tuple(ts) => {
+      if ts.is_empty() {
+        return Sv.Unit
+      }
+      var xs: List<Sv> = []
+      for i in 0..ts.len() {
+        xs.push(self.fresh_at(ts[i], hint + "_" + i.str(), depth))
+      }
+      return Sv.Tuple(xs)
+    }
+    Adt(a, _) => {
+      // Recursive enums, and types that hold themselves in a list, stay opaque.
+      if self.s.defs.adts[a].recursive || self.expanding.contains(a) {
+        return Sv.Leaf(self.leaf(Base.Opaque(t), depth, hint))
+      }
+      self.expanding.push(a)
+      let v = self.fresh_adt(t, a, hint, depth)
+      let _ = self.expanding.pop()
+      return v
+    }
+    List(e) => {
+      let len = self.leaf(Base.Int(IntTy.I64), depth, hint + "_len")
+      let elems = self.fresh_elems(e, hint + "_e", depth + 1)
+      return Sv.List(len, elems)
+    }
+    Map(_, _) | Set(_) | Fn(_, _, _) | Param(_, _) => {
+      return Sv.Leaf(self.leaf(Base.Opaque(t), depth, hint))
+    }
+  }
+}
+
+/// The elements of a list of `e`, lifted `depth` times; opaque when `e` holds a list of
+/// itself, so that every list of `e` has the same shape however it was made.
+fn Gen.fresh_elems(&mut self, e: Int, hint: Str, depth: Int) -> Sv {
+  if self.holds_itself(e) {
+    return Sv.Leaf(self.leaf(Base.Opaque(e), depth, hint))
+  }
+  return self.fresh_at(e, hint, depth)
+}
+
+/// Whether values of a struct or enum type can contain values of the same type (through lists:
+/// a directly recursive enum is `recursive`, and opaque everywhere).
+fn Gen.holds_itself(&mut self, t: Int) -> Bool {
+  let a = match self.s.tys.kinds[t] {
+    Adt(a, _) => a
+    _ => {
+      return false
+    }
+  }
+  if self.s.defs.adts[a].recursive {
+    return false
+  }
+  match self.holds.get(t) {
+    Some(b) => {
+      return b
+    }
+    None => {}
+  }
+  var seen: Set<Int> = Set.new()
+  var work = [t]
+  var found = false
+  for !work.is_empty() {
+    let x = work.pop().unwrap_or(0)
+    // Polymorphic recursion makes ever larger types: past a bound, assume the worst.
+    if seen.len() > 256 {
+      found = true
+      break
+    }
+    var parts: List<Int> = []
+    match self.s.tys.kinds[x] {
+      Tuple(ts) => parts = ts
+      List(e) => parts = [e]
+      Adt(b, _) => if !self.s.defs.adts[b].recursive {
+        if self.s.defs.adts[b].is_enum {
+          for fs in self.variant_tys(x) {
+            parts.extend(fs)
+          }
+        } else {
+          parts = self.field_tys(x)
+        }
+      }
+      _ => {}
+    }
+    for p in parts {
+      match self.s.tys.kinds[p] {
+        Adt(b, _) => if b == a {
+          found = true
+        }
+        _ => {}
+      }
+      if !seen.contains(p) {
+        seen.insert(p)
+        work.push(p)
+      }
+    }
+    if found {
+      break
+    }
+  }
+  self.holds.insert(t, found)
+  return found
+}
+
+/// A fresh value of a struct or enum type (`fresh_at`).
+fn Gen.fresh_adt(&mut self, t: Int, a: Int, hint: Str, depth: Int) -> Sv {
+  let ad = self.s.defs.adts[a]
+  if ad.is_enum {
+    let vts = self.variant_tys(t)
+    let tag = self.leaf(Base.Tag(ad.variants.len()), depth, hint + "_tag")
+    var vars: List<List<Sv>> = []
+    for vi in 0..vts.len() {
+      var fs: List<Sv> = []
+      for i in 0..vts[vi].len() {
+        fs.push(self.fresh_at(vts[vi][i], hint + "_" + vi.str() + "_" + i.str(), depth))
+      }
+      vars.push(fs)
+    }
+    return Sv.Enum(a, tag, vars)
+  }
+  let fts = self.field_tys(t)
+  var xs: List<Sv> = []
+  for i in 0..fts.len() {
+    xs.push(self.fresh_at(fts[i], hint + "_" + ad.fields[i].name, depth))
+  }
+  return Sv.Struct(a, xs)
+}
+
+// ---------- value operations ----------
+
+/// Read element `i` of lifted elements, assuming its type facts on this path.
+fn Gen.select(&mut self, st: &mut St, v: Sv, i: Str, elem_ty: Int) -> Sv {
+  let named = self.name_leaves(select_raw(v, i))
+  for f in self.wf_facts_deep(named) {
+    self.assume(&mut st, f)
+  }
+  self.assume_type_preds(&mut st, elem_ty, named, 0)
+  return named
+}
+
+fn Gen.name_leaves(&mut self, v: Sv) -> Sv {
+  var named: List<Leaf> = []
+  for l in leaves_of(v) {
+    let sort = self.sort(l.base, l.depth)
+    named.push(Leaf { t: self.define(sort, l.t), base: l.base, depth: l.depth })
+  }
+  var k = 0
+  return with_leaves(v, named, &mut k)
+}
+
+fn Gen.store(&mut self, arr: Sv, i: Str, val: Sv) -> Option<Sv> {
+  let stored = match zip_leaves(arr, val, Zip.Store(i)) {
+    Some(v) => v
+    None => {
+      // A value the elements cannot represent (one holding a list of its own type, stored
+      // into opaque elements): store an unknown element, keeping the rest.
+      let shape = select_raw(arr, i)
+      var ls: List<Leaf> = []
+      for l in leaves_of(shape) {
+        ls.push(self.leaf(l.base, l.depth, "elem"))
+      }
+      var k = 0
+      zip_leaves(arr, with_leaves(shape, ls, &mut k), Zip.Store(i))?
+    }
+  }
+  return Some(self.name_leaves(stored))
+}
+
+fn Gen.ite(&mut self, c: Str, a: Sv, b: Sv, t: Int) -> Sv {
+  if c == "true" {
+    return a
+  }
+  if c == "false" {
+    return b
+  }
+  if same_sv(a, b) {
+    return a
+  }
+  return match zip_leaves(a, b, Zip.Ite(c)) {
+    Some(v) => self.name_leaves(v)
+    None => self.fresh(t, "merge")
+  }
+}
+
+/// Structural equality as a Bool term; `None` when the values cannot be compared.
+fn Gen.eq_term(&mut self, a: Sv, b: Sv) -> Option<Str> {
+  match (a, b) {
+    (Unit, Unit) => {
+      return Some("true")
+    }
+    (Leaf(x), Leaf(y)) => {
+      if x.base == Base.Float {
+        let s = self.opaque_sort("JFloat")
+        let f = self.fun("feq", [s, s], "Bool")
+        return Some("(" + f + " " + x.t + " " + y.t + ")")
+      }
+      return Some(if x.t == y.t { "true" } else { "(= " + x.t + " " + y.t + ")" })
+    }
+    (List(la, ea), List(lb, eb)) => {
+      let k = self.name("k")
+      let sa = select_raw(ea, k)
+      let sb = select_raw(eb, k)
+      self.inline += 1
+      let inner = self.eq_term(sa, sb)
+      self.inline -= 1
+      let it = inner?
+      return Some(
+        "(and (= " +
+          la.t +
+          " " +
+          lb.t +
+          ") (forall ((" +
+          k +
+          " Int)) (=> (and (<= 0 " +
+          k +
+          ") (< " +
+          k +
+          " " +
+          la.t +
+          ")) " +
+          it +
+          ")))",
+      )
+    }
+    (Tuple(xs), Tuple(ys)) | (Struct(_, xs), Struct(_, ys)) => {
+      if xs.len() != ys.len() {
+        return None
+      }
+      var parts: List<Str> = []
+      for i in 0..xs.len() {
+        parts.push(self.eq_term(xs[i], ys[i])?)
+      }
+      return Some(smt_and(parts))
+    }
+    (Enum(_, ta, va), Enum(_, tb, vb)) => {
+      if va.len() != vb.len() {
+        return None
+      }
+      var parts = ["(= " + ta.t + " " + tb.t + ")"]
+      for vi in 0..va.len() {
+        var fs: List<Str> = []
+        for i in 0..min(va[vi].len(), vb[vi].len()) {
+          fs.push(self.eq_term(va[vi][i], vb[vi][i])?)
+        }
+        let f = smt_and(fs)
+        if f != "true" {
+          parts.push("(=> (= " + ta.t + " " + vi.str() + ") " + f + ")")
+        }
+      }
+      return Some(smt_and(parts))
+    }
+    _ => {
+      return None
+    }
+  }
+}
+
+fn Gen.fresh_bool(&mut self, hint: Str) -> Sv {
+  return Sv.Leaf(self.leaf(Base.Bool, 0, hint))
+}
+
+fn Gen.unit_or_fresh(&mut self, t: Int, hint: Str) -> Sv {
+  return if self.is_unit(t) { Sv.Unit } else { self.fresh(t, hint) }
+}
+
+// ---------- obligations ----------
+
+fn Gen.assume(self, st: &mut St, fact: Str) {
+  if fact != "true" {
+    st.pc.push(fact)
+  }
+}
+
+fn Gen.oblige(&mut self, fr: VFrame, st: St, kind: ObKind, span: syntax.Span, msg: Str, goal: Str) {
+  // Traps inside callee contracts and type predicates are the callee's (or the type's)
+  // business; they are checked where that code is verified.
+  if self.inline > 0 || (!fr.own && !kind.is_contract()) {
+    return
+  }
+  self.obligations.push(
+    Obligation { kind: kind, span: span, msg: msg, pc: st.pc, goal: goal, elidable: fr.own },
+  )
+}
+
+/// The source text of a span, white space collapsed, shortened to 100 characters.
+fn Gen.src(self, span: syntax.Span) -> Str {
+  let text = match self.s.src_file_at(span.lo) {
+    Some(f) => f.text[span.lo - f.base..max(span.hi, span.lo) - f.base]
+    None => ""
+  }
+  var words: List<Str> = []
+  var cur: List<Char> = []
+  for c in text.chars() {
+    if is_white(c) {
+      if !cur.is_empty() {
+        words.push(Str.from_chars(cur))
+        cur = []
+      }
+    } else {
+      cur.push(c)
+    }
+  }
+  if !cur.is_empty() {
+    words.push(Str.from_chars(cur))
+  }
+  let s = words.join(" ")
+  let cs = s.chars()
+  if cs.len() > 100 {
+    return Str.from_chars(cs[0..97]) + "…"
+  }
+  return s
+}
+
+// ---------- predicates ----------
+
+/// Evaluate a predicate with names bound by name (struct and alias predicates).
+fn Gen.pred_named(
+  &mut self,
+  st: &mut St,
+  pkg: Int,
+  file: Int,
+  pred: Int,
+  names: List<(Str, Sv)>,
+) -> Option<Str> {
+  let fr = VFrame {
+    pkg: pkg
+    file: file
+    body: None
+    inst: []
+    result: None
+    old: None
+    names: names
+    own: false
+  }
+  let v = self.expr(fr, &mut st, pred)?
+  return sv_term(v)
+}
+
+fn Gen.ast_of(self, pkg: Int, file: Int) -> syntax.Ast {
+  return self.s.pkgs[pkg].files[file].ast
+}
+
+/// The predicates every value of a struct type satisfies: field refinements, field refinement
+/// aliases and invariants. Returns (message, term) pairs.
+fn Gen.struct_preds(&mut self, st: &mut St, adt: Int, v: Sv) -> List<(Str, Str)> {
+  let fields = match v {
+    Struct(_, xs) => xs
+    _ => {
+      return []
+    }
+  }
+  let ad = self.s.defs.adts[adt]
+  if ad.is_enum {
+    return []
+  }
+  let ast = self.ast_of(ad.pkg, ad.file)
+  let (fdecls, invs) = match ast.items[ad.item].kind {
+    Struct(_, fs, invariants) => (fs, invariants)
+    _ => {
+      return []
+    }
+  }
+  var names: List<(Str, Sv)> = []
+  for i in 0..min(fdecls.len(), fields.len()) {
+    names.push((fdecls[i].name.text, fields[i]))
+  }
+  var out: List<(Str, Str)> = []
+  for i in 0..ad.fields.len() {
+    match ad.fields[i].refine {
+      Some(al) => match self.alias_pred(&mut st, al, fields[i]) {
+        Some((text, term)) => out.push(
+          ("`" + ad.name + "` field `" + fdecls[i].name.text + "`: " + text, term),
+        )
+        None => {}
+      }
+      None => {}
+    }
+  }
+  var preds: List<Int> = []
+  for f in fdecls {
+    match f.refine {
+      Some(p) => preds.push(p)
+      None => {}
+    }
+  }
+  preds.extend(invs)
+  for p in preds {
+    let text = self.src(ast.exprs[p].span)
+    match self.pred_named(&mut st, ad.pkg, ad.file, p, names) {
+      Some(t) => out.push(("`" + ad.name + "` requires " + text, t))
+      None => {}
+    }
+  }
+  return out
+}
+
+/// (text, term) of a refinement alias's predicate applied to `v`.
+fn Gen.alias_pred(&mut self, st: &mut St, al: Int, v: Sv) -> Option<(Str, Str)> {
+  let ad = self.s.defs.aliases[al]
+  let pred = ad.refine?
+  let text = self.src(self.ast_of(ad.pkg, ad.file).exprs[pred].span)
+  let t = self.pred_named(&mut st, ad.pkg, ad.file, pred, [("self", v)])?
+  return Some(("`" + ad.name + "` requires " + text, t))
+}
+
+/// Assume the predicates of a value's type (structs, recursively through fields).
+fn Gen.assume_type_preds(&mut self, st: &mut St, t: Int, v: Sv, depth: Int) {
+  if depth > 3 {
+    return
+  }
+  match (self.s.tys.kinds[t], v) {
+    (Tuple(ts), Tuple(xs)) => {
+      for i in 0..min(ts.len(), xs.len()) {
+        self.assume_type_preds(&mut st, ts[i], xs[i], depth + 1)
+      }
+      return
+    }
+    _ => {}
+  }
+  let adt = match self.s.tys.kinds[t] {
+    Adt(a, _) => a
+    _ => {
+      return
+    }
+  }
+  if self.s.defs.adts[adt].is_enum {
+    // Payloads satisfy their types' predicates when their variant is the active one.
+    let (tag, vars) = match v {
+      Enum(_, tag, vars) => (tag, vars)
+      _ => {
+        return
+      }
+    }
+    let vts = self.variant_tys(t)
+    for vi in 0..min(vars.len(), vts.len()) {
+      for i in 0..min(vars[vi].len(), vts[vi].len()) {
+        var inner = empty_st()
+        self.assume_type_preds(&mut inner, vts[vi][i], vars[vi][i], depth + 1)
+        if !inner.pc.is_empty() {
+          let fact = "(=> (= " + tag.t + " " + vi.str() + ") " + smt_and(inner.pc) + ")"
+          self.assume(&mut st, fact)
+        }
+      }
+    }
+    return
+  }
+  let fts = self.field_tys(t)
+  match v {
+    Struct(_, fields) => {
+      for i in 0..min(fts.len(), fields.len()) {
+        self.assume_type_preds(&mut st, fts[i], fields[i], depth + 1)
+      }
+    }
+    _ => {}
+  }
+  for (_, term) in self.struct_preds(&mut st, adt, v) {
+    self.assume(&mut st, term)
+  }
+}
+
+fn Gen.oblige_struct_preds(&mut self, fr: VFrame, st: &mut St, t: Int, v: Sv, span: syntax.Span) {
+  let adt = match self.s.tys.kinds[t] {
+    Adt(a, _) => a
+    _ => {
+      return
+    }
+  }
+  for (msg, term) in self.struct_preds(&mut st, adt, v) {
+    self.oblige(fr, st, ObKind.StructInvariant, span, msg, term)
+    self.assume(&mut st, term)
+  }
+}
+
+// ---------- functions ----------
+
+/// Verification conditions for a function with a body.
+fn Gen.function(&mut self, f: Int) -> Option<FnVcs> {
+  self.reset()
+  let fd = self.s.defs.fns[f]
+  let body = self.s.bodies[f]?
+  let ast = self.ast_of(fd.pkg, fd.file)
+  let decl = match ast.items[fd.item].kind {
+    Fn(d) => d
+    _ => {
+      return None
+    }
+  }
+  let bexpr = decl.body?
+  self.cur_ret = fd.ret
+  var fr = VFrame {
+    pkg: fd.pkg
+    file: fd.file
+    body: Some(body)
+    inst: []
+    result: None
+    old: None
+    names: []
+    own: true
+  }
+  var st = empty_st()
+  var show: List<(Str, Str, Base)> = []
+  var inputs: Option<List<(Int, List<(Str, Base)>)>> = Some([])
+  // Parameters: fresh values satisfying their types, refinements and preconditions.
+  let offset = if fd.self_mode.is_some() { 1 } else { 0 }
+  for i in 0..body.param_locals.len() {
+    let id = body.param_locals[i]
+    let ld = body.locals[id]
+    let t = ld.ty
+    let v = self.fresh(t, ld.name)
+    self.show_leaves(ld.name, v, t, &mut show)
+    match (inputs, scalar_leaves(v)) {
+      (Some(ins), Some(ls)) => {
+        var more = ins
+        more.push((t, ls))
+        inputs = Some(more)
+      }
+      _ => inputs = None
+    }
+    self.assume_type_preds(&mut st, t, v, 0)
+    if i >= offset && i - offset < fd.params.len() {
+      match fd.params[i - offset].refine {
+        Some(al) => match self.alias_pred(&mut st, al, v) {
+          Some((_, term)) => self.assume(&mut st, term)
+          None => {}
+        }
+        None => {}
+      }
+    }
+    st.env.insert(id, v)
+  }
+  for p in decl.params {
+    match p.refine {
+      Some(pred) => match self.expr(fr, &mut st, pred) {
+        Some(v) => match sv_term(v) {
+          Some(t) => self.assume(&mut st, t)
+          None => {}
+        }
+        None => {}
+      }
+      None => {}
+    }
+  }
+  for r in decl.pre {
+    match self.expr(fr, &mut st, r) {
+      Some(v) => match sv_term(v) {
+        Some(t) => self.assume(&mut st, t)
+        None => {}
+      }
+      None => {}
+    }
+  }
+  let old_env = st.env
+  var mut_params: List<Int> = []
+  for i in 0..body.param_locals.len() {
+    let m = if i < offset {
+      fd.self_mode == Some(Mode.MutRef)
+    } else {
+      fd.params[i - offset].mode == Mode.MutRef
+    }
+    if m {
+      mut_params.push(body.param_locals[i])
+    }
+  }
+  // The body.
+  match self.block(fr, &mut st, bexpr) {
+    Some(v) => self.returns.push((st, if self.is_unit(fd.ret) { Sv.Unit } else { v }))
+    None => {}
+  }
+  // Postconditions on every return path.
+  let returns = self.returns
+  self.returns = []
+  fr.old = Some(old_env)
+  for (rs0, rv) in returns {
+    var rs = rs0
+    match fd.ret_refine {
+      Some(al) => match self.alias_pred(&mut rs, al, rv) {
+        Some((msg, term)) => self.oblige(
+          fr,
+          rs,
+          ObKind.Refinement,
+          fd.span,
+          "return value: " + msg,
+          term,
+        )
+        None => {}
+      }
+      None => {}
+    }
+    for id in mut_params {
+      let t = body.locals[id].ty
+      match rs.env.get(id) {
+        Some(v) => match self.s.tys.kinds[t] {
+          Adt(adt, _) => {
+            for (msg, term) in self.struct_preds(&mut rs, adt, v) {
+              self.oblige(fr, rs, ObKind.StructInvariant, fd.span, "on return: " + msg, term)
+            }
+          }
+          _ => {}
+        }
+        None => {}
+      }
+    }
+    fr.result = Some(rv)
+    for en in decl.post {
+      let span = ast.exprs[en].span
+      let text = self.src(span)
+      var s2 = rs
+      match self.expr(fr, &mut s2, en) {
+        Some(v) => match sv_term(v) {
+          Some(t) => self.oblige(fr, s2, ObKind.Postcondition, span, text, t)
+          None => {}
+        }
+        None => {}
+      }
+    }
+  }
+  var decls = self.sorts
+  decls.extend(self.funs)
+  decls.extend(self.decls)
+  if self.str_order.len() > 1 {
+    decls.push("(assert (distinct " + self.str_order.join(" ") + "))")
+  }
+  for a in self.axioms {
+    decls.push("(assert " + a + ")")
+  }
+  self.axioms = []
+  let obs = self.obligations
+  self.obligations = []
+  return Some(FnVcs { decls: decls, obligations: obs, show: show, inputs: inputs })
+}
+
+fn Gen.show_leaves(&mut self, label: Str, v: Sv, t: Int, out: &mut List<(Str, Str, Base)>) {
+  match v {
+    Leaf(l) => if l.depth == 0 {
+      match l.base {
+        Str => {
+          let len = self.str_len(l.t)
+          out.push((label + ".len()", len, Base.Int(IntTy.I64)))
+        }
+        Float | Opaque(_) => {}
+        b => out.push((label, l.t, b))
+      }
+    }
+    List(len, _) => if len.depth == 0 { out.push((label + ".len()", len.t, Base.Int(IntTy.I64))) }
+    Struct(adt, fs) => {
+      let fts = self.field_tys(t)
+      let names = self.s.defs.adts[adt].fields
+      for i in 0..min(min(names.len(), fs.len()), fts.len()) {
+        self.show_leaves(label + "." + names[i].name, fs[i], fts[i], &mut out)
+      }
+    }
+    Tuple(xs) => {
+      let fts = self.field_tys(t)
+      for i in 0..min(xs.len(), fts.len()) {
+        self.show_leaves(label + "." + i.str(), xs[i], fts[i], &mut out)
+      }
+    }
+    _ => {}
+  }
+}

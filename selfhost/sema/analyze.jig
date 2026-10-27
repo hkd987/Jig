@@ -257,3 +257,105 @@ pub fn sim_main(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {f
   }
   return run_main_sim(new_lw(s), cwd)
 }
+
+fn base_name(b: Base, tys: TyCtx) -> Str {
+  return match b {
+    Bool => "bool"
+    Int(k) => "int " + k.name()
+    Char => "char"
+    Tag(n) => "tag " + n.str()
+    Str => "str"
+    Float => "float"
+    Opaque(t) => "opaque " + tys.display(t)
+  }
+}
+
+/// The functions `prove` checks: the program's functions with bodies (or the standard
+/// library's), except interface signatures and test helpers.
+fn Sema.prove_targets(self, std: Bool) -> List<Int> {
+  var out: List<Int> = []
+  for f in 0..self.defs.fns.len() {
+    let fd = self.defs.fns[f]
+    let p = self.pkgs[fd.pkg]
+    if p.is_std == std &&
+      !p.external &&
+      !p.files[fd.file].path.ends_with("_test.jig") &&
+      fd.has_body &&
+      fd.iface.is_none() &&
+      self.bodies[f].is_some() {
+      out.push(f)
+    }
+  }
+  return out
+}
+
+/// `jigc vc DIR STD [std]`: the verification conditions of each function, the same text as
+/// `jig debug vc DIR [std]`.
+pub fn vc_dump(dir: Str, std_dir: Str, std: Bool) -> Result<Str, Str> effects {fs, env} {
+  let (s, root) = analyze(dir, std_dir)
+  if !s.diags.is_empty() {
+    return Err(dir + " has errors")
+  }
+  var fns = s.prove_targets(std)
+  // By position (stable: ties keep their order).
+  var keyed: List<(Int, Int, Int)> = []
+  for i in 0..fns.len() {
+    keyed.push((s.defs.fns[fns[i]].span.lo, i, fns[i]))
+  }
+  keyed.sort()
+  fns = []
+  for (_, _, f) in keyed {
+    fns.push(f)
+  }
+  var titles: List<Str> = []
+  for f in fns {
+    let sp = s.defs.fns[f].span
+    titles.push("fn " + s.fn_display_name(f) + " " + s.place(root, sp.lo, sp.hi))
+  }
+  let frames = compute_frames(s)
+  var g = new_gen(s, frames)
+  var out = ""
+  for i in 0..fns.len() {
+    let vcs = match g.function(fns[i]) {
+      Some(v) => v
+      None => {
+        continue
+      }
+    }
+    out += titles[i] + "\n"
+    for d in vcs.decls {
+      out += "decl " + d + "\n"
+    }
+    for o in vcs.obligations {
+      out += "ob " +
+        o.kind.name() +
+        " " +
+        g.s.place(root, o.span.lo, o.span.hi) +
+        " " +
+        (if o.elidable { "1" } else { "0" }) +
+        " " +
+        o.msg +
+        "\n"
+      for p in o.pc {
+        out += "pc " + p + "\n"
+      }
+      out += "goal " + o.goal + "\n"
+    }
+    for (label, term, b) in vcs.show {
+      out += "show " + label + " " + term + " " + base_name(b, g.s.tys) + "\n"
+    }
+    match vcs.inputs {
+      Some(ins) => {
+        for (t, leaves) in ins {
+          var ls: List<Str> = []
+          for (lt, lb) in leaves {
+            ls.push(lt + ":" + base_name(lb, g.s.tys))
+          }
+          out += "input " + g.s.tys.display(t) + " " + ls.join(" ") + "\n"
+        }
+      }
+      None => out += "inputs none\n"
+    }
+  }
+  return Ok(out)
+}
