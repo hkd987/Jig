@@ -61,7 +61,7 @@ The PRD's proposed targets, measured on `main` (4-core Xeon, clang 18):
 | Self-hosted vs bootstrap compiler, same corpus | equal or faster | 0.92 by instructions (CI gate 1.05); 1.21 by wall time | instructions only |
 | Agent tasks reaching a verified build, vs Rust | equal or better | harness and tasks ready (`bench/agents`); no agent runs yet | not measured |
 | Agent iterations per task, vs Rust and TypeScript | equal or fewer | as above | not measured |
-| Std and compiler functions with proven contracts | over 80% | std 91%; jigc 39% (491 of 1,209 functions state contracts and 475 of them (97%) prove completely, every safety obligation included: the lexer, nearly all of the parser, the JSON reader, and helpers across every pass, among them those that index an arena by a parameter, which now require the index; most of the rest read an index out of a tree node or a table, so proving it needs an invariant over every node's payload, which contracts cannot yet state) | std only |
+| Std and compiler functions with proven contracts | over 80% | std 91%; jigc 39% (491 of 1,209 functions state contracts and 475 of them (97%) prove completely, every safety obligation included: the lexer, nearly all of the parser, the JSON reader, and helpers across every pass, among them those that index an arena by a parameter, which now require the index; most of the rest read an index out of a tree node or a table, so proving it needs an invariant over every node's payload, which contracts cannot yet state). 79% of jigc's functions have no unproven obligation but such an index (`bench/contracts.py`) | std only |
 | Language reference size | fits in 10k tokens | about 6,000 | met |
 
 **Self-hosted speed.** By pass (`bench/selfhost.py --instructions --prove`, with jigc built
@@ -110,8 +110,19 @@ overflow check in the parser but those that index the tree by a node id. Those, 
 checker and back end, which index the program's arenas everywhere, need facts about every
 node (quantified invariants). The prover handles those, but the bootstrap C is built
 without proofs, where a quantified invariant is checked at each change: on a list that
-grows token by token or node by node, that makes compiling quadratic. Most of jigc's 1,069
-functions state no contract yet.
+grows token by token or node by node, that makes compiling quadratic.
+
+Since then helpers across every pass state contracts: 491 of jigc's 1,209 functions, 475 of
+which prove completely (39%). `bench/contracts.py` counts how the rest fail. 209 functions'
+only unproven obligations are indices into an arena or table read out of a node or another
+table; 258 have others: overflow (119, mostly counters and column sums), an index into
+another list (such as a call's arguments by position), a conversion. So even a prover that
+knew every stored index is in range would bring the measure to at most 684 (57%), and only if
+those 209 functions also stated contracts: the 80% target needs, besides that, bounds on
+counters and on argument lists. Counted the other way, as functions with no unproven
+obligation but an arena or table index (still checked at run time), whether or not they
+state a contract, jigc is at 951 of 1,209 (79%). That is a count of safety, not of proven
+contracts, so the measure above stays 39%.
 
 ## The alpha
 
