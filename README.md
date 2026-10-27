@@ -86,7 +86,7 @@ Measured in CI on every push (see `bench/` and `docs/gates/`):
 
 ```
 cc -O2 -std=gnu11 -pthread bootstrap/jigc.c -lm -o jigc
-./jigc check "$PWD/examples/hello" "$PWD/compiler/std"
+./jigc check examples/hello
 ./jigc cc selfhost compiler/std > jigc.c    # the same bytes as bootstrap/jigc.c
 ```
 
@@ -95,9 +95,10 @@ It binds `.feature` scenarios, loads required modules, formats, and runs tests a
 on its own interpreter (`jigc test`, the lines of `jig test --json`), and proves contracts with
 Z3 (`jigc prove`, the same results as `jig prove`, sharing its proof cache), and builds
 executables with the checks those proofs discharge removed (`jigc build`, the same C as
-`jig build`). `jigc check [PATH] [--json]` prints what `jig check` prints, every note and
-suggested fix included (with the standard library at `$JIG_STD`). It has no full command line
-of its own yet (`run` with real effects, `get`, `trace`, `mcp`); until it does,
+`jig build`). `jigc check`, `test`, `prove`, `build` and `fmt` take `jig`'s arguments and print
+what `jig` prints, every diagnostic's notes and suggested fixes included; the standard
+library and runtime are built in. The rest of the command line (`run` with real effects,
+`get`, `trace`, `mcp`) is not ported yet; until it is,
 the Rust compiler (`compiler/`) is the one `jig` command and is kept passing the same tests.
 
 ## License

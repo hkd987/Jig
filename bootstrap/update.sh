@@ -14,6 +14,12 @@ build() { # build C_FILE EXE
   "$CC" -O2 -fno-math-errno -std=gnu11 -pthread "$1" -lm -o "$2"
 }
 
+# The standard library and runtime jigc carries (selfhost/sema/stdlib.jig).
+if [ "${1:-}" = "--check" ]; then
+  python3 bootstrap/stdlib.py --check
+else
+  python3 bootstrap/stdlib.py
+fi
 build bootstrap/jigc.c "$tmp/jigc0"
 "$tmp/jigc0" cc selfhost compiler/std >"$tmp/jigc1.c"
 if [ "${1:-}" = "--check" ]; then

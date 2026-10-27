@@ -213,7 +213,7 @@ fn jigc_matches_bootstrap() {
         let path = work.join(format!("case{i}.jig"));
         std::fs::write(&path, src).unwrap();
         for (cmd, expected) in [("tokens", jig::tools::debug::tokens(src)), ("ast", jig::tools::debug_ast::ast(src))] {
-            let out = Command::new(&exe).arg(cmd).arg(&path).output().unwrap();
+            let out = Command::new(&exe).arg("debug").arg(cmd).arg(&path).output().unwrap();
             let actual = String::from_utf8_lossy(&out.stdout);
             if actual != expected {
                 let first = expected.lines().zip(actual.lines()).find(|(a, b)| a != b);
@@ -352,7 +352,7 @@ fn mutate(s: &str, rng: &mut Rng) -> String {
 fn compare_check(exe: &Path, std_dir: &Path, dir: &Path) -> Option<String> {
     let dir = std::fs::canonicalize(dir).unwrap();
     let expected = jig::tools::debug_check::check(&dir);
-    let out = Command::new(exe).arg("check").arg(&dir).arg(std_dir).output().unwrap();
+    let out = Command::new(exe).args(["debug", "check"]).arg(&dir).env("JIG_STD", std_dir).output().unwrap();
     let actual = String::from_utf8_lossy(&out.stdout);
     let mut e: Vec<&str> = expected.lines().collect();
     let mut a: Vec<&str> = actual.lines().collect();
@@ -373,11 +373,12 @@ fn compare_check(exe: &Path, std_dir: &Path, dir: &Path) -> Option<String> {
 /// `jigc check` printed against `jig check`, as a person (text) and an agent (JSON) read
 /// it: every diagnostic with its notes, fixes and labels, the summary and the exit code. Both
 /// run in `cwd`, which file names are relative to.
-fn compare_check_cli(exe: &Path, std_dir: &Path, cwd: &Path, entry: &Path) -> Option<String> {
+fn compare_check_cli(exe: &Path, cwd: &Path, entry: &Path) -> Option<String> {
     for json in [false, true] {
         let run = |bin: &Path| {
             let mut cmd = Command::new(bin);
-            cmd.arg("check").arg(entry).current_dir(cwd).env("PWD", cwd).env("JIG_STD", std_dir);
+            // jigc's built-in standard library (the bootstrap compiler's is built in too).
+            cmd.arg("check").arg(entry).current_dir(cwd).env("PWD", cwd);
             if json {
                 cmd.arg("--json");
             }
@@ -456,7 +457,7 @@ fn jigc_checker_matches_bootstrap() {
     let mut failures: Vec<String> = Vec::new();
     for (proj, entry) in &cases {
         failures.extend(compare_check(exe, &std_dir, entry));
-        failures.extend(compare_check_cli(exe, &std_dir, proj, entry));
+        failures.extend(compare_check_cli(exe, proj, entry));
     }
     let mut rng = Rng(0x2545_f491_4f6c_dd1d);
     for k in 0..300 {
@@ -473,9 +474,7 @@ fn jigc_checker_matches_bootstrap() {
         }
         std::fs::write(f, src).unwrap();
         failures.extend(compare_check(exe, &std_dir, &entry).map(|m| format!("mutation {k} of {}: {m}", f.display())));
-        failures.extend(
-            compare_check_cli(exe, &std_dir, &copy, &entry).map(|m| format!("mutation {k} of {}: {m}", f.display())),
-        );
+        failures.extend(compare_check_cli(exe, &copy, &entry).map(|m| format!("mutation {k} of {}: {m}", f.display())));
     }
     assert!(failures.is_empty(), "{} cases differ:\n{}", failures.len(), failures.join("\n"));
 }
@@ -486,7 +485,8 @@ fn compare_c(exe: &Path, std_dir: &Path, dir: &Path) -> Option<String> {
     let dir = std::fs::canonicalize(dir).unwrap();
     let Ok(expected) = jig::tools::debug_check::c(&dir, false) else { return None };
     let cwd = std::env::current_dir().unwrap();
-    let out = Command::new(exe).arg("c").arg(&dir).arg(std_dir).env("PWD", &cwd).output().unwrap();
+    let out =
+        Command::new(exe).args(["debug", "c"]).arg(&dir).env("JIG_STD", std_dir).env("PWD", &cwd).output().unwrap();
     let actual = String::from_utf8_lossy(&out.stdout);
     if actual == expected && out.status.success() {
         return None;
@@ -557,6 +557,99 @@ fn bootstrap_is_current() {
     assert!(out.status.success(), "jigc cc failed: {}", String::from_utf8_lossy(&out.stderr));
     let checked_in = std::fs::read(root.join("bootstrap/jigc.c")).unwrap_or_default();
     assert!(out.stdout == checked_in, "bootstrap/jigc.c is stale: run bootstrap/update.sh");
+}
+
+/// `selfhost/sema/stdlib.jig` holds today's standard library and C runtime (the same text
+/// `bootstrap/stdlib.py` writes).
+#[test]
+fn stdlib_is_current() {
+    fn literal(text: &str) -> String {
+        let mut out = String::from("\"");
+        for c in text.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\t' => out.push_str("\\t"),
+                '\r' => out.push_str("\\r"),
+                c if (c as u32) < 32 => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        out
+    }
+    fn names(dir: &Path, exts: &[&str]) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| exts.iter().any(|x| n.ends_with(x)))
+            .collect();
+        v.sort();
+        v
+    }
+    let const_name = |prefix: &str, n: &str| format!("{prefix}{}", n.replace('.', "_").to_uppercase());
+    let root = repo_root();
+    let (std, rt) = (root.join("compiler/std"), root.join("compiler/runtime"));
+    let (sn, rn) = (names(&std, &[".jig"]), names(&rt, &[".c", ".h"]));
+    let mut lines: Vec<String> = vec![
+        "// Generated by bootstrap/stdlib.py; do not edit. The standard library, C runtime, diagnostic".into(),
+        "// codes and language reference jigc carries, as the bootstrap compiler carries them".into(),
+        "// (`include_str!`).".into(),
+        "".into(),
+        "/// The text of standard library file `name` (`io.jig`, `prelude.jig`, ...).".into(),
+        "fn std_source(name: Str) -> Option<Str> {".into(),
+        "  return match name {".into(),
+    ];
+    lines.extend(sn.iter().map(|n| format!("    \"{n}\" => Some({})", const_name("STD_", n))));
+    lines.extend(["    _ => None", "  }", "}", ""].map(String::from));
+    lines.extend(
+        [
+            "/// The text of C runtime file `name` (`jig_rt.c`, `jig_rt.h`).",
+            "fn runtime_source(name: Str) -> Option<Str> {",
+            "  return match name {",
+        ]
+        .map(String::from),
+    );
+    lines.extend(rn.iter().map(|n| format!("    \"{n}\" => Some({})", const_name("RT_", n))));
+    lines.extend(["    _ => None", "  }", "}", ""].map(String::from));
+    lines.extend(
+        [
+            "/// A diagnostic code's slug, summary and explanation (`jig explain`).",
+            "fn code_info(code: Int) -> Option<(Str, Str, Str)> {",
+            "  return match code {",
+        ]
+        .map(String::from),
+    );
+    for c in jig::diag::codes::ALL {
+        let n = c.code.0;
+        lines.push(format!("    {n} => Some((E{n:04}_SLUG, E{n:04}_SUMMARY, E{n:04}_EXPLAIN))"));
+    }
+    lines.extend(["    _ => None", "  }", "}", ""].map(String::from));
+    for c in jig::diag::codes::ALL {
+        let n = c.code.0;
+        lines.push(format!("const E{n:04}_SLUG: Str = {}", literal(c.slug)));
+        lines.push(format!("const E{n:04}_SUMMARY: Str = {}", literal(c.summary)));
+        lines.push(format!("const E{n:04}_EXPLAIN: Str = {}", literal(c.explain)));
+    }
+    lines.push(String::new());
+    lines.push("/// The language reference (`jig reference`).".into());
+    lines.push(format!("const REFERENCE: Str = {}", literal(jig::tools::mcp::REFERENCE)));
+    lines.push(String::new());
+    for (dir, prefix, ns) in [(&std, "STD_", &sn), (&rt, "RT_", &rn)] {
+        for n in ns {
+            let text = std::fs::read_to_string(dir.join(n)).unwrap();
+            lines.push(format!("const {}: Str = {}", const_name(prefix, n), literal(&text)));
+            lines.push(String::new());
+        }
+    }
+    let expected = lines.join("\n").trim_end_matches('\n').to_string() + "\n";
+    let actual = std::fs::read_to_string(root.join("selfhost/sema/stdlib.jig")).unwrap_or_default();
+    if actual != expected {
+        let dump = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("stdlib.expected.jig");
+        let _ = std::fs::write(&dump, &expected);
+        panic!("selfhost/sema/stdlib.jig is stale: run bootstrap/update.sh (expected text: {})", dump.display());
+    }
 }
 
 /// A mutation of a `.feature` file: words replaced by other values, keywords swapped, lines
@@ -752,7 +845,7 @@ fn compare_with_modules(exe: &Path, std_dir: &Path, dir: &Path, home: &Path) -> 
     };
     let jig = env!("CARGO_BIN_EXE_jig");
     let (_, expected) = run(Command::new(jig).args(["debug", "check"]).arg(dir));
-    let (_, actual) = run(Command::new(exe).arg("check").arg(dir).arg(std_dir));
+    let (_, actual) = run(Command::new(exe).args(["debug", "check"]).arg(dir).env("JIG_STD", std_dir));
     let mut e: Vec<&str> = expected.lines().collect();
     let mut a: Vec<&str> = actual.lines().collect();
     e.sort();
@@ -764,7 +857,7 @@ fn compare_with_modules(exe: &Path, std_dir: &Path, dir: &Path, home: &Path) -> 
     }
     let (ok, expected) = run(Command::new(jig).args(["debug", "c"]).arg(dir));
     if ok {
-        let (_, actual) = run(Command::new(exe).arg("c").arg(dir).arg(std_dir));
+        let (_, actual) = run(Command::new(exe).args(["debug", "c"]).arg(dir).env("JIG_STD", std_dir));
         if actual != expected {
             return Some(format!("{}: the C programs differ", dir.display()));
         }
@@ -956,7 +1049,7 @@ fn jigc_formatter_matches_bootstrap() {
     let compare = |src: &str, name: &str| -> Option<String> {
         let path = work.join(name);
         std::fs::write(&path, src).unwrap();
-        let out = Command::new(exe).arg("fmt").arg(&path).output().unwrap();
+        let out = Command::new(exe).args(["debug", "fmt"]).arg(&path).output().unwrap();
         let actual = out.status.success().then(|| String::from_utf8_lossy(&out.stdout).to_string());
         let expected = jig::fmt::format_source(src).ok();
         if actual == expected {
@@ -1018,8 +1111,15 @@ fn compare_tests(exe: &Path, std_dir: &Path, dir: &Path) -> Option<String> {
     let root = std::fs::canonicalize(repo_root()).unwrap();
     let jig = env!("CARGO_BIN_EXE_jig");
     let (_, expected) = output_within(Command::new(jig).args(["test", "--json"]).arg(dir).current_dir(&root), 20)?;
-    let out =
-        output_within(Command::new(exe).arg("test").arg(dir).arg(std_dir).current_dir(&root).env("PWD", &root), 120);
+    let out = output_within(
+        Command::new(exe)
+            .args(["test", "--json"])
+            .arg(dir)
+            .env("JIG_STD", std_dir)
+            .current_dir(&root)
+            .env("PWD", &root),
+        120,
+    );
     let actual = match out {
         Some((_, a)) => a,
         None => return Some(format!("{}: jigc test timed out", dir.display())),
@@ -1066,7 +1166,7 @@ fn jigc_tests_match_bootstrap() {
         let d = work.join(format!("run-{name}"));
         write_file(&d.join("main.jig"), &src);
         let expected = std::fs::read_to_string(p.with_extension("out")).unwrap_or_default();
-        let out = Command::new(exe).arg("sim").arg(&d).arg(&std_dir).output().unwrap();
+        let out = Command::new(exe).args(["debug", "sim"]).arg(&d).env("JIG_STD", &std_dir).output().unwrap();
         if String::from_utf8_lossy(&out.stdout) != expected {
             failures.push(format!("jigc sim {name}: {:?}", String::from_utf8_lossy(&out.stdout)));
         }
@@ -1126,7 +1226,7 @@ fn compare_vc(exe: &Path, std_dir: &Path, dir: &Path, std: bool) -> Option<Strin
     let dir = std::fs::canonicalize(dir).unwrap();
     let expected = jig::tools::debug_check::vc(&dir, std).ok();
     let mut cmd = Command::new(exe);
-    cmd.arg("vc").arg(&dir).arg(std_dir);
+    cmd.args(["debug", "vc"]).arg(&dir).env("JIG_STD", std_dir);
     if std {
         cmd.arg("std");
     }
@@ -1230,7 +1330,7 @@ fn compare_prove(exe: &Path, std_dir: &Path, dir: &Path) -> Option<String> {
         Command::new(exe)
             .arg("prove")
             .arg(dir)
-            .arg(std_dir)
+            .env("JIG_STD", std_dir)
             .args(["--json", "--no-cache"])
             .current_dir(&root)
             .env("PWD", &root),
@@ -1355,7 +1455,7 @@ fn jigc_proof_cache_matches_bootstrap() {
                 Command::new(exe)
                     .arg("prove")
                     .arg(&d)
-                    .arg(&std_dir)
+                    .env("JIG_STD", &std_dir)
                     .arg("--json")
                     .current_dir(&rootc)
                     .env("PWD", &rootc),
@@ -1381,7 +1481,14 @@ fn jigc_proof_cache_matches_bootstrap() {
         // Builds use the proofs: the same checks are removed from the same C.
         let expected = jig::tools::debug_check::c(&d, true).unwrap_or_default();
         let cwd = std::env::current_dir().unwrap();
-        let out = Command::new(exe).arg("c").arg(&d).arg(&std_dir).arg("proofs").env("PWD", &cwd).output().unwrap();
+        let out = Command::new(exe)
+            .args(["debug", "c"])
+            .arg(&d)
+            .arg("proofs")
+            .env("JIG_STD", &std_dir)
+            .env("PWD", &cwd)
+            .output()
+            .unwrap();
         let unproved = jig::tools::debug_check::c(&d, false).unwrap_or_default();
         if String::from_utf8_lossy(&out.stdout) != expected || expected == unproved {
             failures.push(format!("{src}: the C with proofs differs (or no check was removed)"));

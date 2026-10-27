@@ -32,6 +32,23 @@ fn std_package_paths() -> List<Str> {
   return out
 }
 
+/// A standard library file: read from `std_dir`, or the built-in copy when it is empty.
+fn read_std(std_dir: Str, file: Str) -> Result<Str, Str> effects {fs} {
+  if std_dir.is_empty() {
+    return std_source(file).ok_or("no standard library file `" + file + "`")
+  }
+  return fs.read(join_path(std_dir, file))
+}
+
+/// A C runtime file: read from `std_dir/../runtime`, or the built-in copy when `std_dir` is
+/// empty.
+fn read_runtime(std_dir: Str, file: Str) -> Result<Str, Str> effects {fs} {
+  if std_dir.is_empty() {
+    return runtime_source(file).ok_or("no runtime file `" + file + "`")
+  }
+  return fs.read(std_dir + "/../runtime/" + file)
+}
+
 fn join_path(a: Str, b: Str) -> Str {
   if a.ends_with("/") {
     return a + b
@@ -470,7 +487,7 @@ fn Loader.add_file(&mut self, p: Int, path: Str, text: Str) {
 /// A standard package (the prelude is `<prelude>`).
 fn Loader.add_std(&mut self, path: Str, file: Str) -> Int effects {fs} {
   let p = self.new_package(path, true, None)
-  let text = match fs.read(join_path(self.std_dir, file)) {
+  let text = match read_std(self.std_dir, file) {
     Ok(t) => t
     Err(e) => {
       self.diags.push(diag("E0902", dummy_span(), "cannot read the standard library: " + e))

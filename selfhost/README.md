@@ -10,15 +10,21 @@ bootstrap compiler on every `.jig` file in the repository plus a few hundred mut
 
 | Pass | Bootstrap | Port | Check |
 | --- | --- | --- | --- |
-| Lexer | `compiler/src/syntax/lexer.rs` | `syntax/lexer.jig` | `jigc tokens FILE` = `jig debug tokens FILE` |
-| Parser | `compiler/src/syntax/parser.rs` | `syntax/ast.jig`, `syntax/parser.jig` | `jigc ast FILE` = `jig debug ast FILE` |
-| Checker: loading, collection, types, effects, exhaustiveness, lints, dead code, feature binding | `compiler/src/sema/`, `compiler/src/feature/` | `sema/` | `jigc check DIR STD` = `jig debug check DIR` |
+| Lexer | `compiler/src/syntax/lexer.rs` | `syntax/lexer.jig` | `jigc debug tokens FILE` = `jig debug tokens FILE` |
+| Parser | `compiler/src/syntax/parser.rs` | `syntax/ast.jig`, `syntax/parser.jig` | `jigc debug ast FILE` = `jig debug ast FILE` |
+| Checker: loading, collection, types, effects, exhaustiveness, lints, dead code, feature binding | `compiler/src/sema/`, `compiler/src/feature/` | `sema/` | `jigc debug check DIR` = `jig debug check DIR` |
 | `jig check`: project analysis, diagnostics as text and JSON | `compiler/src/tools/project.rs`, `compiler/src/diag/` | `sema/project.jig`, `sema/render.jig` | `jigc check [PATH] [--json]` = `jig check [PATH] [--json]` |
-| MIR lowering, ownership analyses, C back end | `compiler/src/mir/lower.rs`, `compiler/src/codegen/` | `sema/mir.jig`, `sema/lower*.jig`, `sema/own.jig`, `sema/cgen*.jig` | `jigc c DIR STD` = `jig debug c DIR` |
-| Formatter | `compiler/src/fmt/` | `syntax/fmt.jig`, `syntax/fmt_expr.jig` | `jigc fmt FILE` = `jig fmt FILE` |
-| Interpreter, test runner, property tests | `compiler/src/mir/interp.rs`, `compiler/src/runner.rs`, `compiler/src/proptest.rs` | `sema/interp.jig`, `sema/intrinsics.jig`, `sema/runner.jig` | `jigc test DIR STD` = `jig test --json DIR` |
-| Prover: verification conditions | `compiler/src/verify/vc.rs`, `frame.rs` | `sema/vc*.jig`, `sema/frame.jig` | `jigc vc DIR STD` = `jig debug vc DIR` |
-| Prover: solving, replay, reports | `compiler/src/verify/mod.rs`, `smt.rs` | `sema/prove.jig` | `jigc prove DIR STD --json` = `jig prove --json --no-cache DIR` |
+| MIR lowering, ownership analyses, C back end | `compiler/src/mir/lower.rs`, `compiler/src/codegen/` | `sema/mir.jig`, `sema/lower*.jig`, `sema/own.jig`, `sema/cgen*.jig` | `jigc debug c DIR` = `jig debug c DIR` |
+| Formatter | `compiler/src/fmt/` | `syntax/fmt.jig`, `syntax/fmt_expr.jig` | `jigc fmt [--check] PATH` = `jig fmt [--check] PATH` |
+| Interpreter, test runner, property tests | `compiler/src/mir/interp.rs`, `compiler/src/runner.rs`, `compiler/src/proptest.rs` | `sema/interp.jig`, `sema/intrinsics.jig`, `sema/runner.jig` | `jigc test [--json] DIR` = `jig test [--json] DIR` |
+| Prover: verification conditions | `compiler/src/verify/vc.rs`, `frame.rs` | `sema/vc*.jig`, `sema/frame.jig` | `jigc debug vc DIR` = `jig debug vc DIR` |
+| Prover: solving, replay, reports | `compiler/src/verify/mod.rs`, `smt.rs` | `sema/prove.jig` | `jigc prove --json DIR` = `jig prove --json DIR` |
+
+Its command line is `jig`'s: `jigc check`, `test`, `prove`, `build` and `fmt` take the same
+arguments and print the same, and the dumps the tests compare are `jigc debug ...`, as in
+`jig debug ...`. It carries the standard library and the C runtime (`sema/stdlib.jig`, written
+by `bootstrap/stdlib.py` and kept current by a test); `$JIG_STD` names a directory to read
+instead.
 
 `jigc` compiles itself: `jigc cc selfhost compiler/std` prints a self-contained C file that a
 C compiler builds into a `jigc` printing the same file again. That file is checked in as
@@ -69,7 +75,7 @@ argument register.
 
 The prover (`sema/frame.jig`, `sema/vc*.jig`, `sema/prove.jig`) evaluates each function
 symbolically into SMT-LIB obligations, as the bootstrap compiler's `verify/` does, and the
-test requires the same text: `jigc vc DIR STD` prints what `jig debug vc DIR` prints (every
+test requires the same text: `jigc debug vc DIR` prints what `jig debug vc DIR` prints (every
 declaration, path fact and goal) for every example, run test, prover test, agent solution,
 the standard library and 200 mutations, and for `jigc` itself (5.7 million lines, which jigc
 generates eight times faster). `jigc prove` then runs Z3 once on a script of every
@@ -78,9 +84,9 @@ and replays failed contracts on the interpreter; its report matches `jig prove -
 on the prover tests, examples, agent solutions and 60 mutations. It shares `jig prove`'s proof
 cache: the same keys (the bootstrap's stable hash, ported in `sema/hash.jig`, over the same
 contract texts and frames) and the same files, so either compiler reads what the other
-proved. Builds use those proofs as the bootstrap's do: `jigc c DIR STD proofs` prints what
+proved. Builds use those proofs as the bootstrap's do: `jigc debug c DIR proofs` prints what
 `jig debug c DIR proofs` prints (the checks discharged removed from lowering and the C), and
-`jigc build DIR STD [--release]` compiles it.
+`jigc build DIR [--release]` compiles it.
 
 The back end (about 6,600 lines of Jig for 7,300 of Rust) lowers to the same MIR, runs the
 same ownership analyses (borrowed locals, last uses, unique lists) and prints the same C:

@@ -620,7 +620,7 @@ fn Sema.global_key(self, std_dir: Str, solver: Str) -> Str effects {fs} {
   for p in ["io", "fs", "os", "time", "rand", "math", "task", "sim", "net", "lists", "strings"] {
     h.str("std/" + p)
     h.str(p + ".jig")
-    h.str(fs.read(join_path(std_dir, p + ".jig")).unwrap_or(""))
+    h.str(read_std(std_dir, p + ".jig").unwrap_or(""))
   }
   for pkg in self.pkgs {
     if pkg.is_std {

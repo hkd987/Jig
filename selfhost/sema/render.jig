@@ -5,6 +5,30 @@
 
 import "syntax"
 
+/// The source files diagnostics point into.
+struct Files {
+  files: List<SrcFile>
+}
+
+/// Every file of the program, `.feature` files included.
+fn Sema.files(self) -> Files {
+  var out: List<SrcFile> = []
+  for p in self.pkgs {
+    out.extend(p.files)
+    out.extend(p.features)
+  }
+  return Files { files: out }
+}
+
+fn Files.at(self, pos: Int) -> Option<SrcFile> {
+  for f in self.files {
+    if f.base <= pos && pos <= f.base + f.text.len() {
+      return Some(f)
+    }
+  }
+  return None
+}
+
 /// A global offset's file, 1-based line and 1-based column (in characters).
 struct LineCol {
   file: SrcFile
@@ -12,8 +36,8 @@ struct LineCol {
   col: Int
 }
 
-fn Sema.line_col(self, pos: Int) -> Option<LineCol> {
-  let f = self.src_file_at(pos)?
+fn Files.line_col(self, pos: Int) -> Option<LineCol> {
+  let f = self.at(pos)?
   let bs = f.text.bytes()
   let off = pos - f.base
   var line = 1
@@ -99,7 +123,7 @@ struct Shown {
 }
 
 /// The diagnostic as `jig check` prints it (no colors).
-fn Sema.render_diag(self, d: syntax.Diag, cwd: Str) -> Str {
+fn Files.render(self, d: syntax.Diag, cwd: Str) -> Str {
   var out = "error[" + d.code + "]: " + d.msg + "\n"
   var shown: List<Shown> = []
   if !is_dummy(d.lo, d.hi) {
@@ -165,7 +189,7 @@ fn Sema.render_diag(self, d: syntax.Diag, cwd: Str) -> Str {
 }
 
 /// `"file":...,"span":{...}` for a span, with a leading comma; nothing for none.
-fn Sema.span_json(self, lo: Int, hi: Int, cwd: Str) -> Str {
+fn Files.span_json(self, lo: Int, hi: Int, cwd: Str) -> Str {
   if is_dummy(lo, hi) {
     return ""
   }
@@ -199,7 +223,7 @@ fn Sema.span_json(self, lo: Int, hi: Int, cwd: Str) -> Str {
 }
 
 /// The diagnostic as `jig check --json` prints it.
-fn Sema.diag_json(self, d: syntax.Diag, cwd: Str) -> Str {
+fn Files.json(self, d: syntax.Diag, cwd: Str) -> Str {
   var out = "{\"code\":" +
     json_str(d.code) +
     ",\"severity\":\"error\",\"message\":" +

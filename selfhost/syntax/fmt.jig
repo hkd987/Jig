@@ -76,14 +76,14 @@ struct Printer {
   has: Set<Key>
 }
 
-/// Format `src`, or say why it cannot be: it does not parse.
-pub fn format_source(src: Str) -> Result<Str, Str> {
-  let parsed = parse(src, 0)
+/// Format `src`, or say why it cannot be: the syntax errors (the source's first byte is at
+/// offset 1, as the bootstrap compiler places one file).
+pub fn format_source(src: Str) -> Result<Str, List<Diag>> {
+  let parsed = parse(src, 1)
   if !parsed.errors.is_empty() {
-    let d = parsed.errors[0]
-    return Err(d.code + " at byte " + d.lo.str() + ": " + d.msg)
+    return Err(parsed.errors)
   }
-  let lx = lex(src, 0)
+  let lx = lex(src, 1)
   var claimed: List<Bool> = []
   for _ in lx.comments {
     claimed.push(false)
@@ -91,7 +91,7 @@ pub fn format_source(src: Str) -> Result<Str, Str> {
   var p = Printer {
     ast: parsed.ast
     src: src
-    base: 0
+    base: 1
     comments: lx.comments
     blank_lines: lx.blank_lines
     claimed: claimed

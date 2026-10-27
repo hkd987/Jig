@@ -202,8 +202,10 @@ and 0.1.0-alpha is ready to tag (`.github/workflows/release.yml`).
       `jig debug vc`; 5.7 million lines for jigc itself), and `jigc prove` reports the same
       statuses, counterexamples and replays as `jig prove`, and shares its proof cache (the
       same keys and files); `jigc build` removes the checks cached proofs discharge, with
-      the same C as `jig build`; `jigc check` prints `jig check`'s diagnostics, notes and
-      fixes included, as text and JSON. Left: the rest of the command line.
+      the same C as `jig build`. Its command line is `jig`'s: `check` (every diagnostic's
+      notes and fixes, text and JSON), `test`, `prove`, `build`, `fmt`, `explain` and
+      `reference` print what `jig` prints, with the standard library built in. Left: `run`
+      with real effects, `get`, `trace`, `search`, `traces`, `hook` and `mcp`.
 - [ ] Agent benchmark vs. Rust and TypeScript. `bench/agents`: six tasks with acceptance cases
       and reference solutions in all three languages (checked in CI), and a harness that runs
       an agent per task and language and reports tasks solved and turns. Results need agent

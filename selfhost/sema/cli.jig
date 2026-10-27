@@ -1,0 +1,410 @@
+// The commands `jigc` shares with `jig`, ported from the bootstrap compiler's `cli.rs`: each
+// returns what `jig` prints on standard output and on standard error, and its exit code.
+
+import "std/fs"
+import "std/time"
+import "syntax"
+
+/// What a command prints, and its exit code.
+pub struct Output {
+  pub out: Str
+  pub err: Str
+  pub code: Int
+}
+
+fn output(out: Str, err: Str, code: Int) -> Output {
+  return Output { out: out, err: err, code: code }
+}
+
+fn plural_s(n: Int) -> Str {
+  return if n == 1 { "" } else { "s" }
+}
+
+/// The analysis's diagnostics as `jig` reports them before giving up on a command.
+fn Sema.error_output(self, json: Bool, cwd: Str) -> Output {
+  let files = self.files()
+  var out = ""
+  for d in self.diags {
+    out += if json { files.json(d, cwd) + "\n" } else { files.render(d, cwd) + "\n" }
+  }
+  let n = self.diags.len()
+  return output(out, if json { "" } else { n.str() + " error" + plural_s(n) + "\n" }, 1)
+}
+
+/// A string as Rust's `{:?}` shows it.
+fn debug_str(s: Str) -> Str {
+  var out = "\""
+  for c in s.chars() {
+    let v = c as Int
+    if c == '"' {
+      out += "\\\""
+    } else if c == '\\' {
+      out += "\\\\"
+    } else if c == '\n' {
+      out += "\\n"
+    } else if c == '\r' {
+      out += "\\r"
+    } else if c == '\t' {
+      out += "\\t"
+    } else if v == 0 {
+      out += "\\0"
+    } else if v < 32 || v == 127 {
+      out += "\\u{" + hex_lower(v) + "}"
+    } else {
+      out += c.str()
+    }
+  }
+  return out + "\""
+}
+
+fn hex_lower(v: Int) -> Str {
+  let digits = "0123456789abcdef"
+  if v < 16 {
+    return digits[v..v + 1]
+  }
+  return hex_lower(v / 16) + digits[v % 16..v % 16 + 1]
+}
+
+/// `jigc test [PATH] [FILTER] [--json]`: run the package's tests and scenarios on the
+/// interpreter, as `jig test` does.
+fn test_cmd(dir: Str, std_dir: Str, cwd: Str, filter: Str, json: Bool) -> Output
+  effects {fs, env, ffi, clock}
+{
+  let (s, _) = analyze(dir, std_dir)
+  if !s.diags.is_empty() {
+    return s.error_output(json, cwd)
+  }
+  let start = time.now_ms()
+  let results = run_tests(new_lw(s), cwd, filter)
+  var out = ""
+  var failed = 0
+  for r in results {
+    if !r.passed {
+      failed += 1
+    }
+    if json {
+      out += test_result_json(r) + "\n"
+    } else if r.passed {
+      out += "ok      " + r.name + " (" + r.pkg + ")\n"
+    } else {
+      out += "FAILED  " + r.name + " (" + r.pkg + ")\n"
+      out += "        " + r.message.replace("\n", "\n        ") + "\n"
+      if !r.location.is_empty() {
+        out += "        at " + r.location + "\n"
+      }
+      if !r.stdout.is_empty() {
+        out += "        stdout: " + debug_str(r.stdout) + "\n"
+      }
+    }
+  }
+  var err = ""
+  if json {
+    out += "{\"kind\":\"summary\",\"passed\":" +
+      (results.len() - failed).str() +
+      ",\"failed\":" +
+      failed.str() +
+      "}\n"
+  } else {
+    let ms = time.now_ms() - start
+    err = (results.len() - failed).str() +
+      " passed, " +
+      failed.str() +
+      " failed (" +
+      ms.str() +
+      " ms)\n"
+  }
+  return output(out, err, if failed == 0 { 0 } else { 1 })
+}
+
+/// `.jig` files under a path: the file itself, or a directory searched recursively in name
+/// order, skipping hidden directories and `target`.
+fn collect_jig_files(p: Str, out: &mut List<Str>) effects {fs} {
+  let names = match fs.list(p) {
+    Ok(ns) => ns
+    Err(_) => {
+      if p.ends_with(".jig") && fs.exists(p) {
+        out.push(p)
+      }
+      return
+    }
+  }
+  for name in names {
+    if name.starts_with(".") || name == "target" {
+      continue
+    }
+    collect_jig_files(join_path(p, name), &mut out)
+  }
+}
+
+/// `jigc fmt [PATH...] [--check]`: format `.jig` files in place, or with `--check` list those
+/// that are not formatted, as `jig fmt` does.
+fn fmt_cmd(targets: List<Str>, check: Bool) -> Output effects {fs} {
+  var files: List<Str> = []
+  for t in if targets.is_empty() { ["."] } else { targets } {
+    collect_jig_files(t, &mut files)
+  }
+  var out = ""
+  var err = ""
+  var changed = 0
+  var failed = 0
+  for f in files {
+    let src = match fs.read(f) {
+      Ok(t) => t
+      Err(_) => {
+        err += "error: cannot read " + f + "\n"
+        failed += 1
+        continue
+      }
+    }
+    match syntax.format_source(src) {
+      Ok(text) => if text != src {
+        changed += 1
+        if check {
+          out += f + "\n"
+        } else if fs.write(f, text).is_err() {
+          err += "error: cannot write " + f + "\n"
+          failed += 1
+        }
+      }
+      Err(diags) => {
+        let input = Files {
+          files: [SrcFile { path: "<input>", base: 1, text: src, ast: empty_ast() }]
+        }
+        var shown = ""
+        for d in diags {
+          shown += input.render(d, "")
+        }
+        err += f + ": cannot format a file that does not parse:\n" + shown + "\n"
+        failed += 1
+      }
+    }
+  }
+  if check && changed > 0 {
+    return output(out, err + changed.str() + " file" + plural_s(changed) + " not formatted\n", 1)
+  }
+  if !check && changed > 0 {
+    err += "formatted " + changed.str() + " file" + plural_s(changed) + "\n"
+  }
+  return output(out, err, if failed > 0 { 1 } else { 0 })
+}
+
+// ---------- the command line ----------
+
+fn usage() -> Str {
+  return [
+    "usage: jigc <command> [path] [options]",
+    "",
+    "commands:",
+    "  check [--json]          parse, types, effects, lints and dead code for the project",
+    "  test [filter] [--json]  run tests in the deterministic runner",
+    "  prove [filter] [--json] [--verbose]  prove contracts and safety with an SMT solver (cached)",
+    "  build [--release] [-o out]  compile main to a native executable (C)",
+    "  fmt [--check]           format .jig files in place",
+    "  cc DIR [STD]            DIR's release build as one C file, the runtime included",
+    "  debug tokens|ast|fmt FILE, debug check|c|vc|sim DIR",
+    "                          the dumps compared with the bootstrap compiler's `jig debug`",
+    "",
+    "The standard library is built in; `$JIG_STD` names a directory to read instead.",
+  ].join("\n") +
+    "\n"
+}
+
+/// The options every command takes, as `jig` reads them: `--json`, the first argument that
+/// names an existing path (a file stands for its directory; `.` by default), and the rest.
+struct Opts {
+  json: Bool
+  path: Str
+  rest: List<Str>
+}
+
+fn parse_opts(args: List<Str>) -> Opts effects {fs} {
+  var json = false
+  var path = ""
+  var rest: List<Str> = []
+  for a in args {
+    if a == "--json" {
+      json = true
+    } else if a.starts_with("--") {
+      rest.push(a)
+    } else if path.is_empty() && fs.exists(a) {
+      path = a
+    } else {
+      rest.push(a)
+    }
+  }
+  if path.is_empty() {
+    path = "."
+  }
+  if !is_dir(path) {
+    path = parent_dir(path).unwrap_or(".")
+  }
+  return Opts { json: json, path: path, rest: rest }
+}
+
+/// The first argument that is not a flag, or "".
+fn first_word(args: List<Str>) -> Str {
+  for a in args {
+    if !a.starts_with("--") {
+      return a
+    }
+  }
+  return ""
+}
+
+fn result_output(r: Result<Str, Str>) -> Output {
+  return match r {
+    Ok(text) => output(text, "", 0)
+    Err(e) => output("", "error: " + e + "\n", 1)
+  }
+}
+
+/// Run `jigc ARGS` (without the program name) in `cwd`: what it prints, and its exit code.
+pub fn run_cli(args: List<Str>, cwd: Str, std_dir: Str) -> Output effects {fs, env, ffi, clock} {
+  if args.is_empty() {
+    return output("", usage(), 2)
+  }
+  let cmd = args[0]
+  let rest = args[1..args.len()]
+  if cmd == "check" {
+    let o = parse_opts(rest)
+    return check_cmd(o.path, std_dir, cwd, o.json)
+  }
+  if cmd == "test" {
+    let o = parse_opts(rest)
+    return test_cmd(absolute_path(o.path, cwd), std_dir, cwd, first_word(o.rest), o.json)
+  }
+  if cmd == "prove" {
+    let o = parse_opts(rest)
+    var flags = o.rest
+    if o.json {
+      flags.push("--json")
+    }
+    return prove_cmd(absolute_path(o.path, cwd), std_dir, cwd, flags)
+  }
+  if cmd == "build" {
+    // `-o OUT` first, so OUT is not taken for the project's path.
+    var kept: List<Str> = []
+    var out: List<Str> = []
+    var i = 0
+    for i < rest.len() {
+      if rest[i] == "-o" && i + 1 < rest.len() {
+        out = ["-o", rest[i + 1]]
+        i += 2
+        continue
+      }
+      kept.push(rest[i])
+      i += 1
+    }
+    let o = parse_opts(kept)
+    var flags = o.rest
+    flags.extend(out)
+    return build_cmd(absolute_path(o.path, cwd), std_dir, cwd, flags)
+  }
+  if cmd == "fmt" {
+    var targets: List<Str> = []
+    for a in rest {
+      if !a.starts_with("--") {
+        targets.push(a)
+      }
+    }
+    return fmt_cmd(targets, rest.contains("--check"))
+  }
+  if cmd == "reference" {
+    return output(REFERENCE, "", 0)
+  }
+  if cmd == "version" || cmd == "--version" {
+    return output("jig " + JIG_VERSION + "\n", "", 0)
+  }
+  if cmd == "explain" {
+    let info = match rest.first() {
+      Some(c) => parse_code(c)
+      None => None
+    }
+    return match info {
+      Some((n, (slug, summary, explain))) => output(
+        code_name(n) + " (" + slug + "): " + summary + "\n\n" + explain + "\n",
+        "",
+        0,
+      )
+      None => output("", "usage: jig explain <code>\n", 2)
+    }
+  }
+  if cmd == "cc" && (rest.len() == 1 || rest.len() == 2) {
+    // The standard library may follow (the form bootstrap/update.sh has always used).
+    let std = if rest.len() == 2 { rest[1] } else { std_dir }
+    return result_output(c_unit(absolute_path(rest[0], cwd), std, cwd))
+  }
+  if cmd == "debug" && rest.len() >= 2 {
+    let sub = rest[0]
+    let target = rest[1]
+    let flag = if rest.len() > 2 { rest[2] } else { "" }
+    if sub == "tokens" || sub == "ast" || sub == "fmt" {
+      let src = match fs.read(target) {
+        Ok(t) => t
+        Err(e) => {
+          return output("", e + "\n", 1)
+        }
+      }
+      if sub == "tokens" {
+        return output(syntax.dump_tokens(src), "", 0)
+      }
+      if sub == "ast" {
+        return output(syntax.dump_ast(src), "", 0)
+      }
+      return match syntax.format_source(src) {
+        Ok(text) => output(text, "", 0)
+        Err(diags) => output(
+          "",
+          "error: " + target + " does not parse (" + diags[0].code + ")\n",
+          1,
+        )
+      }
+    }
+    let dir = absolute_path(target, cwd)
+    if sub == "check" {
+      return output(check_dump(dir, std_dir), "", 0)
+    }
+    if sub == "c" {
+      return result_output(
+        if flag == "proofs" { c_dump_proved(dir, std_dir, cwd) } else { c_dump(dir, std_dir, cwd) },
+      )
+    }
+    if sub == "vc" {
+      return result_output(vc_dump(dir, std_dir, flag == "std"))
+    }
+    if sub == "sim" {
+      return result_output(sim_main(dir, std_dir, cwd))
+    }
+  }
+  return output("", usage(), 2)
+}
+
+/// `E0301`, `e0301` or `301`: the code and its registry entry, if it is a known code.
+fn parse_code(s: Str) -> Option<(Int, (Str, Str, Str))> {
+  var t = s.trim()
+  for t.starts_with("E") || t.starts_with("e") {
+    t = t[1..t.len()]
+  }
+  if t.is_empty() || t.len() > 5 {
+    return None
+  }
+  for b in t.bytes() {
+    if b < 48 || b > 57 {
+      return None
+    }
+  }
+  let n = t.to_int()?
+  if n > 65535 {
+    return None
+  }
+  return match code_info(n) {
+    Some(info) => Some((n, info))
+    None => None
+  }
+}
+
+/// `E` and the number in four digits.
+fn code_name(n: Int) -> Str {
+  let s = n.str()
+  return "E" + "0".repeat(max(4 - s.len(), 0)) + s
+}

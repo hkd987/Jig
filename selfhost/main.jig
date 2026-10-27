@@ -1,168 +1,25 @@
 import "sema"
-import "std/fs"
 import "std/io"
 import "std/os"
-import "syntax"
 
-// jigc: the Jig compiler, written in Jig. `jigc tokens FILE`, `jigc ast FILE`,
-// `jigc check DIR STD` and `jigc c DIR STD` print the same text as `jig debug tokens FILE`,
-// `jig debug ast FILE`, `jig debug check DIR` and `jig debug c DIR` (STD is the standard
-// library's directory, `compiler/std`; `c` prints the C program a release build compiles).
-// `jigc cc DIR STD` prints that program with the runtime inlined: one C file that a C
-// compiler alone builds, which is how `bootstrap/jigc.c` is made. `jigc fmt FILE` prints
-// the file as `jig fmt` writes it. `jigc test DIR STD [FILTER]` runs DIR's tests and
-// scenarios on the interpreter and prints the lines of `jig test --json`; `jigc sim DIR STD`
-// runs `main` there with simulated effects. `jigc vc DIR STD [std]` prints the verification
-// conditions `jig debug vc DIR [std]` prints, and `jigc prove DIR STD [--json] [--verbose]
-// [--std] [FILTER]` proves them as `jig prove` does (with z3, or `$JIG_Z3`), sharing its
-// proof cache, and `jigc build DIR STD [--release] [-o OUT]` builds an executable with the
-// checks the cached proofs discharge removed. `jigc check [PATH] [--json]` checks the project
-// as `jig check` does and prints the same diagnostics (the standard library is `$JIG_STD`).
+// jigc: the Jig compiler, written in Jig. `jigc check`, `test`, `prove`, `build` and `fmt` take
+// the same arguments as `jig`'s and print the same; `jigc debug ...` prints the dumps the tests
+// compare with `jig debug ...`, and `jigc cc DIR` the one C file that is `bootstrap/jigc.c`
+// for `selfhost` (see `sema/cli.jig`).
 
 fn main() effects {io, fs, env, ffi, clock} {
   let args = os.args()
-  if args.len() == 4 &&
-    args[1] == "check" &&
-    !args[2].starts_with("--") &&
-    !args[3].starts_with("--") {
-    io.print(sema.check_dump(args[2], args[3]))
-    return
+  let o = sema.run_cli(
+    args[1..args.len()],
+    os.env("PWD").unwrap_or(""),
+    os.env("JIG_STD").unwrap_or(""),
+  )
+  io.print(o.out)
+  if !o.err.is_empty() {
+    // Standard error has no print without a line break.
+    io.eprintln(if o.err.ends_with("\n") { o.err[0..o.err.len() - 1] } else { o.err })
   }
-  if args.len() >= 2 && args.len() <= 4 && args[1] == "check" {
-    var path = "."
-    var json = false
-    for a in args[2..args.len()] {
-      if a == "--json" {
-        json = true
-      } else {
-        path = a
-      }
-    }
-    let std_dir = match os.env("JIG_STD") {
-      Some(d) => d
-      None => {
-        io.eprintln("error: set JIG_STD to the standard library's directory")
-        os.exit(2)
-      }
-    }
-    let (out, summary, code) = sema.check_cmd(path, std_dir, os.env("PWD").unwrap_or(""), json)
-    io.print(out)
-    if !summary.is_empty() {
-      io.eprintln(summary)
-    }
-    if code != 0 {
-      os.exit(code)
-    }
-    return
-  }
-  if (args.len() == 4 || (args.len() == 5 && args[4] == "proofs")) &&
-    (args[1] == "c" || args[1] == "cc") {
-    let cwd = os.env("PWD").unwrap_or("")
-    let out = if args.len() == 5 {
-      sema.c_dump_proved(args[2], args[3], cwd)
-    } else if args[1] == "c" {
-      sema.c_dump(args[2], args[3], cwd)
-    } else {
-      sema.c_unit(args[2], args[3], cwd)
-    }
-    match out {
-      Ok(c) => io.print(c)
-      Err(e) => {
-        io.eprintln("error: " + e)
-        os.exit(1)
-      }
-    }
-    return
-  }
-  if (args.len() == 4 || args.len() == 5) && args[1] == "test" {
-    let cwd = os.env("PWD").unwrap_or("")
-    match sema.test_json(args[2], args[3], cwd, if args.len() == 5 { args[4] } else { "" }) {
-      Ok((lines, passed)) => {
-        io.print(lines)
-        if !passed {
-          os.exit(1)
-        }
-      }
-      Err(e) => {
-        io.eprintln("error: " + e)
-        os.exit(1)
-      }
-    }
-    return
-  }
-  if args.len() >= 4 && args[1] == "build" {
-    let (out, code) = sema.build_cmd(
-      args[2],
-      args[3],
-      os.env("PWD").unwrap_or(""),
-      args[4..args.len()],
-    )
-    io.print(out)
-    if code != 0 {
-      os.exit(code)
-    }
-    return
-  }
-  if args.len() >= 4 && args[1] == "prove" {
-    let (out, code) = sema.prove_cmd(
-      args[2],
-      args[3],
-      os.env("PWD").unwrap_or(""),
-      args[4..args.len()],
-    )
-    io.print(out)
-    if code != 0 {
-      os.exit(code)
-    }
-    return
-  }
-  if (args.len() == 4 || args.len() == 5) && args[1] == "vc" {
-    match sema.vc_dump(args[2], args[3], args.len() == 5 && args[4] == "std") {
-      Ok(out) => io.print(out)
-      Err(e) => {
-        io.eprintln("error: " + e)
-        os.exit(1)
-      }
-    }
-    return
-  }
-  if args.len() == 4 && args[1] == "sim" {
-    match sema.sim_main(args[2], args[3], os.env("PWD").unwrap_or("")) {
-      Ok(out) => io.print(out)
-      Err(e) => {
-        io.eprintln("error: " + e)
-        os.exit(1)
-      }
-    }
-    return
-  }
-  if args.len() == 3 && args[1] == "fmt" {
-    let formatted = match fs.read(args[2]) {
-      Ok(src) => syntax.format_source(src)
-      Err(e) => Err(e)
-    }
-    match formatted {
-      Ok(text) => io.print(text)
-      Err(e) => {
-        io.eprintln("error: " + e)
-        os.exit(1)
-      }
-    }
-    return
-  }
-  if args.len() < 3 || (args[1] != "tokens" && args[1] != "ast") {
-    io.eprintln(
-      "usage: jigc tokens|ast|fmt FILE, jigc check|c|cc|sim DIR STD, jigc vc DIR STD [std], jigc test DIR STD [FILTER], jigc prove DIR STD [--json] [--verbose] [--std] [FILTER], jigc build DIR STD [--release] [-o OUT]",
-    )
-    os.exit(2)
-  }
-  match fs.read(args[2]) {
-    Ok(src) => io.print(
-      if args[1] == "tokens" { syntax.dump_tokens(src) } else { syntax.dump_ast(src) },
-    )
-    Err(e) => {
-      io.eprintln(e)
-      os.exit(1)
-    }
+  if o.code != 0 {
+    os.exit(o.code)
   }
 }

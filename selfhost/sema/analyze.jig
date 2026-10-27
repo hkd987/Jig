@@ -148,7 +148,7 @@ fn Sema.place(self, root: Str, lo: Int, hi: Int) -> Str {
 }
 
 /// `jigc check DIR STD`: the same lines as `jig debug check DIR`.
-pub fn check_dump(dir: Str, std_dir: Str) -> Str effects {fs, env} {
+fn check_dump(dir: Str, std_dir: Str) -> Str effects {fs, env} {
   let (s, root) = analyze(dir, std_dir)
   var out: List<Str> = []
   for d in s.diags {
@@ -209,7 +209,7 @@ pub fn check_dump(dir: Str, std_dir: Str) -> Str effects {fs, env} {
 
 /// `jigc c DIR STD`: the C program for the package in DIR, the same text as `jig debug c DIR`.
 /// Locations name files relative to `cwd`.
-pub fn c_dump(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs, env} {
+fn c_dump(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs, env} {
   let (s, _) = analyze(dir, std_dir)
   if !s.diags.is_empty() {
     return Err(dir + " has errors")
@@ -219,7 +219,7 @@ pub fn c_dump(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs,
 
 /// `jigc c DIR STD proofs`: the C program with the cached proofs (`.jig/proofs` in the project)
 /// removing the checks they discharge, the same text as `jig debug c DIR proofs`.
-pub fn c_dump_proved(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str>
+fn c_dump_proved(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str>
   effects {fs, env, ffi, clock}
 {
   let (s, _) = analyze(dir, std_dir)
@@ -235,45 +235,18 @@ pub fn c_dump_proved(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str>
 
 /// A release build of DIR as one self-contained C file: `c_dump`'s program with the runtime
 /// (`STD/../runtime`) inlined, so a C compiler alone builds it (`cc FILE -pthread -lm`).
-pub fn c_unit(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs, env} {
+fn c_unit(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs, env} {
   let c = c_dump(dir, std_dir, cwd)?
-  let rt = std_dir + "/../runtime/"
-  let header = fs.read(rt + "jig_rt.h")?
-  let runtime = fs.read(rt + "jig_rt.c")?
+  let header = read_runtime(std_dir, "jig_rt.h")?
+  let runtime = read_runtime(std_dir, "jig_rt.c")?
   let include = "#include \"jig_rt.h\"\n"
   let program = c.replace(include, header) + "\n" + runtime.replace(include, "")
   return Ok("#define _GNU_SOURCE\n#define JIG_POOL 1\n" + program)
 }
 
-/// `jigc test DIR STD [FILTER]`: run the tests and scenarios of DIR on the interpreter, printing
-/// the same lines as `jig test --json`. Locations name files relative to `cwd`.
-pub fn test_json(dir: Str, std_dir: Str, cwd: Str, filter: Str) -> Result<(Str, Bool), Str>
-  effects {fs, env, ffi}
-{
-  let (s, _) = analyze(dir, std_dir)
-  if !s.diags.is_empty() {
-    return Err(dir + " has errors")
-  }
-  let results = run_tests(new_lw(s), cwd, filter)
-  var out = ""
-  var failed = 0
-  for r in results {
-    out += test_result_json(r) + "\n"
-    if !r.passed {
-      failed += 1
-    }
-  }
-  out += "{\"kind\":\"summary\",\"passed\":" +
-    (results.len() - failed).str() +
-    ",\"failed\":" +
-    failed.str() +
-    "}\n"
-  return Ok((out, failed == 0))
-}
-
 /// `jigc sim DIR STD`: run `main` of DIR on the interpreter with simulated effects, printing
 /// its output and then `<exit N>` or `<panic: MESSAGE>` if it did not return.
-pub fn sim_main(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs, env, ffi} {
+fn sim_main(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs, env, ffi} {
   let (s, _) = analyze(dir, std_dir)
   if !s.diags.is_empty() {
     return Err(dir + " has errors")
@@ -314,7 +287,7 @@ fn Sema.prove_targets(self, std: Bool) -> List<Int> {
 
 /// `jigc vc DIR STD [std]`: the verification conditions of each function, the same text as
 /// `jig debug vc DIR [std]`.
-pub fn vc_dump(dir: Str, std_dir: Str, std: Bool) -> Result<Str, Str> effects {fs, env} {
+fn vc_dump(dir: Str, std_dir: Str, std: Bool) -> Result<Str, Str> effects {fs, env} {
   let (s, root) = analyze(dir, std_dir)
   if !s.diags.is_empty() {
     return Err(dir + " has errors")
@@ -388,7 +361,7 @@ pub fn vc_dump(dir: Str, std_dir: Str, std: Bool) -> Result<Str, Str> effects {f
 /// DIR (or the standard library) as `jig prove` does, printing the same report and sharing its
 /// proof cache (`.jig/proofs` in the project). Returns the
 /// output and the exit code.
-pub fn prove_cmd(dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> (Str, Int)
+fn prove_cmd(dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> Output
   effects {fs, env, ffi, clock}
 {
   let json = flags.contains("--json")
@@ -424,7 +397,10 @@ pub fn prove_cmd(dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> (Str, In
     s.diags = kept
   }
   if !s.diags.is_empty() {
-    return ("error: " + dir + " has errors\n", 1)
+    if std {
+      return output(s.error_output(json, cwd).out, "", 1)
+    }
+    return s.error_output(json, cwd)
   }
   let start = time.now_ms()
   let cache_dir = if flags.contains("--no-cache") {
@@ -437,7 +413,7 @@ pub fn prove_cmd(dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> (Str, In
   let reports = match prove_program(s, std_dir, std, filter, cwd, cache_dir) {
     Ok(r) => r
     Err(e) => {
-      return ("error: " + e + "\n", 2)
+      return output("", "error: " + e + "\n", 2)
     }
   }
   let millis = time.now_ms() - start
@@ -452,7 +428,7 @@ pub fn prove_cmd(dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> (Str, In
   } else {
     out = s.render_report(reports, verbose, millis, cwd)
   }
-  return (out, if failed_contracts(reports) > 0 { 1 } else { 0 })
+  return output(out, "", if failed_contracts(reports) > 0 { 1 } else { 0 })
 }
 
 /// The C compiler for a mode: `$JIG_CC`, else `clang` for release builds when present, else
@@ -474,36 +450,58 @@ fn c_compiler(release: Bool) -> Str effects {env, ffi} {
 /// executable, with the checks the cached proofs discharge removed, as `jig build` does (one
 /// C file, the runtime included; release builds allocate from the runtime's pools and
 /// optimize). Prints the executable's path. Returns the output and the exit code.
-pub fn build_cmd(dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> (Str, Int)
+fn build_cmd(dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> Output
   effects {fs, env, ffi, clock}
 {
   let release = flags.contains("--release")
   let (s, _) = analyze(dir, std_dir)
   if !s.diags.is_empty() {
-    return ("error: " + dir + " has errors\n", 1)
+    return s.error_output(false, cwd)
   }
   let root = find_project_root(dir).unwrap_or(dir)
   let proven = s.cached_proven(std_dir, join_path(join_path(root, ".jig"), "proofs"))
+  var note = ""
+  let some = !proven.contract.is_empty() ||
+    !proven.safety.is_empty() ||
+    !proven.bounds.is_empty() ||
+    !proven.entries.is_empty()
+  if some && os.env("JIG_QUIET").is_none() {
+    let n = proven.entries.len()
+    note = "using proofs: " +
+      proven.contract.len().str() +
+      " contract, " +
+      proven.safety.len().str() +
+      " arithmetic and " +
+      proven.bounds.len().str() +
+      " bounds checks removed" +
+      (if n == 0 {
+        ""
+      } else if n == 1 {
+        "; 1 function's preconditions hold at every call"
+      } else {
+        "; " + n.str() + " functions' preconditions hold at every call"
+      }) +
+      "\n"
+  }
   let links = s.links
   var lw = new_lw(s)
   lw.mir.elide = proven
   let c = match generate_c(lw, cwd) {
     Ok(c) => c
     Err(e) => {
-      return ("error: " + e + "\n", 1)
+      return output("", note + "error: " + e + "\n", 1)
     }
   }
-  let rt = std_dir + "/../runtime/"
-  let header = match fs.read(rt + "jig_rt.h") {
+  let header = match read_runtime(std_dir, "jig_rt.h") {
     Ok(t) => t
     Err(e) => {
-      return ("error: " + e + "\n", 1)
+      return output("", note + "error: " + e + "\n", 1)
     }
   }
-  let runtime = match fs.read(rt + "jig_rt.c") {
+  let runtime = match read_runtime(std_dir, "jig_rt.c") {
     Ok(t) => t
     Err(e) => {
-      return ("error: " + e + "\n", 1)
+      return output("", note + "error: " + e + "\n", 1)
     }
   }
   let include = "#include \"jig_rt.h\"\n"
@@ -540,7 +538,7 @@ pub fn build_cmd(dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> (Str, In
   match fs.write(src, program) {
     Ok(_) => {}
     Err(e) => {
-      return ("error: " + e + "\n", 1)
+      return output("", note + "error: " + e + "\n", 1)
     }
   }
   var cmd = c_compiler(release) +
@@ -555,7 +553,7 @@ pub fn build_cmd(dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> (Str, In
   cmd += " -lm -o '" + out + "' > '" + log + "' 2>&1"
   if system(cmd) != 0 {
     let msg = fs.read(log).unwrap_or("")
-    return ("error: C compiler failed:\n" + msg, 1)
+    return output("", note + "error: C compiler failed:\n" + msg, 1)
   }
-  return (out + "\n", 0)
+  return output(out + "\n", note, 0)
 }

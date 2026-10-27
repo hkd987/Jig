@@ -114,13 +114,14 @@ fn trim_start_space(s: Str) -> Str {
 
 /// An analysis's findings, each with the directory of the package it is in ("" if none).
 fn Sema.project_diags(self, cwd: Str) -> List<(ProjectDiag, Str)> {
+  let files = self.files()
   var out: List<(ProjectDiag, Str)> = []
   for d in self.diags {
     var file = ""
     var line = 0
     var col = 0
     var dir = ""
-    match self.line_col(d.lo) {
+    match files.line_col(d.lo) {
       Some(lc) => {
         file = display_path(lc.file.path, cwd)
         line = lc.line
@@ -137,8 +138,8 @@ fn Sema.project_diags(self, cwd: Str) -> List<(ProjectDiag, Str)> {
           col: col
           code: d.code
           msg: d.msg
-          json: self.diag_json(d, cwd)
-          text: self.render_diag(d, cwd)
+          json: files.json(d, cwd)
+          text: files.render(d, cwd)
         },
         dir,
       ),
@@ -276,9 +277,7 @@ fn check_project(start: Str, std_dir: Str, cwd: Str) -> List<ProjectDiag> effect
 }
 
 /// `jigc check [PATH] [--json]`: what `jig check` prints, and its exit code.
-pub fn check_cmd(start: Str, std_dir: Str, cwd: Str, json: Bool) -> (Str, Str, Int)
-  effects {fs, env}
-{
+fn check_cmd(start: Str, std_dir: Str, cwd: Str, json: Bool) -> Output effects {fs, env} {
   let diags = check_project(start, std_dir, cwd)
   var out = ""
   for d in diags {
@@ -288,9 +287,9 @@ pub fn check_cmd(start: Str, std_dir: Str, cwd: Str, json: Bool) -> (Str, Str, I
   let summary = if json {
     ""
   } else if n == 0 {
-    "ok: no errors"
+    "ok: no errors\n"
   } else {
-    n.str() + " error" + (if n == 1 { "" } else { "s" })
+    n.str() + " error" + plural_s(n) + "\n"
   }
-  return (out, summary, if n == 0 { 0 } else { 1 })
+  return output(out, summary, if n == 0 { 0 } else { 1 })
 }

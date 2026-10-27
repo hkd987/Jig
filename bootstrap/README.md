@@ -14,8 +14,9 @@ relative. The file is a fixed point: the compiler it builds regenerates it exact
 or clang.
 
 Change anything under `selfhost/`, `compiler/std/` or `compiler/runtime/` and the file goes
-stale; `bootstrap/update.sh` rebuilds it with only a C compiler (twice, so a changed back
-end compiles itself) and checks the fixed point. `cargo test` fails while it is stale, and
+stale; `bootstrap/update.sh` rewrites `selfhost/sema/stdlib.jig` (the standard library and
+runtime jigc carries, with `stdlib.py`), rebuilds the file with only a C compiler (twice, so a
+changed back end compiles itself) and checks the fixed point. `cargo test` fails while it is stale, and
 CI checks the fixed point with `bootstrap/update.sh --check` without Rust installed.
 
 The Rust compiler (`compiler/`) is kept, and kept passing the same tests, until `jigc`
