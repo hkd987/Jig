@@ -297,7 +297,9 @@ fn run_solver(script: Str) -> Result<Str, Str> effects {fs, env, ffi, clock} {
 }
 
 /// Whether an obligation is settled without the solver.
-fn trivially_proved(ob: Obligation) -> Bool {
+fn trivially_proved(ob: Obligation) -> Bool
+  ensures !result || ob.goal == "true" || !ob.pc.is_empty()
+{
   if ob.goal == "true" {
     return true
   }
@@ -310,7 +312,9 @@ fn trivially_proved(ob: Obligation) -> Bool {
 }
 
 /// The leaf terms of each replayable parameter, when the obligation is a contract.
-fn model_queries(vcs: FnVcs, ob: Obligation) -> List<List<Str>> {
+fn model_queries(vcs: FnVcs, ob: Obligation) -> List<List<Str>>
+  ensures ob.kind.is_contract() || result.is_empty()
+{
   var out: List<List<Str>> = []
   if !ob.kind.is_contract() {
     return out
@@ -582,7 +586,7 @@ fn prove_program(
 // ---------- the proof cache ----------
 
 /// Bump when the encoding changes, so stale cached proofs are not reused (the bootstrap's).
-const VC_VERSION: Str = "vc-7"
+const VC_VERSION: Str = "vc-8"
 
 /// The bootstrap compiler's version (its `CARGO_PKG_VERSION`), part of every key.
 const JIG_VERSION: Str = "0.1.0-alpha"
@@ -773,7 +777,9 @@ fn Sema.cache_key(
   return h.finish_hex()
 }
 
-fn ob_kind_named(s: Str) -> Option<ObKind> {
+fn ob_kind_named(s: Str) -> Option<ObKind>
+  ensures result.is_none() || !s.is_empty()
+{
   for k in [
     ObKind.Precondition,
     ObKind.Postcondition,
@@ -1314,7 +1320,9 @@ fn failed_contracts(fs: List<FnReport>) -> Int {
 }
 
 /// How to make a failed or unknown obligation go through.
-fn ob_hint(o: ObResult) -> Str {
+fn ob_hint(o: ObResult) -> Str
+  ensures !result.is_empty()
+{
   let possible = "If the counterexample can happen, the code is wrong; otherwise add the missing fact as a `requires`, an `ensures` on a callee or a loop `invariant`."
   return match o.kind {
     Precondition => "Establish it before the call (an `if`, or an `assert` that is proved), or add it to this function's `requires` so callers must."
@@ -1358,7 +1366,9 @@ fn Sema.location_text(self, lo: Int, cwd: Str) -> Str {
   }
 }
 
-fn status_json(s: Status) -> Str {
+fn status_json(s: Status) -> Str
+  ensures result.len() >= 10
+{
   return match s {
     Proved => "\"status\":\"proved\""
     Failed(cex) => {
@@ -1373,7 +1383,9 @@ fn status_json(s: Status) -> Str {
 }
 
 /// An obligation as one line of `jig prove --json`.
-fn Sema.obligation_json(self, f: FnReport, o: ObResult, cwd: Str) -> Str {
+fn Sema.obligation_json(self, f: FnReport, o: ObResult, cwd: Str) -> Str
+  ensures result.len() >= 2
+{
   var j = "{" + status_json(o.status)
   j += ",\"kind\":\"obligation\",\"obligation\":" + json_str(o.kind.name())
   j += ",\"contract\":" + (if o.kind.is_contract() { "true" } else { "false" })
@@ -1480,7 +1492,9 @@ fn Sema.render_report(self, fs: List<FnReport>, verbose: Bool, millis: Int, cwd:
 }
 
 /// The summary line of `jig prove --json`.
-fn Sema.summary_json(self, fs: List<FnReport>, millis: Int) -> Str {
+fn Sema.summary_json(self, fs: List<FnReport>, millis: Int) -> Str
+  ensures result.len() >= 2
+{
   let (cp, ct, sp, stot) = report_counts(fs)
   let (with, proved) = self.contract_coverage(fs)
   return "{\"kind\":\"summary\",\"contracts_proved\":" +

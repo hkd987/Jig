@@ -3,7 +3,9 @@
 // proof cache reads its own files with `parse_json` in `hash.jig`.)
 
 /// The value as compact JSON (`Json::to_string_compact`).
-fn json_text(j: Json) -> Str {
+fn json_text(j: Json) -> Str
+  ensures !result.is_empty()
+{
   return match j {
     Null => "null"
     Bool(b) => if b { "true" } else { "false" }
@@ -57,7 +59,9 @@ fn JsonParser.ws(&mut self) {
   }
 }
 
-fn JsonParser.err(self, msg: Str) -> Str {
+fn JsonParser.err(self, msg: Str) -> Str
+  ensures result.len() > msg.len()
+{
   return msg + " at offset " + self.i.str()
 }
 
@@ -159,12 +163,16 @@ fn JsonParser.value(&mut self) -> Result<Json, Str> {
   return Err(self.err("unexpected character"))
 }
 
-fn is_number_byte(c: U8) -> Bool {
+fn is_number_byte(c: U8) -> Bool
+  ensures result == ((c >= 48 && c <= 57) || c == 46 || c == 101 || c == 69 || c == 43 || c == 45)
+{
   return (c >= 48 && c <= 57) || c == 46 || c == 101 || c == 69 || c == 43 || c == 45
 }
 
 /// No byte but digits (true for "").
-fn digits_only(s: Str) -> Bool {
+fn digits_only(s: Str) -> Bool
+  ensures result || !s.is_empty()
+{
   for c in s.bytes() {
     if c < 48 || c > 57 {
       return false
@@ -175,7 +183,9 @@ fn digits_only(s: Str) -> Bool {
 
 /// A number's value, if the text is one as Rust's `f64` parsing takes it: a sign, digits with
 /// an optional fraction (one side may be empty), an optional exponent.
-fn number_value(text: Str) -> Option<Json> {
+fn number_value(text: Str) -> Option<Json>
+  ensures result.is_none() || !text.is_empty()
+{
   var t = text
   if t.starts_with("-") || t.starts_with("+") {
     t = t[1..t.len()]

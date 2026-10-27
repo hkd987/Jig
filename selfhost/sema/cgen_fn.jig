@@ -127,7 +127,9 @@ fn Cg.make_unique(&mut self, mf: MFn, cx: FnCx, l: Int) -> Str {
     ");\n"
 }
 
-fn local_lval(cx: FnCx, l: Int) -> Str {
+fn local_lval(cx: FnCx, l: Int) -> Str
+  ensures result.len() >= 2
+{
   if cx.mutref.contains(l) {
     return "(*l" + l.str() + ")"
   }
@@ -414,7 +416,9 @@ fn Cg.owned(&mut self, mf: MFn, cx: &mut FnCx, op: Operand, span: syntax.Span) -
   return "t" + n.str()
 }
 
-fn Cg.release_stmt(&mut self, t: Int, lval: Str) -> Str {
+fn Cg.release_stmt(&mut self, t: Int, lval: Str) -> Str
+  ensures result.is_empty() || result.len() >= 4
+{
   if !self.needs_rc(t) {
     return ""
   }
@@ -422,7 +426,9 @@ fn Cg.release_stmt(&mut self, t: Int, lval: Str) -> Str {
   return g + "(&" + lval + ");"
 }
 
-fn has_index(p: Place) -> Bool {
+fn has_index(p: Place) -> Bool
+  ensures !result || !p.proj.is_empty()
+{
   for e in p.proj {
     match e {
       Index(_, _) => {

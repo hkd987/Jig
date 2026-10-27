@@ -52,14 +52,16 @@ struct Dump {
 }
 
 /// Lowercase hexadecimal digits of `c`'s code point.
-fn hex_text(c: Char) -> Str {
+fn hex_text(c: Char) -> Str
+  ensures !result.is_empty()
+{
   let digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
   var v = c as Int
   if v <= 0 {
     return "0"
   }
   var out = ""
-  for v > 0 {
+  for v > 0 invariant v >= 0 && (v > 0 || !out.is_empty()) {
     out = digits[v % 16] + out
     v = v / 16
   }
@@ -67,9 +69,11 @@ fn hex_text(c: Char) -> Str {
 }
 
 /// Strings print in quotes; printable ASCII stays, everything else is `\u{hex}`.
-fn quote(s: Str) -> Str {
+fn quote(s: Str) -> Str
+  ensures result.len() >= 2
+{
   var out = "\""
-  for c in s.chars() {
+  for c in s.chars() invariant out.len() >= 1 {
     if c >= ' ' && c <= '~' && c != '"' && c != '\\' {
       out = out + c.str()
     } else {
@@ -79,20 +83,28 @@ fn quote(s: Str) -> Str {
   return out + "\""
 }
 
-fn fmt_span(s: Span) -> Str {
+fn fmt_span(s: Span) -> Str
+  ensures result.len() >= 4
+{
   return "@" + s.lo.str() + ":" + s.hi.str()
 }
 
-fn fmt_name(n: Name) -> Str {
+fn fmt_name(n: Name) -> Str
+  ensures result.len() >= n.text.len() + 4
+{
   return n.text + fmt_span(n.span)
 }
 
-fn Dump.w(&mut self, s: Str) {
+fn Dump.w(&mut self, s: Str)
+  ensures self.out.len() == old(self.out.len()) + s.len()
+{
   self.out = self.out + s
 }
 
 /// The separator before element `i` of a list.
-fn Dump.sep(&mut self, i: Int) {
+fn Dump.sep(&mut self, i: Int)
+  ensures self.out.len() == old(self.out.len()) + (if i > 0 { 1 } else { 0 })
+{
   if i > 0 {
     self.w(" ")
   }

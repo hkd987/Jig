@@ -12,7 +12,10 @@ import "std/time"
 const CONSENT: Str = "CONSENT"
 
 /// Where traces are kept.
-fn traces_dir() -> Str effects {env} {
+fn traces_dir() -> Str
+  ensures !result.is_empty()
+  effects {env}
+{
   return match os.env("JIG_HOME") {
     Some(h) => path_join(h, "traces")
     None => path_join(os.env("HOME").unwrap_or("."), ".jig/traces")

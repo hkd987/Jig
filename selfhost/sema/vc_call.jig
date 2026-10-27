@@ -113,9 +113,11 @@ fn Gen.call(
     }
     _ => {
       // Function values, bound methods (`x.str()`), fields holding functions.
+      var shown_scalar = false
       match ast.exprs[callee].kind {
-        Field(base, _) => {
-          let _ = self.expr(fr, &mut st, base)?
+        Field(base, name) => {
+          let v = self.expr(fr, &mut st, base)?
+          shown_scalar = name.text == "str" && arg_ids.is_empty() && is_scalar_leaf(v)
         }
         _ => {
           let _ = self.expr(fr, &mut st, callee)?
@@ -127,8 +129,28 @@ fn Gen.call(
       if self.is_never(t) {
         return None
       }
-      return Some(self.unit_or_fresh(t, "call"))
+      let r = self.unit_or_fresh(t, "call")
+      // A number, character or Boolean shows as at least one character.
+      match sv_term(r) {
+        Some(rt) => if shown_scalar {
+          let lr = self.str_len(rt)
+          self.assume(&mut st, "(>= " + lr + " 1)")
+        }
+        None => {}
+      }
+      return Some(r)
     }
+  }
+}
+
+/// Is the value a number, character or Boolean?
+fn is_scalar_leaf(v: Sv) -> Bool {
+  return match v {
+    Leaf(l) => match l.base {
+      Int(_) | Float | Bool | Char => true
+      _ => false
+    }
+    _ => false
   }
 }
 
@@ -705,6 +727,48 @@ fn Gen.intrinsic(
       }
       return Some(r)
     }
+    Repeat => {
+      let x = arg_term(args, 0)?
+      let n = arg_term(args, 1)?
+      self.oblige(
+        fr,
+        st,
+        ObKind.Panic,
+        span,
+        "repeat count is not negative: " + self.src(span),
+        "(>= " + n + " 0)",
+      )
+      self.assume(&mut st, "(>= " + n + " 0)")
+      let r = self.fresh(t, "repeat")
+      match sv_term(r) {
+        Some(rt) => {
+          let lr = self.str_len(rt)
+          let lx = self.str_len(x)
+          self.assume(&mut st, "(= " + lr + " (* " + lx + " " + n + "))")
+        }
+        None => {}
+      }
+      return Some(r)
+    }
+    // One to four bytes per character.
+    FromChars => {
+      let len = match v0 {
+        Some(List(len, _)) => len
+        _ => {
+          return Some(self.fresh(t, "str"))
+        }
+      }
+      let r = self.fresh(t, "str")
+      match sv_term(r) {
+        Some(rt) => {
+          let lr = self.str_len(rt)
+          let n = len.t
+          self.assume(&mut st, "(and (<= " + n + " " + lr + ") (<= " + lr + " (* 4 " + n + ")))")
+        }
+        None => {}
+      }
+      return Some(r)
+    }
     Trim => {
       let x = arg_term(args, 0)?
       let r = self.fresh(t, "trim")
@@ -921,6 +985,57 @@ fn Gen.intrinsic(
         List(_, elems) => self.write_arg(&mut st, args[0], Sv.List(int_leaf("0"), elems))
         _ => {}
       }
+      return Some(Sv.Unit)
+    }
+    Extend => {
+      // The lengths add up; the elements are not modeled.
+      let len = match v0 {
+        Some(List(len, _)) => len
+        _ => {
+          return self.havoc_call(&mut st, args, t)
+        }
+      }
+      let more = match if args.len() > 1 { Some(args[1].value()) } else { None } {
+        Some(List(l2, _)) => l2
+        _ => {
+          return self.havoc_call(&mut st, args, t)
+        }
+      }
+      let lt = match arg_place_ty(args[0]) {
+        Some(x) => x
+        None => {
+          return self.havoc_call(&mut st, args, t)
+        }
+      }
+      match self.fresh(lt, "list") {
+        List(_, elems) => {
+          let nl = self.define_int("(+ " + len.t + " " + more.t + ")")
+          self.write_arg(&mut st, args[0], Sv.List(int_leaf(nl), elems))
+        }
+        _ => {}
+      }
+      return Some(Sv.Unit)
+    }
+    Truncate => {
+      let (len, elems) = match v0 {
+        Some(List(len, elems)) => (len, elems)
+        _ => {
+          return self.havoc_call(&mut st, args, t)
+        }
+      }
+      let n = arg_term(args, 1)?
+      self.oblige(
+        fr,
+        st,
+        ObKind.Panic,
+        span,
+        "truncate length is not negative: " + self.src(span),
+        "(>= " + n + " 0)",
+      )
+      self.assume(&mut st, "(>= " + n + " 0)")
+      let l = len.t
+      let nl = self.define_int("(ite (< " + n + " " + l + ") " + n + " " + l + ")")
+      self.write_arg(&mut st, args[0], Sv.List(int_leaf(nl), elems))
       return Some(Sv.Unit)
     }
     Reverse | Sort | SortBy => {

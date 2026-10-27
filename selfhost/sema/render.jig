@@ -110,7 +110,9 @@ fn spaces(n: Int) -> Str {
   return " ".repeat(max(n, 0))
 }
 
-fn is_dummy(lo: Int, hi: Int) -> Bool {
+fn is_dummy(lo: Int, hi: Int) -> Bool
+  ensures result == (lo == 0 && hi == 0)
+{
   return lo == 0 && hi == 0
 }
 
@@ -223,7 +225,9 @@ fn Files.span_json(self, lo: Int, hi: Int, cwd: Str) -> Str {
 }
 
 /// The diagnostic as `jig check --json` prints it.
-fn Files.json(self, d: syntax.Diag, cwd: Str) -> Str {
+fn Files.json(self, d: syntax.Diag, cwd: Str) -> Str
+  ensures result.len() >= 2
+{
   var out = "{\"code\":" +
     json_str(d.code) +
     ",\"severity\":\"error\",\"message\":" +

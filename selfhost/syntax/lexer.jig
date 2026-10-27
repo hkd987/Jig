@@ -44,7 +44,10 @@ pub struct Edit {
 }
 
 /// A diagnostic with nothing attached.
-pub fn new_diag(code: Str, lo: Int, hi: Int, msg: Str) -> Diag {
+pub fn new_diag(code: Str, lo: Int, hi: Int, msg: Str) -> Diag
+  ensures result.code == code && result.lo == lo && result.hi == hi && result.msg == msg
+  ensures result.labels.is_empty() && result.notes.is_empty() && result.fixes.is_empty()
+{
   return Diag {
     code: code
     lo: lo
@@ -57,25 +60,33 @@ pub fn new_diag(code: Str, lo: Int, hi: Int, msg: Str) -> Diag {
   }
 }
 
-pub fn Diag.note(self, text: Str) -> Diag {
+pub fn Diag.note(self, text: Str) -> Diag
+  ensures result.notes.len() == self.notes.len() + 1 && result.code == self.code
+{
   var d = self
   d.notes.push(text)
   return d
 }
 
-pub fn Diag.label(self, span: Span, msg: Str) -> Diag {
+pub fn Diag.label(self, span: Span, msg: Str) -> Diag
+  ensures result.labels.len() == self.labels.len() + 1 && result.code == self.code
+{
   var d = self
   d.labels.push(Label { lo: span.lo, hi: span.hi, msg: msg })
   return d
 }
 
-pub fn Diag.fix(self, msg: Str, span: Span, text: Str) -> Diag {
+pub fn Diag.fix(self, msg: Str, span: Span, text: Str) -> Diag
+  ensures result.fixes.len() == self.fixes.len() + 1 && result.code == self.code
+{
   var d = self
   d.fixes.push(Fix { msg: msg, edits: [Edit { lo: span.lo, hi: span.hi, text: text }] })
   return d
 }
 
-pub fn Diag.with_primary(self, msg: Str) -> Diag {
+pub fn Diag.with_primary(self, msg: Str) -> Diag
+  ensures result.primary == msg && result.code == self.code
+{
   var d = self
   d.primary = msg
   return d

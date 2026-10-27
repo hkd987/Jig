@@ -9,7 +9,9 @@ enum IntTy {
   U64
 }
 
-fn IntTy.name(self) -> Str {
+fn IntTy.name(self) -> Str
+  ensures !result.is_empty()
+{
   return match self {
     I64 => "Int"
     I32 => "I32"
@@ -19,11 +21,15 @@ fn IntTy.name(self) -> Str {
   }
 }
 
-fn IntTy.signed(self) -> Bool {
+fn IntTy.signed(self) -> Bool
+  ensures result == (self == IntTy.I64 || self == IntTy.I32)
+{
   return self == IntTy.I64 || self == IntTy.I32
 }
 
-fn IntTy.min_text(self) -> Str {
+fn IntTy.min_text(self) -> Str
+  ensures !result.is_empty()
+{
   return match self {
     I64 => "-9223372036854775808"
     I32 => "-2147483648"
@@ -31,7 +37,9 @@ fn IntTy.min_text(self) -> Str {
   }
 }
 
-fn IntTy.max_text(self) -> Str {
+fn IntTy.max_text(self) -> Str
+  ensures !result.is_empty()
+{
   return match self {
     I64 => "9223372036854775807"
     I32 => "2147483647"
@@ -42,7 +50,9 @@ fn IntTy.max_text(self) -> Str {
 }
 
 /// Does the literal `v` (negated if `neg`) fit in the type?
-fn IntTy.fits(self, v: U64, neg: Bool) -> Bool {
+fn IntTy.fits(self, v: U64, neg: Bool) -> Bool
+  ensures v != 0 || result, neg || self != IntTy.U64 || result
+{
   if neg {
     return match self {
       I64 => v <= 9223372036854775808
@@ -60,7 +70,9 @@ fn IntTy.fits(self, v: U64, neg: Bool) -> Bool {
 }
 
 /// The largest value of a type, if it fits in an `Int`.
-fn IntTy.max_int(self) -> Int {
+fn IntTy.max_int(self) -> Int
+  ensures result >= 255
+{
   return match self {
     I64 | U64 => 9223372036854775807
     I32 => 2147483647
@@ -69,7 +81,9 @@ fn IntTy.max_int(self) -> Int {
   }
 }
 
-fn IntTy.min_int(self) -> Int {
+fn IntTy.min_int(self) -> Int
+  ensures result <= 0
+{
   return match self {
     I64 => -9223372036854775807 - 1
     I32 => -2147483648
@@ -79,7 +93,9 @@ fn IntTy.min_int(self) -> Int {
 
 // ---- effects: a bit set over the eight effects ----
 
-fn effect_names() -> List<Str> {
+fn effect_names() -> List<Str>
+  ensures result.len() == 8
+{
   return ["io", "fs", "net", "clock", "rand", "env", "spawn", "ffi"]
 }
 
@@ -102,10 +118,12 @@ fn effects_minus(set: Int, o: Int) -> Int {
   return set & ~o
 }
 
-fn effect_list(set: Int) -> List<Str> {
+fn effect_list(set: Int) -> List<Str>
+  ensures result.len() <= 8
+{
   let names = effect_names()
   var out: List<Str> = []
-  for i in 0..8 {
+  for i in 0..8 invariant out.len() <= i {
     if set & (1 << i) != 0 {
       out.push(names[i])
     }
@@ -113,7 +131,9 @@ fn effect_list(set: Int) -> List<Str> {
   return out
 }
 
-fn effects_render(set: Int) -> Str {
+fn effects_render(set: Int) -> Str
+  ensures result.len() >= 2
+{
   return "{" + effect_list(set).join(", ") + "}"
 }
 
@@ -194,7 +214,9 @@ fn new_tys() -> TyCtx {
   return t
 }
 
-fn TyCtx.intern(&mut self, k: TyKind) -> Int {
+fn TyCtx.intern(&mut self, k: TyKind) -> Int
+  ensures self.kinds.len() >= old(self.kinds.len())
+{
   match self.map.get(k) {
     Some(t) => {
       return t
@@ -207,43 +229,63 @@ fn TyCtx.intern(&mut self, k: TyKind) -> Int {
   return t
 }
 
-fn TyCtx.int_ty(&mut self, k: IntTy, u: Int) -> Int {
+fn TyCtx.int_ty(&mut self, k: IntTy, u: Int) -> Int
+  ensures self.kinds.len() >= old(self.kinds.len())
+{
   return self.intern(TyKind.Int(k, u))
 }
 
-fn TyCtx.float_ty(&mut self, u: Int) -> Int {
+fn TyCtx.float_ty(&mut self, u: Int) -> Int
+  ensures self.kinds.len() >= old(self.kinds.len())
+{
   return self.intern(TyKind.Float(u))
 }
 
-fn TyCtx.tuple(&mut self, ts: List<Int>) -> Int {
+fn TyCtx.tuple(&mut self, ts: List<Int>) -> Int
+  ensures self.kinds.len() >= old(self.kinds.len())
+{
   return self.intern(TyKind.Tuple(ts))
 }
 
-fn TyCtx.list(&mut self, t: Int) -> Int {
+fn TyCtx.list(&mut self, t: Int) -> Int
+  ensures self.kinds.len() >= old(self.kinds.len())
+{
   return self.intern(TyKind.List(t))
 }
 
-fn TyCtx.map_ty(&mut self, k: Int, v: Int) -> Int {
+fn TyCtx.map_ty(&mut self, k: Int, v: Int) -> Int
+  ensures self.kinds.len() >= old(self.kinds.len())
+{
   return self.intern(TyKind.Map(k, v))
 }
 
-fn TyCtx.set(&mut self, t: Int) -> Int {
+fn TyCtx.set(&mut self, t: Int) -> Int
+  ensures self.kinds.len() >= old(self.kinds.len())
+{
   return self.intern(TyKind.Set(t))
 }
 
-fn TyCtx.adt(&mut self, a: Int, args: List<Int>) -> Int {
+fn TyCtx.adt(&mut self, a: Int, args: List<Int>) -> Int
+  ensures self.kinds.len() >= old(self.kinds.len())
+{
   return self.intern(TyKind.Adt(a, args))
 }
 
-fn TyCtx.func(&mut self, params: List<Int>, ret: Int, eff: Int) -> Int {
+fn TyCtx.func(&mut self, params: List<Int>, ret: Int, eff: Int) -> Int
+  ensures self.kinds.len() >= old(self.kinds.len())
+{
   return self.intern(TyKind.Fn(params, ret, eff))
 }
 
-fn TyCtx.param(&mut self, i: Int, name: Str) -> Int {
+fn TyCtx.param(&mut self, i: Int, name: Str) -> Int
+  ensures self.kinds.len() >= old(self.kinds.len())
+{
   return self.intern(TyKind.Param(i, name))
 }
 
-fn TyCtx.infer(&mut self, v: Int) -> Int {
+fn TyCtx.infer(&mut self, v: Int) -> Int
+  ensures self.kinds.len() >= old(self.kinds.len())
+{
   return self.intern(TyKind.Infer(v))
 }
 
@@ -398,7 +440,9 @@ fn TyCtx.subst(&mut self, t: Int, args: List<Int>) -> Int {
   }
 }
 
-fn TyCtx.subst_all(&mut self, ts: List<Int>, args: List<Int>) -> List<Int> {
+fn TyCtx.subst_all(&mut self, ts: List<Int>, args: List<Int>) -> List<Int>
+  ensures result.len() == ts.len()
+{
   var out: List<Int> = []
   for x in ts {
     out.push(self.subst(x, args))
@@ -418,7 +462,9 @@ fn TyCtx.has_vars(self, t: Int) -> Bool {
   }
 }
 
-fn TyCtx.any_vars(self, ts: List<Int>) -> Bool {
+fn TyCtx.any_vars(self, ts: List<Int>) -> Bool
+  ensures !result || !ts.is_empty()
+{
   for x in ts {
     if self.has_vars(x) {
       return true
@@ -438,7 +484,9 @@ fn TyCtx.has_infer(self, t: Int) -> Bool {
   }
 }
 
-fn TyCtx.any_infer(self, ts: List<Int>) -> Bool {
+fn TyCtx.any_infer(self, ts: List<Int>) -> Bool
+  ensures !result || !ts.is_empty()
+{
   for x in ts {
     if self.has_infer(x) {
       return true
@@ -490,7 +538,9 @@ fn TyCtx.display_list(self, ts: List<Int>) -> Str {
   return parts.join(", ")
 }
 
-fn TyCtx.display_args(self, ts: List<Int>) -> Str {
+fn TyCtx.display_args(self, ts: List<Int>) -> Str
+  ensures result.is_empty() == ts.is_empty()
+{
   if ts.is_empty() {
     return ""
   }

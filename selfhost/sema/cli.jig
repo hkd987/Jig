@@ -13,16 +13,22 @@ pub struct Output {
   pub code: Int
 }
 
-fn output(out: Str, err: Str, code: Int) -> Output {
+fn output(out: Str, err: Str, code: Int) -> Output
+  ensures result.out == out && result.err == err && result.code == code
+{
   return Output { out: out, err: err, code: code }
 }
 
-fn plural_s(n: Int) -> Str {
+fn plural_s(n: Int) -> Str
+  ensures result == "" || result == "s"
+{
   return if n == 1 { "" } else { "s" }
 }
 
 /// The analysis's diagnostics as `jig` reports them before giving up on a command.
-fn Sema.error_output(self, json: Bool, cwd: Str) -> Output {
+fn Sema.error_output(self, json: Bool, cwd: Str) -> Output
+  ensures result.code == 1
+{
   let files = self.files()
   var out = ""
   for d in self.diags {
@@ -33,9 +39,11 @@ fn Sema.error_output(self, json: Bool, cwd: Str) -> Output {
 }
 
 /// A string as Rust's `{:?}` shows it.
-fn debug_str(s: Str) -> Str {
+fn debug_str(s: Str) -> Str
+  ensures result.len() >= 2
+{
   var out = "\""
-  for c in s.chars() {
+  for c in s.chars() invariant out.len() >= 1 {
     let v = c as Int
     if c == '"' {
       out += "\\\""
@@ -190,7 +198,9 @@ fn fmt_cmd(targets: List<Str>, check: Bool) -> Output effects {fs} {
 }
 
 /// A word for `sh`, quoted.
-fn shell_quote(s: Str) -> Str {
+fn shell_quote(s: Str) -> Str
+  ensures result.len() >= 2
+{
   return "'" + s.replace("'", "'\\''") + "'"
 }
 
@@ -236,7 +246,9 @@ fn run_cmd(o: Opts, std_dir: Str, cwd: Str, args: List<Str>) -> Output
 
 // ---------- the command line ----------
 
-fn usage() -> Str {
+fn usage() -> Str
+  ensures !result.is_empty()
+{
   return [
     "usage: jig <command> [path] [options]",
     "",
@@ -272,7 +284,10 @@ struct Opts {
   rest: List<Str>
 }
 
-fn parse_opts(args: List<Str>) -> Opts effects {fs} {
+fn parse_opts(args: List<Str>) -> Opts
+  ensures !result.path.is_empty()
+  effects {fs}
+{
   var json = false
   var path = ""
   var rest: List<Str> = []
@@ -297,7 +312,9 @@ fn parse_opts(args: List<Str>) -> Opts effects {fs} {
 }
 
 /// The first argument that is not a flag, or "".
-fn first_word(args: List<Str>) -> Str {
+fn first_word(args: List<Str>) -> Str
+  ensures result.is_empty() || !args.is_empty()
+{
   for a in args {
     if !a.starts_with("--") {
       return a
@@ -306,7 +323,9 @@ fn first_word(args: List<Str>) -> Str {
   return ""
 }
 
-fn result_output(r: Result<Str, Str>) -> Output {
+fn result_output(r: Result<Str, Str>) -> Output
+  ensures result.code == 0 || result.code == 1
+{
   return match r {
     Ok(text) => output(text, "", 0)
     Err(e) => output("", "error: " + e + "\n", 1)
@@ -471,9 +490,11 @@ pub fn run_cli(args: List<Str>, cwd: Str, std_dir: Str) -> Output
 }
 
 /// `E0301`, `e0301` or `301`: the code and its registry entry, if it is a known code.
-fn parse_code(s: Str) -> Option<(Int, (Str, Str, Str))> {
+fn parse_code(s: Str) -> Option<(Int, (Str, Str, Str))>
+  ensures result.is_none() || !s.is_empty()
+{
   var t = s.trim()
-  for t.starts_with("E") || t.starts_with("e") {
+  for t.starts_with("E") || t.starts_with("e") invariant t.len() <= s.len() {
     t = t[1..t.len()]
   }
   if t.is_empty() || t.len() > 5 {
@@ -495,7 +516,9 @@ fn parse_code(s: Str) -> Option<(Int, (Str, Str, Str))> {
 }
 
 /// `E` and the number in four digits.
-fn code_name(n: Int) -> Str {
+fn code_name(n: Int) -> Str
+  ensures result.len() >= 5
+{
   let s = n.str()
   return "E" + "0".repeat(max(4 - s.len(), 0)) + s
 }

@@ -48,12 +48,16 @@ struct Lw {
   fb: Fb
 }
 
-fn new_lw(s: Sema) -> Lw {
+fn new_lw(s: Sema) -> Lw
+  ensures result.mir.fns.is_empty()
+{
   let empty = empty_fb()
   return Lw { s: s, mir: Mir { fns: [], instances: Map.new(), elide: no_proofs() }, fb: empty }
 }
 
-fn empty_fb() -> Fb {
+fn empty_fb() -> Fb
+  ensures result.locals.is_empty() && result.blocks.is_empty() && result.cur == 0
+{
   return Fb {
     pkg: 0
     file: 0
@@ -255,13 +259,17 @@ fn Lw.ty(&mut self, e: Int) -> Int {
   return self.subst(self.fb.tab.expr_ty[e])
 }
 
-fn Lw.temp(&mut self, ty: Int) -> Int {
+fn Lw.temp(&mut self, ty: Int) -> Int
+  ensures result == old(self.fb.locals.len()) && result == self.fb.locals.len() - 1
+{
   let l = self.fb.locals.len()
   self.fb.locals.push(ty)
   return l
 }
 
-fn Lw.new_block(&mut self) -> Int {
+fn Lw.new_block(&mut self) -> Int
+  ensures result == old(self.fb.blocks.len()) && result == self.fb.blocks.len() - 1
+{
   let b = self.fb.blocks.len()
   self.fb.blocks.push(
     Block { stmts: [], term: Terminator.Unreachable, term_span: self.fb.cur_span },
@@ -560,7 +568,9 @@ fn Lw.snapshot_olds(&mut self, e: Int) {
 
 // ---------- scopes ----------
 
-fn Lw.push_scope(&mut self) {
+fn Lw.push_scope(&mut self)
+  ensures self.fb.scopes.len() - 1 == old(self.fb.scopes.len())
+{
   self.fb.scopes.push([])
 }
 
@@ -1160,7 +1170,9 @@ fn Lw.inst_of(&mut self, e: Int) -> List<Int> {
   return out
 }
 
-fn Lw.exprs_of(&mut self, xs: List<Int>) -> List<Operand> {
+fn Lw.exprs_of(&mut self, xs: List<Int>) -> List<Operand>
+  ensures result.len() == xs.len()
+{
   var ops: List<Operand> = []
   for x in xs {
     ops.push(self.expr(x))

@@ -138,7 +138,9 @@ fn Rng.chance(&mut self, one_in: U64) -> Bool {
   return self.below(one_in) == 0
 }
 
-fn clamp_int(v: Int, k: IntTy) -> Int {
+fn clamp_int(v: Int, k: IntTy) -> Int
+  ensures result >= k.min_int() && result <= k.max_int()
+{
   return max(k.min_int(), min(v, k.max_int()))
 }
 
@@ -469,7 +471,9 @@ fn test_label(s: Sema, tid: Int) -> Str {
   }
 }
 
-fn same_span(a: syntax.Span, b: syntax.Span) -> Bool {
+fn same_span(a: syntax.Span, b: syntax.Span) -> Bool
+  ensures result == (a.lo == b.lo && a.hi == b.hi)
+{
   return a.lo == b.lo && a.hi == b.hi
 }
 
@@ -649,9 +653,11 @@ fn Interp.shrink_failure(
 
 // ---------- output ----------
 
-fn json_str(s: Str) -> Str {
+fn json_str(s: Str) -> Str
+  ensures result.len() >= 2
+{
   var out = "\""
-  for c in s.chars() {
+  for c in s.chars() invariant out.len() >= 1 {
     let v = c as Int
     if c == '"' {
       out += "\\\""
@@ -674,7 +680,9 @@ fn json_str(s: Str) -> Str {
 }
 
 /// A result as one line of `jig test --json`.
-fn test_result_json(r: TestResult) -> Str {
+fn test_result_json(r: TestResult) -> Str
+  ensures result.len() >= 2
+{
   var j = "{\"kind\":\"test\",\"name\":" + json_str(r.name) + ",\"package\":" + json_str(r.pkg)
   j += ",\"passed\":" + (if r.passed { "true" } else { "false" })
   if !r.passed {

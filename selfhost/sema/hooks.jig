@@ -100,7 +100,9 @@ fn is_git_commit(cmd: Str) -> Bool {
   return false
 }
 
-fn deny(reason: Str) -> Output {
+fn deny(reason: Str) -> Output
+  ensures result.code == 0 && !result.out.is_empty() && result.err.is_empty()
+{
   let j = Json.Obj(
     [
       (

@@ -65,35 +65,51 @@ struct Cg {
   line_starts: Map<(Int, Int), List<Int>>
 }
 
-fn g_retain() -> Int {
+fn g_retain() -> Int
+  ensures result == 0
+{
   return 0
 }
 
-fn g_release() -> Int {
+fn g_release() -> Int
+  ensures result == 1
+{
   return 1
 }
 
-fn g_eq() -> Int {
+fn g_eq() -> Int
+  ensures result == 2
+{
   return 2
 }
 
-fn g_cmp() -> Int {
+fn g_cmp() -> Int
+  ensures result == 3
+{
   return 3
 }
 
-fn g_hash() -> Int {
+fn g_hash() -> Int
+  ensures result == 4
+{
   return 4
 }
 
-fn g_show() -> Int {
+fn g_show() -> Int
+  ensures result == 5
+{
   return 5
 }
 
-fn g_desc() -> Int {
+fn g_desc() -> Int
+  ensures result == 6
+{
   return 6
 }
 
-fn int_suffix(k: IntTy) -> Str {
+fn int_suffix(k: IntTy) -> Str
+  ensures result.len() == 2 || result.len() == 3
+{
   return match k {
     I64 => "i64"
     I32 => "i32"
@@ -103,7 +119,9 @@ fn int_suffix(k: IntTy) -> Str {
   }
 }
 
-fn int_cty(k: IntTy) -> Str {
+fn int_cty(k: IntTy) -> Str
+  ensures result.len() >= 6
+{
   return match k {
     I64 => "int64_t"
     I32 => "int32_t"
@@ -113,7 +131,9 @@ fn int_cty(k: IntTy) -> Str {
   }
 }
 
-fn int_bits(k: IntTy) -> Int {
+fn int_bits(k: IntTy) -> Int
+  ensures result == 8 || result == 32 || result == 64
+{
   return match k {
     I64 | U64 => 64
     I32 | U32 => 32
@@ -122,7 +142,9 @@ fn int_bits(k: IntTy) -> Int {
 }
 
 /// `k.min() as f64` and `k.max() as f64` in Rust's `{:e}` format.
-fn int_float_bounds(k: IntTy) -> (Str, Str) {
+fn int_float_bounds(k: IntTy) -> (Str, Str)
+  ensures !result.0.is_empty() && !result.1.is_empty()
+{
   return match k {
     I64 => ("-9.223372036854776e18", "9.223372036854776e18")
     I32 => ("-2.147483648e9", "2.147483647e9")
@@ -132,7 +154,9 @@ fn int_float_bounds(k: IntTy) -> (Str, Str) {
   }
 }
 
-fn octal3(b: Int) -> Str {
+fn octal3(b: Int) -> Str
+  ensures result.len() >= 3
+{
   return (b / 64).str() + ((b / 8) % 8).str() + (b % 8).str()
 }
 
@@ -215,7 +239,9 @@ fn fmt_e(f: Float) -> Str {
   return out + "e" + exp.str()
 }
 
-fn const_int_text(neg: Bool, mag: U64) -> Str {
+fn const_int_text(neg: Bool, mag: U64) -> Str
+  ensures !result.is_empty()
+{
   return (if neg { "-" } else { "" }) + mag.str()
 }
 
@@ -522,7 +548,9 @@ fn Cg.define_aggregate(&mut self, t: Int, name: Str) {
   self.types_done.insert(t)
 }
 
-fn Cg.union_body(&mut self, variants: List<List<Int>>) -> Str {
+fn Cg.union_body(&mut self, variants: List<List<Int>>) -> Str
+  ensures !variants.is_empty() || result.is_empty()
+{
   var any = false
   for v in variants {
     if !v.is_empty() {
@@ -566,7 +594,9 @@ fn Cg.glue_name(&mut self, t: Int, kind: Int) -> Str {
 }
 
 /// A pointer to the type descriptor (`&TD_...`).
-fn Cg.desc(&mut self, t: Int) -> Str {
+fn Cg.desc(&mut self, t: Int) -> Str
+  ensures !result.is_empty()
+{
   return "&" + self.glue_name(t, g_desc())
 }
 

@@ -2783,8 +2783,12 @@ impl<'a> Gen<'a> {
             }
             _ => {
                 // Function values, bound methods (`x.str()`), fields holding functions.
-                if let ExprKind::Field { base, .. } = ast.exprs[callee].kind {
-                    self.expr(fr, st, base)?;
+                let mut shown_scalar = false;
+                if let ExprKind::Field { base, name } = ast.exprs[callee].kind {
+                    let v = self.expr(fr, st, base)?;
+                    shown_scalar = name.sym.as_str() == "str"
+                        && arg_ids.is_empty()
+                        && matches!(&v, Sv::Leaf(l) if matches!(l.base, Base::Int(_) | Base::Float | Base::Bool | Base::Char));
                 } else {
                     self.expr(fr, st, callee)?;
                 }
@@ -2794,7 +2798,13 @@ impl<'a> Gen<'a> {
                 if self.tys.is_never(t) {
                     return None;
                 }
-                Some(self.unit_or_fresh(t, "call"))
+                let r = self.unit_or_fresh(t, "call");
+                // A number, character or Boolean shows as at least one character.
+                if let (true, Some(rt)) = (shown_scalar, r.term()) {
+                    let lr = self.str_len(rt);
+                    self.assume(st, format!("(>= {lr} 1)"));
+                }
+                Some(r)
             }
         }
     }
@@ -3203,6 +3213,35 @@ impl<'a> Gen<'a> {
                 }
                 Some(r)
             }
+            Repeat => {
+                let x = term(0)?;
+                let n = term(1)?;
+                self.oblige(
+                    fr,
+                    st,
+                    ObKind::Panic,
+                    span,
+                    format!("repeat count is not negative: {}", self.src(span)),
+                    format!("(>= {n} 0)"),
+                );
+                self.assume(st, format!("(>= {n} 0)"));
+                let r = self.fresh(t, "repeat");
+                if let Some(rt) = r.term() {
+                    let (lr, lx) = (self.str_len(rt), self.str_len(&x));
+                    self.assume(st, format!("(= {lr} (* {lx} {n}))"));
+                }
+                Some(r)
+            }
+            // One to four bytes per character.
+            FromChars => {
+                let Some(Sv::List { len, .. }) = v0 else { return Some(self.fresh(t, "str")) };
+                let r = self.fresh(t, "str");
+                if let Some(rt) = r.term() {
+                    let lr = self.str_len(rt);
+                    self.assume(st, format!("(and (<= {n} {lr}) (<= {lr} (* 4 {n})))", n = len.t));
+                }
+                Some(r)
+            }
             Trim => {
                 let x = term(0)?;
                 let r = self.fresh(t, "trim");
@@ -3365,6 +3404,47 @@ impl<'a> Gen<'a> {
                         Sv::List { len: Leaf { t: "0".into(), base: Base::Int(IntTy::I64), depth: 0 }, elems },
                     );
                 }
+                Some(Sv::Unit)
+            }
+            Extend => {
+                // The lengths add up; the elements are not modeled.
+                let Some(Sv::List { len, .. }) = v0 else { return self.havoc_call(st, args.to_vec_args(), t) };
+                let Some(Sv::List { len: more, .. }) = args.get(1).map(|a| a.value().clone()) else {
+                    return self.havoc_call(st, args.to_vec_args(), t);
+                };
+                let lt = match &args[0] {
+                    Arg::Place(p, _) => *p.tys.last().unwrap(),
+                    _ => return self.havoc_call(st, args.to_vec_args(), t),
+                };
+                let fresh = self.fresh(lt, "list");
+                if let Sv::List { elems, .. } = fresh {
+                    let nl = self.define_int(format!("(+ {} {})", len.t, more.t));
+                    self.write_arg(
+                        st,
+                        &args[0],
+                        Sv::List { len: Leaf { t: nl, base: Base::Int(IntTy::I64), depth: 0 }, elems },
+                    );
+                }
+                Some(Sv::Unit)
+            }
+            Truncate => {
+                let Some(Sv::List { len, elems }) = v0 else { return self.havoc_call(st, args.to_vec_args(), t) };
+                let n = term(1)?;
+                self.oblige(
+                    fr,
+                    st,
+                    ObKind::Panic,
+                    span,
+                    format!("truncate length is not negative: {}", self.src(span)),
+                    format!("(>= {n} 0)"),
+                );
+                self.assume(st, format!("(>= {n} 0)"));
+                let nl = self.define_int(format!("(ite (< {n} {l}) {n} {l})", l = len.t));
+                self.write_arg(
+                    st,
+                    &args[0],
+                    Sv::List { len: Leaf { t: nl, base: Base::Int(IntTy::I64), depth: 0 }, elems },
+                );
                 Some(Sv::Unit)
             }
             Reverse | Sort | SortBy => {

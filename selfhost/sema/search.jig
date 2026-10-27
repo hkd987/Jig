@@ -192,7 +192,9 @@ fn unifies(q: SPat, c: SPat, env: Map<Str, SPat>) -> Bool {
 }
 
 /// `(params) -> ret effects {...}` as search results show it.
-fn Sema.search_sig(self, fd: FnDef) -> Str {
+fn Sema.search_sig(self, fd: FnDef) -> Str
+  ensures result.len() >= 2
+{
   var parts: List<Str> = []
   match (fd.self_mode, fd.self_ty) {
     (Some(m), Some(st)) => parts.push(
@@ -310,7 +312,10 @@ fn Sema.search(self, query: Str, limit: Int) -> Result<List<Hit>, Str> {
 }
 
 /// `jigc search [PATH] SIGNATURE`: the 20 best matches, as `jig search` prints them.
-fn search_cmd(o: Opts, std_dir: Str, cwd: Str) -> Output effects {fs, env} {
+fn search_cmd(o: Opts, std_dir: Str, cwd: Str) -> Output
+  ensures result.code == 0 || result.code == 2
+  effects {fs, env}
+{
   let (s, _) = analyze(absolute_path(o.path, cwd), std_dir)
   return match s.search(o.rest.join(" "), 20) {
     Ok(hits) => {

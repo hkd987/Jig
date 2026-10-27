@@ -174,7 +174,9 @@ fn text_result(text: Str, structured: Option<Json>, is_error: Bool) -> Json {
 }
 
 /// An argument's text, if it is a non-empty string.
-fn arg_text(args: Json, k: Str) -> Option<Str> {
+fn arg_text(args: Json, k: Str) -> Option<Str>
+  ensures result.is_none() || !result.unwrap().is_empty()
+{
   let v = args.get(k)?.as_str()?
   return if v.is_empty() { None } else { Some(v) }
 }
@@ -470,7 +472,9 @@ fn rpc_result(id: Json, result: Json) -> Str {
   return json_text(Json.Obj([("jsonrpc", jstr("2.0")), ("id", id), ("result", result)]))
 }
 
-fn rpc_error(id: Json, code: Int, message: Str) -> Str {
+fn rpc_error(id: Json, code: Int, message: Str) -> Str
+  ensures !result.is_empty()
+{
   return json_text(
     Json.Obj(
       [

@@ -299,7 +299,9 @@ fn Sema.lookup_def(self, name: Str) -> Option<Def> {
   return self.lookup_name(self.pkg, name)
 }
 
-fn Sema.prelude_variant(self, name: Str) -> Option<(Int, Int)> {
+fn Sema.prelude_variant(self, name: Str) -> Option<(Int, Int)>
+  ensures result.is_none() || name == "Some" || name == "None" || name == "Ok" || name == "Err"
+{
   return match name {
     "Some" => Some((self.defs.option, 0))
     "None" => Some((self.defs.option, 1))
@@ -368,7 +370,9 @@ fn Sema.unresolved(&mut self, span: syntax.Span, name: Str) {
 
 /// The candidate nearest to `name` by edit distance, if near enough (ties go to the first in
 /// alphabetical order, so the answer does not depend on the candidates' order).
-fn closest(name: Str, cands: List<Str>) -> Option<Str> {
+fn closest(name: Str, cands: List<Str>) -> Option<Str>
+  ensures result.is_none() || !cands.is_empty()
+{
   var best: Option<(Int, Str)> = None
   for c in cands {
     if c == name || c.is_empty() {
@@ -560,13 +564,17 @@ fn Sema.variant_value(
   return self.tys.func(ps, ty, 0)
 }
 
-fn Sema.note_variant_built(&mut self, adt: Int, v: Int) {
+fn Sema.note_variant_built(&mut self, adt: Int, v: Int)
+  ensures self.body.variants_built.len() >= old(self.body.variants_built.len())
+{
   if !self.body.variants_built.contains((adt, v)) {
     self.body.variants_built.push((adt, v))
   }
 }
 
-fn Sema.note_field_read(&mut self, adt: Int, i: Int) {
+fn Sema.note_field_read(&mut self, adt: Int, i: Int)
+  ensures self.body.fields_read.len() >= old(self.body.fields_read.len())
+{
   if !self.body.fields_read.contains((adt, i)) {
     self.body.fields_read.push((adt, i))
   }
@@ -674,7 +682,22 @@ fn Sema.check_unary(&mut self, e: Int, op: syntax.UnOp, inner: Int, expected: Op
   }
 }
 
-fn is_comparison(op: syntax.BinOp) -> Bool {
+fn is_comparison(op: syntax.BinOp) -> Bool
+  ensures result ==
+    (op == syntax.BinOp.Eq ||
+      op == syntax.BinOp.Ne ||
+      op == syntax.BinOp.Lt ||
+      op == syntax.BinOp.Le ||
+      op == syntax.BinOp.Gt ||
+      op == syntax.BinOp.Ge)
+  ensures result ==
+    (op == syntax.BinOp.Eq ||
+      op == syntax.BinOp.Ne ||
+      op == syntax.BinOp.Lt ||
+      op == syntax.BinOp.Le ||
+      op == syntax.BinOp.Gt ||
+      op == syntax.BinOp.Ge)
+{
   return match op {
     Eq | Ne | Lt | Le | Gt | Ge => true
     _ => false

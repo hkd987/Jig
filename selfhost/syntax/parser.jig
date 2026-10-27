@@ -66,7 +66,9 @@ fn is_type_like(s: Str) -> Bool {
   return c >= 'A' && c <= 'Z'
 }
 
-fn is_numeric_type_name(s: Str) -> Bool {
+fn is_numeric_type_name(s: Str) -> Bool
+  ensures !result || s.len() >= 2
+{
   return s == "Int" || s == "Float" || s == "I32" || s == "U8" || s == "U32" || s == "U64"
 }
 

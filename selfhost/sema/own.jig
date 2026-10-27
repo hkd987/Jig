@@ -4,9 +4,12 @@
 // (which may move a value out instead of retaining it) and unique lists (whose element
 // writes need no copy check).
 
-fn place_uses(p: Place, out: &mut List<Int>) {
+fn place_uses(p: Place, out: &mut List<Int>)
+  ensures out.len() > old(out.len())
+{
   out.push(p.local)
-  for e in p.proj {
+  let start = out.len()
+  for e in p.proj invariant out.len() >= start {
     match e {
       Index(op, _) => operand_uses(op, &mut out)
       _ => {}
@@ -14,7 +17,9 @@ fn place_uses(p: Place, out: &mut List<Int>) {
   }
 }
 
-fn operand_uses(op: Operand, out: &mut List<Int>) {
+fn operand_uses(op: Operand, out: &mut List<Int>)
+  ensures out.len() >= old(out.len())
+{
   match op {
     Copy(p) => place_uses(p, &mut out)
     _ => {}
@@ -69,7 +74,9 @@ fn stmt_uses(stmt: Stmt, out: &mut List<Int>) -> Int {
   }
 }
 
-fn term_uses(t: Terminator, out: &mut List<Int>) {
+fn term_uses(t: Terminator, out: &mut List<Int>)
+  ensures out.len() >= old(out.len())
+{
   match t {
     If(c, _, _) | Switch(c, _, _) => operand_uses(c, &mut out)
     Return => out.push(0)

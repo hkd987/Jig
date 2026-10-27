@@ -171,7 +171,9 @@ fn analysis_of(dir: Str, std_dir: Str, cwd: Str) -> Analysis effects {fs, env} {
 }
 
 /// `start` as an absolute path without `.` or `..` segments.
-fn absolute_path(start: Str, cwd: Str) -> Str {
+fn absolute_path(start: Str, cwd: Str) -> Str
+  ensures !result.is_empty()
+{
   let full = if start.starts_with("/") { start } else { join_path(cwd, start) }
   var parts: List<Str> = []
   for seg in full.split("/") {
@@ -189,7 +191,10 @@ fn absolute_path(start: Str, cwd: Str) -> Str {
 
 /// `p` as an absolute path if it exists, else as given (as the bootstrap compiler canonicalizes
 /// paths that exist).
-fn existing_absolute(p: Str, cwd: Str) -> Str effects {fs} {
+fn existing_absolute(p: Str, cwd: Str) -> Str
+  ensures result == p || !result.is_empty()
+  effects {fs}
+{
   return if fs.exists(p) { absolute_path(p, cwd) } else { p }
 }
 
@@ -283,7 +288,10 @@ fn check_project(start: Str, std_dir: Str, cwd: Str) -> List<ProjectDiag> effect
 }
 
 /// `jigc check [PATH] [--json]`: what `jig check` prints, and its exit code.
-fn check_cmd(start: Str, std_dir: Str, cwd: Str, json: Bool) -> Output effects {fs, env} {
+fn check_cmd(start: Str, std_dir: Str, cwd: Str, json: Bool) -> Output
+  ensures result.code == 0 || result.code == 1
+  effects {fs, env}
+{
   let diags = check_project(start, std_dir, cwd)
   var out = ""
   for d in diags {

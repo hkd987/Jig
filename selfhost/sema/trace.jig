@@ -130,14 +130,18 @@ fn Sema.fn_location(self, f: Int, cwd: Str) -> Str {
   return self.location_text(self.defs.fns[f].name_span.lo, cwd)
 }
 
-fn Sema.fn_json(self, f: Int, cwd: Str) -> Str {
+fn Sema.fn_json(self, f: Int, cwd: Str) -> Str
+  ensures result.len() >= 25
+{
   return "{\"function\":" +
     json_str(self.fn_display_name(f)) +
     ",\"location\":" +
     json_str(self.fn_location(f, cwd))
 }
 
-fn Sema.fns_json(self, fs: List<Int>, cwd: Str) -> Str {
+fn Sema.fns_json(self, fs: List<Int>, cwd: Str) -> Str
+  ensures result.len() >= 2
+{
   var parts: List<Str> = []
   for f in fs {
     parts.push(self.fn_json(f, cwd) + "}")

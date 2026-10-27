@@ -38,7 +38,9 @@ enum ObKind {
   Shift
 }
 
-fn ObKind.name(self) -> Str {
+fn ObKind.name(self) -> Str
+  ensures !result.is_empty()
+{
   return match self {
     Precondition => "precondition"
     Postcondition => "postcondition"
@@ -57,7 +59,15 @@ fn ObKind.name(self) -> Str {
 }
 
 /// Contracts are what people write; safety obligations are the runtime traps.
-fn ObKind.is_contract(self) -> Bool {
+fn ObKind.is_contract(self) -> Bool
+  ensures result ==
+    (self == ObKind.Precondition ||
+      self == ObKind.Postcondition ||
+      self == ObKind.LoopInvariant ||
+      self == ObKind.StructInvariant ||
+      self == ObKind.Refinement ||
+      self == ObKind.Assert)
+{
   return match self {
     Precondition | Postcondition | LoopInvariant | StructInvariant | Refinement | Assert => true
     _ => false
@@ -123,7 +133,9 @@ fn sv_int(t: Str, k: IntTy) -> Sv {
   return Sv.Leaf(Leaf { t: t, base: Base.Int(k), depth: 0 })
 }
 
-fn int_leaf(t: Str) -> Leaf {
+fn int_leaf(t: Str) -> Leaf
+  ensures result.t == t && result.depth == 0
+{
   return Leaf { t: t, base: Base.Int(IntTy.I64), depth: 0 }
 }
 
@@ -250,7 +262,9 @@ enum Zip {
   Ite(c: Str)
 }
 
-fn zip_leaf(a: Leaf, b: Leaf, z: Zip) -> Leaf {
+fn zip_leaf(a: Leaf, b: Leaf, z: Zip) -> Leaf
+  ensures result.base == a.base && result.depth == a.depth
+{
   return match z {
     Store(i) => Leaf {
       t: "(store " + a.t + " " + i + " " + b.t + ")"
@@ -370,11 +384,15 @@ fn plain_sv(v: Sv) -> Bool {
 
 // ---------- terms ----------
 
-fn smt_lit(neg: Bool, mag: U64) -> Str {
+fn smt_lit(neg: Bool, mag: U64) -> Str
+  ensures !result.is_empty()
+{
   return if neg && mag != 0 { "(- " + mag.str() + ")" } else { mag.str() }
 }
 
-fn smt_int(v: Int) -> Str {
+fn smt_int(v: Int) -> Str
+  ensures !result.is_empty()
+{
   return if v < 0 { smt_lit(true, neg_mag(v)) } else { v.str() }
 }
 
@@ -394,7 +412,9 @@ fn smt_and(xs: List<Str>) -> Str {
   return "(and " + ys.join(" ") + ")"
 }
 
-fn smt_not(x: Str) -> Str {
+fn smt_not(x: Str) -> Str
+  ensures !result.is_empty()
+{
   if x == "true" {
     return "false"
   }
@@ -404,7 +424,9 @@ fn smt_not(x: Str) -> Str {
   return "(not " + x + ")"
 }
 
-fn smt_or2(a: Str, b: Str) -> Str {
+fn smt_or2(a: Str, b: Str) -> Str
+  ensures (a != "true" && b != "true") || result == "true"
+{
   if a == "true" || b == "true" {
     return "true"
   }
@@ -417,12 +439,16 @@ fn smt_or2(a: Str, b: Str) -> Str {
   return "(or " + a + " " + b + ")"
 }
 
-fn range_fact(t: Str, lo: Str, hi: Str) -> Str {
+fn range_fact(t: Str, lo: Str, hi: Str) -> Str
+  ensures result.len() > t.len() + lo.len() + hi.len()
+{
   return "(and (<= " + lo + " " + t + ") (<= " + t + " " + hi + "))"
 }
 
 /// The bounds of an integer type as SMT literals.
-fn int_min_smt(k: IntTy) -> Str {
+fn int_min_smt(k: IntTy) -> Str
+  ensures !result.is_empty()
+{
   return match k {
     I64 => "(- 9223372036854775808)"
     I32 => "(- 2147483648)"
@@ -430,7 +456,9 @@ fn int_min_smt(k: IntTy) -> Str {
   }
 }
 
-fn int_range(t: Str, k: IntTy) -> Str {
+fn int_range(t: Str, k: IntTy) -> Str
+  ensures result.len() > t.len()
+{
   return range_fact(t, int_min_smt(k), k.max_text())
 }
 
@@ -442,7 +470,9 @@ struct St {
   pc: List<Str>
 }
 
-fn empty_st() -> St {
+fn empty_st() -> St
+  ensures result.pc.is_empty()
+{
   return St { env: Map.new(), pc: [] }
 }
 
@@ -562,7 +592,10 @@ fn new_gen(s: Sema, frames: Map<(Int, Int), MutFrame>, reads: Map<(Int, Int), Mu
   }
 }
 
-fn Gen.reset(&mut self) {
+fn Gen.reset(&mut self)
+  ensures self.n == 0 && self.inline == 0 && self.depth == 0
+  ensures self.decls.is_empty() && self.obligations.is_empty() && self.loops.is_empty()
+{
   self.sorts = []
   self.funs = []
   self.decls = []
@@ -584,7 +617,9 @@ fn Gen.reset(&mut self) {
 
 // ---------- SMT declarations ----------
 
-fn Gen.name(&mut self, hint: Str) -> Str {
+fn Gen.name(&mut self, hint: Str) -> Str
+  ensures self.n == old(self.n) + 1 && result.len() >= 2
+{
   self.n += 1
   var clean: List<Char> = []
   for c in hint.chars() {
@@ -621,7 +656,9 @@ fn Gen.fn_num(&mut self, f: Int) -> Int {
   return n
 }
 
-fn Gen.sort(&mut self, b: Base, depth: Int) -> Str {
+fn Gen.sort(&mut self, b: Base, depth: Int) -> Str
+  ensures !result.is_empty()
+{
   var s = match b {
     Bool => "Bool"
     Int(_) | Char | Tag(_) => "Int"
@@ -632,13 +669,15 @@ fn Gen.sort(&mut self, b: Base, depth: Int) -> Str {
       self.opaque_sort("O" + n.str())
     }
   }
-  for _ in 0..depth {
+  for _ in 0..depth invariant !s.is_empty() {
     s = "(Array Int " + s + ")"
   }
   return s
 }
 
-fn Gen.opaque_sort(&mut self, name: Str) -> Str {
+fn Gen.opaque_sort(&mut self, name: Str) -> Str
+  ensures result == name
+{
   let key = "sort " + name
   if !self.declared.contains(key) {
     self.declared.insert(key)
@@ -647,7 +686,9 @@ fn Gen.opaque_sort(&mut self, name: Str) -> Str {
   return name
 }
 
-fn Gen.fun(&mut self, name: Str, args: List<Str>, ret: Str) -> Str {
+fn Gen.fun(&mut self, name: Str, args: List<Str>, ret: Str) -> Str
+  ensures result == name
+{
   let key = "fun " + name
   if !self.declared.contains(key) {
     self.declared.insert(key)
@@ -656,20 +697,26 @@ fn Gen.fun(&mut self, name: Str, args: List<Str>, ret: Str) -> Str {
   return name
 }
 
-fn Gen.str_len(&mut self, t: Str) -> Str {
+fn Gen.str_len(&mut self, t: Str) -> Str
+  ensures result.len() > t.len()
+{
   let s = self.opaque_sort("JStr")
   let f = self.fun("str_len", [s], "Int")
   return "(" + f + " " + t + ")"
 }
 
-fn Gen.konst(&mut self, sort: Str, hint: Str) -> Str {
+fn Gen.konst(&mut self, sort: Str, hint: Str) -> Str
+  ensures self.decls.len() == old(self.decls.len()) + 1
+{
   let n = self.name(hint)
   self.decls.push("(declare-const " + n + " " + sort + ")")
   return n
 }
 
 /// Name a term (keeps terms small); inline mode returns the term itself.
-fn Gen.define(&mut self, sort: Str, term: Str) -> Str {
+fn Gen.define(&mut self, sort: Str, term: Str) -> Str
+  ensures result == term || self.decls.len() == old(self.decls.len()) + 1
+{
   if self.inline > 0 || !term.starts_with("(") {
     return term
   }
@@ -678,11 +725,15 @@ fn Gen.define(&mut self, sort: Str, term: Str) -> Str {
   return n
 }
 
-fn Gen.define_bool(&mut self, term: Str) -> Str {
+fn Gen.define_bool(&mut self, term: Str) -> Str
+  ensures result == term || self.decls.len() == old(self.decls.len()) + 1
+{
   return self.define("Bool", term)
 }
 
-fn Gen.define_int(&mut self, term: Str) -> Str {
+fn Gen.define_int(&mut self, term: Str) -> Str
+  ensures result == term || self.decls.len() == old(self.decls.len()) + 1
+{
   return self.define("Int", term)
 }
 
@@ -805,11 +856,15 @@ fn Gen.elem_ty(self, t: Int) -> Int {
   }
 }
 
-fn Gen.is_unit(self, t: Int) -> Bool {
+fn Gen.is_unit(self, t: Int) -> Bool
+  ensures result == (t == self.s.tys.unit_ty)
+{
   return t == self.s.tys.unit_ty
 }
 
-fn Gen.is_never(self, t: Int) -> Bool {
+fn Gen.is_never(self, t: Int) -> Bool
+  ensures result == (t == self.s.tys.never)
+{
   return t == self.s.tys.never
 }
 
@@ -822,7 +877,9 @@ fn Gen.fresh(&mut self, t: Int, hint: Str) -> Sv {
   return v
 }
 
-fn Gen.leaf(&mut self, base: Base, depth: Int, hint: Str) -> Leaf {
+fn Gen.leaf(&mut self, base: Base, depth: Int, hint: Str) -> Leaf
+  ensures result.base == base && result.depth == depth
+{
   let sort = self.sort(base, depth)
   let t = self.konst(sort, hint)
   return Leaf { t: t, base: base, depth: depth }
@@ -1114,13 +1171,17 @@ fn Gen.unit_or_fresh(&mut self, t: Int, hint: Str) -> Sv {
 
 // ---------- obligations ----------
 
-fn Gen.assume(self, st: &mut St, fact: Str) {
+fn Gen.assume(self, st: &mut St, fact: Str)
+  ensures st.pc.len() == old(st.pc.len()) + (if fact != "true" { 1 } else { 0 })
+{
   if fact != "true" {
     st.pc.push(fact)
   }
 }
 
-fn Gen.oblige(&mut self, fr: VFrame, st: St, kind: ObKind, span: syntax.Span, msg: Str, goal: Str) {
+fn Gen.oblige(&mut self, fr: VFrame, st: St, kind: ObKind, span: syntax.Span, msg: Str, goal: Str)
+  ensures self.obligations.len() <= old(self.obligations.len()) + 1
+{
   // Traps inside callee contracts and type predicates are the callee's (or the type's)
   // business; they are checked where that code is verified.
   if self.inline > 0 || (!fr.own && !kind.is_contract()) {

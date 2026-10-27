@@ -14,7 +14,9 @@ struct TyScope {
   has_self: Bool
 }
 
-fn generic_defs(gs: List<syntax.GenericParam>) -> List<GenericDef> {
+fn generic_defs(gs: List<syntax.GenericParam>) -> List<GenericDef>
+  ensures result.len() == gs.len()
+{
   var out: List<GenericDef> = []
   for g in gs {
     out.push(GenericDef { name: g.name.text, bounds: [], span: g.name.span })
@@ -22,7 +24,9 @@ fn generic_defs(gs: List<syntax.GenericParam>) -> List<GenericDef> {
   return out
 }
 
-fn generic_names(gs: List<GenericDef>) -> List<Str> {
+fn generic_names(gs: List<GenericDef>) -> List<Str>
+  ensures result.len() == gs.len()
+{
   var out: List<Str> = []
   for g in gs {
     out.push(g.name)
@@ -30,7 +34,9 @@ fn generic_names(gs: List<GenericDef>) -> List<Str> {
   return out
 }
 
-fn plural(n: Int) -> Str {
+fn plural(n: Int) -> Str
+  ensures result == "" || result == "s"
+{
   return if n == 1 { "" } else { "s" }
 }
 
@@ -302,11 +308,15 @@ fn new_fn(
   }
 }
 
-fn Sema.err(&mut self, code: Str, span: syntax.Span, msg: Str) {
+fn Sema.err(&mut self, code: Str, span: syntax.Span, msg: Str)
+  ensures self.diags.len() == old(self.diags.len()) + 1
+{
   self.diags.push(diag(code, span, msg))
 }
 
-fn Sema.push(&mut self, d: syntax.Diag) {
+fn Sema.push(&mut self, d: syntax.Diag)
+  ensures self.diags.len() == old(self.diags.len()) + 1
+{
   self.diags.push(d)
 }
 
@@ -507,7 +517,9 @@ fn Sema.resolve_type(&mut self, sc: TyScope, te: Int) -> Int {
   }
 }
 
-fn Sema.resolve_types(&mut self, sc: TyScope, ids: List<Int>) -> List<Int> {
+fn Sema.resolve_types(&mut self, sc: TyScope, ids: List<Int>) -> List<Int>
+  ensures result.len() == ids.len()
+{
   var out: List<Int> = []
   for a in ids {
     out.push(self.resolve_type(sc, a))
@@ -741,9 +753,12 @@ fn Sema.resolve_fields(
   sc: TyScope,
   fs: List<syntax.FieldDecl>,
   what: Str,
-) -> List<FieldDef> {
+) -> List<FieldDef>
+  ensures result.len() <= fs.len()
+{
   var out: List<FieldDef> = []
-  for f in fs {
+  for i in 0..fs.len() invariant out.len() <= i {
+    let f = fs[i]
     var dup = false
     for x in out {
       if x.name == f.name.text {
@@ -841,7 +856,9 @@ fn Sema.struct_reaches_self_through_enum(self, aid: Int) -> Bool {
 
 // ---- functions ----
 
-fn generic_hint(n: Int) -> Str {
+fn generic_hint(n: Int) -> Str
+  ensures (n == 0) == result.is_empty()
+{
   if n == 0 {
     return ""
   }
@@ -1137,12 +1154,16 @@ fn Sema.eval_const(&mut self, cid: Int, visiting: &mut List<Int>) -> Option<Cons
   return v
 }
 
-fn Sema.const_bad(&mut self, span: syntax.Span, msg: Str) -> Option<ConstVal> {
+fn Sema.const_bad(&mut self, span: syntax.Span, msg: Str) -> Option<ConstVal>
+  ensures result.is_none() && self.diags.len() == old(self.diags.len()) + 1
+{
   self.err("E0329", span, msg)
   return None
 }
 
-fn Sema.const_mismatch(&mut self, span: syntax.Span, ty: Int, found: Str) -> Option<ConstVal> {
+fn Sema.const_mismatch(&mut self, span: syntax.Span, ty: Int, found: Str) -> Option<ConstVal>
+  ensures result.is_none() && self.diags.len() == old(self.diags.len()) + 1
+{
   self.err(
     "E0301",
     span,

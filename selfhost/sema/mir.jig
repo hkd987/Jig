@@ -19,23 +19,31 @@ struct Place {
   proj: List<PlaceElem>
 }
 
-fn place_of(l: Int) -> Place {
+fn place_of(l: Int) -> Place
+  ensures result.local == l && result.proj.is_empty()
+{
   return Place { local: l, proj: [] }
 }
 
-fn Place.field(self, i: Int) -> Place {
+fn Place.field(self, i: Int) -> Place
+  ensures result.local == self.local && result.proj.len() == self.proj.len() + 1
+{
   var p = self
   p.proj.push(PlaceElem.Field(i))
   return p
 }
 
-fn Place.variant_field(self, v: Int, i: Int) -> Place {
+fn Place.variant_field(self, v: Int, i: Int) -> Place
+  ensures result.local == self.local && result.proj.len() == self.proj.len() + 1
+{
   var p = self
   p.proj.push(PlaceElem.VariantField(v, i))
   return p
 }
 
-fn Place.index(self, op: Operand, span: syntax.Span) -> Place {
+fn Place.index(self, op: Operand, span: syntax.Span) -> Place
+  ensures result.local == self.local && result.proj.len() == self.proj.len() + 1
+{
   var p = self
   p.proj.push(PlaceElem.Index(op, span))
   return p
@@ -187,7 +195,9 @@ struct Intrinsic {
   int: Option<IntTy>
 }
 
-fn intrinsic(op: Op, tys: List<Int>) -> Intrinsic {
+fn intrinsic(op: Op, tys: List<Int>) -> Intrinsic
+  ensures result.op == op && result.tys == tys && result.int.is_none()
+{
   return Intrinsic { op: op, tys: tys, int: None }
 }
 
@@ -216,7 +226,9 @@ fn no_proofs() -> Proven {
   return Proven { contract: Set.new(), safety: Set.new(), bounds: Set.new(), entries: Set.new() }
 }
 
-fn span_key(s: syntax.Span) -> (Int, Int) {
+fn span_key(s: syntax.Span) -> (Int, Int)
+  ensures result.0 == s.lo && result.1 == s.hi
+{
   return (s.lo, s.hi)
 }
 

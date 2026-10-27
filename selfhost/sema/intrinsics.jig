@@ -89,7 +89,9 @@ fn strs_v(xs: List<Str>) -> Value {
 }
 
 /// A string's byte `i` starts a character (or is its end).
-fn on_boundary(s: Str, i: Int) -> Bool {
+fn on_boundary(s: Str, i: Int) -> Bool
+  ensures result || (i > 0 && i < s.len())
+{
   if i <= 0 || i >= s.len() {
     return true
   }
@@ -98,7 +100,9 @@ fn on_boundary(s: Str, i: Int) -> Bool {
 }
 
 /// Order-preserving maps between Int and U64.
-fn bias(x: Int) -> U64 {
+fn bias(x: Int) -> U64
+  ensures (x >= 0) == (result >= 9223372036854775808)
+{
   return if x >= 0 {
     (x as U64) + 9223372036854775808
   } else {
@@ -106,7 +110,9 @@ fn bias(x: Int) -> U64 {
   }
 }
 
-fn unbias(u: U64) -> Int {
+fn unbias(u: U64) -> Int
+  ensures (u >= 9223372036854775808) == (result >= 0)
+{
   return if u >= 9223372036854775808 {
     (u - 9223372036854775808) as Int
   } else {

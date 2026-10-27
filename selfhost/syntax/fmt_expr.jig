@@ -405,7 +405,9 @@ fn Printer.render(self, e: Int, ind: Int, col: Int, trail: Int) -> Str {
   return self.broken(e, ind, col, trail)
 }
 
-fn Printer.expr_elems(self, xs: List<Int>) -> List<Elem> {
+fn Printer.expr_elems(self, xs: List<Int>) -> List<Elem>
+  ensures result.len() == xs.len()
+{
   var out: List<Elem> = []
   for x in xs {
     out.push(Elem.Expr(x))
@@ -1236,7 +1238,9 @@ fn Printer.types_into(self, ts: List<Int>, o: &mut Str) {
 }
 
 /// `<A, B>`, or nothing for no arguments.
-fn Printer.type_args_into(self, args: List<Int>, o: &mut Str) {
+fn Printer.type_args_into(self, args: List<Int>, o: &mut Str)
+  ensures args.is_empty() || !o.is_empty()
+{
   if !args.is_empty() {
     o += "<"
     self.types_into(args, &mut o)

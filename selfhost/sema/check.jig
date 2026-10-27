@@ -102,11 +102,16 @@ struct Sema {
   item_span: syntax.Span
 }
 
-fn empty_ast() -> syntax.Ast {
+fn empty_ast() -> syntax.Ast
+  ensures result.items.is_empty() && result.exprs.is_empty() && result.top.is_empty()
+{
   return syntax.Ast { items: [], exprs: [], stmts: [], types: [], pats: [], top: [] }
 }
 
-fn new_sema(ld: Loaded) -> Sema {
+fn new_sema(ld: Loaded) -> Sema
+  ensures result.pkgs.len() == ld.pkgs.len() && result.tables.len() == ld.pkgs.len()
+  ensures result.var_ty.is_empty() && result.trail.is_empty()
+{
   let tys = new_tys()
   var tables: List<List<Tables>> = []
   for p in ld.pkgs {
@@ -321,7 +326,9 @@ fn Sema.mismatch(&mut self, span: syntax.Span, expected: Int, found: Int) {
 }
 
 /// The source text at `span` for a suggested fix (none if long or on several lines).
-fn Sema.fix_snippet(self, span: syntax.Span) -> Str {
+fn Sema.fix_snippet(self, span: syntax.Span) -> Str
+  ensures result.len() <= 80
+{
   let s = self.snippet(span.lo, span.hi)
   if s.len() > 80 || s.contains("\n") {
     return ""
@@ -335,18 +342,25 @@ fn Sema.expr_span(self, e: Int) -> syntax.Span {
 
 // ---------- inference variables ----------
 
-fn Sema.new_var(&mut self, kind: VarKind) -> Int {
+fn Sema.new_var(&mut self, kind: VarKind) -> Int
+  ensures self.var_ty.len() == old(self.var_ty.len()) + 1
+  ensures self.var_kind.len() == old(self.var_kind.len()) + 1
+{
   let v = self.var_ty.len()
   self.var_ty.push(-1)
   self.var_kind.push(kind)
   return self.tys.infer(v)
 }
 
-fn Sema.fresh(&mut self) -> Int {
+fn Sema.fresh(&mut self) -> Int
+  ensures self.var_ty.len() == old(self.var_ty.len()) + 1
+{
   return self.new_var(VarKind.General)
 }
 
-fn Sema.fresh_list(&mut self, n: Int) -> List<Int> {
+fn Sema.fresh_list(&mut self, n: Int) -> List<Int>
+  ensures result.len() == max(n, 0)
+{
   var out: List<Int> = []
   for _ in 0..n {
     out.push(self.fresh())
@@ -411,7 +425,9 @@ fn Sema.zonk(&mut self, t: Int) -> Int {
   }
 }
 
-fn Sema.zonk_all(&mut self, ts: List<Int>) -> List<Int> {
+fn Sema.zonk_all(&mut self, ts: List<Int>) -> List<Int>
+  ensures result.len() == ts.len()
+{
   var out: List<Int> = []
   for x in ts {
     out.push(self.zonk(x))
@@ -432,7 +448,9 @@ fn Sema.default_vars(&mut self) {
   }
 }
 
-fn Sema.rollback(&mut self, snap: Int) {
+fn Sema.rollback(&mut self, snap: Int)
+  ensures self.trail.len() <= snap
+{
   for self.trail.len() > snap {
     let v = self.trail.pop().unwrap_or(0)
     self.var_ty[v] = -1
@@ -456,7 +474,9 @@ fn Sema.occurs(self, v: Int, t: Int) -> Bool {
   }
 }
 
-fn Sema.occurs_any(self, v: Int, ts: List<Int>) -> Bool {
+fn Sema.occurs_any(self, v: Int, ts: List<Int>) -> Bool
+  ensures !result || !ts.is_empty()
+{
   for x in ts {
     if self.occurs(v, x) {
       return true
@@ -466,7 +486,9 @@ fn Sema.occurs_any(self, v: Int, ts: List<Int>) -> Bool {
 }
 
 /// Make two types equal. Rolls back partial bindings on failure.
-fn Sema.unify(&mut self, a: Int, b: Int) -> Bool {
+fn Sema.unify(&mut self, a: Int, b: Int) -> Bool
+  ensures result || self.trail.len() <= old(self.trail.len())
+{
   let snap = self.trail.len()
   let ok = self.unify_inner(a, b, false)
   if !ok {
@@ -477,7 +499,9 @@ fn Sema.unify(&mut self, a: Int, b: Int) -> Bool {
 
 /// `actual` may be used where `expected` is required: equality, except that `Never`
 /// converts to anything and a function with fewer effects fits a type with more.
-fn Sema.coerce(&mut self, actual: Int, expected: Int) -> Bool {
+fn Sema.coerce(&mut self, actual: Int, expected: Int) -> Bool
+  ensures result || self.trail.len() <= old(self.trail.len())
+{
   let snap = self.trail.len()
   let ok = self.unify_inner(actual, expected, true)
   if !ok {
@@ -486,7 +510,9 @@ fn Sema.coerce(&mut self, actual: Int, expected: Int) -> Bool {
   return ok
 }
 
-fn Sema.unify_lists(&mut self, x: List<Int>, y: List<Int>) -> Bool {
+fn Sema.unify_lists(&mut self, x: List<Int>, y: List<Int>) -> Bool
+  ensures result || (!x.is_empty() && !y.is_empty())
+{
   let n = if x.len() < y.len() { x.len() } else { y.len() }
   for i in 0..n {
     if !self.unify_inner(x[i], y[i], false) {
@@ -564,7 +590,9 @@ fn Sema.bind_checked(&mut self, v: Int, t: Int, k: TyKind) -> Bool {
 }
 
 /// Join the types of two branches.
-fn Sema.join(&mut self, a: Int, b: Int, span: syntax.Span) -> Int {
+fn Sema.join(&mut self, a: Int, b: Int, span: syntax.Span) -> Int
+  ensures result == a || result == b
+{
   if self.resolve(a) == self.tys.never {
     return b
   }
@@ -579,7 +607,9 @@ fn Sema.join(&mut self, a: Int, b: Int, span: syntax.Span) -> Int {
 
 // ---------- scopes and locals ----------
 
-fn Sema.push_scope(&mut self) {
+fn Sema.push_scope(&mut self)
+  ensures self.scope_marks.len() == old(self.scope_marks.len()) + 1
+{
   self.scope_marks.push(self.scope.len())
 }
 
@@ -693,7 +723,9 @@ fn Sema.use_effects(&mut self, eff: Int, span: syntax.Span, what: Str) {
 
 // ---------- bounds ----------
 
-fn Sema.require_bound(&mut self, span: syntax.Span, ty: Int, b: Bound) {
+fn Sema.require_bound(&mut self, span: syntax.Span, ty: Int, b: Bound)
+  ensures self.pending_bounds.len() == old(self.pending_bounds.len()) + 1
+{
   self.pending_bounds.push(PendingBound { span: span, ty: ty, bound: b })
 }
 
@@ -947,7 +979,9 @@ fn Sema.finish(&mut self) {
 
 /// Has an error been reported inside this item (body or signature)? Then unresolved types
 /// are follow-on noise.
-fn Sema.item_has_errors(self) -> Bool {
+fn Sema.item_has_errors(self) -> Bool
+  ensures result || self.diags.len() == self.errors_at_start
+{
   if self.diags.len() != self.errors_at_start {
     return true
   }
@@ -988,7 +1022,9 @@ fn Sema.first_var(self, t: Int) -> Int {
   }
 }
 
-fn Sema.first_var_in(self, ts: List<Int>, fallback: Int) -> Int {
+fn Sema.first_var_in(self, ts: List<Int>, fallback: Int) -> Int
+  ensures result == fallback || !ts.is_empty()
+{
   for x in ts {
     let a = self.first_var(x)
     if self.tys.is_infer(a) {
@@ -1263,7 +1299,9 @@ fn Sema.record(&mut self, e: Int, t: Int) -> Int {
   return t
 }
 
-fn Sema.set_inst(&mut self, e: Int, args: List<Int>) {
+fn Sema.set_inst(&mut self, e: Int, args: List<Int>)
+  ensures self.touched_insts.len() == old(self.touched_insts.len()) + 1
+{
   self.tab.expr_inst.insert(e, args)
   self.touched_insts.push(e)
 }
@@ -1277,7 +1315,9 @@ fn Sema.set_res(&mut self, e: Int, r: Res) {
   self.tab.expr_res[e] = r
 }
 
-fn Sema.add_ref(&mut self, f: Int) {
+fn Sema.add_ref(&mut self, f: Int)
+  ensures self.body.refs.len() >= old(self.body.refs.len())
+{
   if !self.body.refs.contains(f) {
     self.body.refs.push(f)
   }
@@ -1297,7 +1337,9 @@ fn Sema.use_import(&mut self, name: Str) {
 
 // ---------- naming ----------
 
-fn is_snake(s: Str) -> Bool {
+fn is_snake(s: Str) -> Bool
+  ensures !result || !s.is_empty()
+{
   if s.is_empty() || (s[0] >= '0' && s[0] <= '9') {
     return false
   }
@@ -1309,7 +1351,9 @@ fn is_snake(s: Str) -> Bool {
   return true
 }
 
-fn is_camel(s: Str) -> Bool {
+fn is_camel(s: Str) -> Bool
+  ensures !result || !s.is_empty()
+{
   return !s.is_empty() && s[0] >= 'A' && s[0] <= 'Z' && !s.contains("_")
 }
 

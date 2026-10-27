@@ -8,7 +8,9 @@ import "std/strings"
 import "syntax"
 
 /// The standard packages: import path and file name.
-fn std_packages() -> List<(Str, Str)> {
+fn std_packages() -> List<(Str, Str)>
+  ensures result.len() == 11
+{
   return [
     ("std/io", "io.jig"),
     ("std/fs", "fs.jig"),
@@ -24,7 +26,9 @@ fn std_packages() -> List<(Str, Str)> {
   ]
 }
 
-fn std_package_paths() -> List<Str> {
+fn std_package_paths() -> List<Str>
+  ensures result.len() == std_packages().len()
+{
   var out: List<Str> = []
   for (p, _) in std_packages() {
     out.push(p)
@@ -49,19 +53,23 @@ fn read_runtime(std_dir: Str, file: Str) -> Result<Str, Str> effects {fs} {
   return fs.read(std_dir + "/../runtime/" + file)
 }
 
-fn join_path(a: Str, b: Str) -> Str {
+fn join_path(a: Str, b: Str) -> Str
+  ensures result.len() >= a.len() + b.len()
+{
   if a.ends_with("/") {
     return a + b
   }
   return a + "/" + b
 }
 
-fn parent_dir(d: Str) -> Option<Str> {
+fn parent_dir(d: Str) -> Option<Str>
+  ensures result.is_none() || !result.unwrap().is_empty()
+{
   if d == "/" || d.is_empty() {
     return None
   }
   var i = d.len() - 1
-  for i > 0 && d[i] != '/' {
+  for i > 0 && d[i] != '/' invariant i >= 0 && i < d.len() {
     i -= 1
   }
   if d[i] != '/' {
@@ -99,7 +107,9 @@ struct ModFile {
   errors: List<(Int, Str)>
 }
 
-fn is_mod_name(s: Str) -> Bool {
+fn is_mod_name(s: Str) -> Bool
+  ensures !result || !s.is_empty()
+{
   if s.is_empty() {
     return false
   }
@@ -111,7 +121,9 @@ fn is_mod_name(s: Str) -> Bool {
   return true
 }
 
-fn is_module_path(s: Str) -> Bool {
+fn is_module_path(s: Str) -> Bool
+  ensures !result || !s.is_empty()
+{
   if s.is_empty() {
     return false
   }
@@ -126,7 +138,7 @@ fn is_module_path(s: Str) -> Bool {
 fn parse_mod(text: Str) -> ModFile {
   var m = ModFile { module: None, links: [], reqs: [], replaces: [], errors: [] }
   let lines = text.lines()
-  for i in 0..lines.len() {
+  for i in 0..lines.len() invariant m.errors.len() <= i {
     let line = lines[i].split("//")[0].trim()
     let w = strings.words(line)
     var ok = false
@@ -156,7 +168,9 @@ fn parse_mod(text: Str) -> ModFile {
 }
 
 /// `a` joined with `b` as a path: `b` itself if it is absolute.
-fn path_join(a: Str, b: Str) -> Str {
+fn path_join(a: Str, b: Str) -> Str
+  ensures result == b || result.len() >= a.len() + b.len()
+{
   if b.starts_with("/") || a.is_empty() {
     return b
   }
@@ -211,7 +225,9 @@ fn version_parts(v: Str) -> List<(Bool, Int, Str)> {
 }
 
 /// Order versions: `v1.10.0` after `v1.9.2`; numbers compare as numbers (-1, 0 or 1).
-fn version_cmp(a: Str, b: Str) -> Int {
+fn version_cmp(a: Str, b: Str) -> Int
+  ensures result >= -1 && result <= 1
+{
   let (pa, pb) = (version_parts(a), version_parts(b))
   for i in 0..min(pa.len(), pb.len()) {
     let (an, ai, as_) = pa[i]
@@ -378,11 +394,16 @@ struct Loaded {
   links: List<Str>
 }
 
-fn diag(code: Str, span: syntax.Span, msg: Str) -> syntax.Diag {
+fn diag(code: Str, span: syntax.Span, msg: Str) -> syntax.Diag
+  ensures result.code == code && result.lo == span.lo && result.hi == span.hi && result.msg == msg
+  ensures result.labels.is_empty() && result.notes.is_empty() && result.fixes.is_empty()
+{
   return syntax.new_diag(code, span.lo, span.hi, msg)
 }
 
-fn dummy_span() -> syntax.Span {
+fn dummy_span() -> syntax.Span
+  ensures result.lo == 0 && result.hi == 0
+{
   return syntax.Span { lo: 0, hi: 0 }
 }
 
@@ -462,7 +483,11 @@ fn load_program(dir: Str, std_dir: Str) -> Loaded effects {fs, env} {
   }
 }
 
-fn Loader.new_package(&mut self, path: Str, is_std: Bool, module: Option<Int>) -> Int {
+fn Loader.new_package(&mut self, path: Str, is_std: Bool, module: Option<Int>) -> Int
+  ensures result == old(self.pkgs.len()) && self.pkgs.len() == result + 1
+  ensures self.edges.len() == old(self.edges.len()) + 1
+  ensures self.pkg_module.len() == old(self.pkg_module.len()) + 1
+{
   let id = self.pkgs.len()
   self.pkgs.push(
     Package {
@@ -556,7 +581,9 @@ fn Loader.add_dir_package(
 
 /// "jig" or "feature" for a source file's name, else "": its extension, as a path's (`.jig`
 /// alone has none).
-fn source_kind(name: Str) -> Str {
+fn source_kind(name: Str) -> Str
+  ensures result == "" || result == "jig" || result == "feature"
+{
   if name.ends_with(".jig") && name.len() > 4 {
     return "jig"
   }

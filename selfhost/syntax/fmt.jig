@@ -74,6 +74,8 @@ struct Printer {
   slots: Map<(Key, Slot), List<Int>>
   /// Contexts holding at least one comment: these never print flat.
   has: Set<Key>
+
+  invariant base >= 0
 }
 
 /// Format `src`, or say why it cannot be: the syntax errors (the source's first byte is at
@@ -206,22 +208,28 @@ fn end_col(col: Int, s: Str) -> Int {
   return col + width(s)
 }
 
-fn spaces(n: Int) -> Str {
-  return " ".repeat(n)
+fn spaces(n: Int) -> Str
+  ensures result.len() == max(n, 0)
+{
+  return " ".repeat(max(n, 0))
 }
 
-fn newline(s: &mut Str, n: Int) {
+fn newline(s: &mut Str, n: Int)
+  ensures s.len() == old(s.len()) + 1 + max(n, 0)
+{
   s += "\n" + spaces(n)
 }
 
-fn hex_digits(v: Int) -> Str {
+fn hex_digits(v: Int) -> Str
+  ensures v < 0 || !result.is_empty()
+{
   let digits = "0123456789abcdef"
   if v == 0 {
     return "0"
   }
   var out = ""
   var x = v
-  for x > 0 {
+  for x > 0 invariant x >= 0 && (x > 0 || !out.is_empty()) {
     out = digits[x % 16..x % 16 + 1] + out
     x = x / 16
   }
@@ -229,7 +237,9 @@ fn hex_digits(v: Int) -> Str {
 }
 
 /// `s` with escapes, inside `quote`s.
-fn escape(s: Str, quote: Char) -> Str {
+fn escape(s: Str, quote: Char) -> Str
+  ensures s.is_empty() || !result.is_empty()
+{
   var out = ""
   for c in s.chars() {
     let v = c as Int
@@ -254,7 +264,9 @@ fn escape(s: Str, quote: Char) -> Str {
   return out
 }
 
-fn push_str_lit(o: &mut Str, s: Str) {
+fn push_str_lit(o: &mut Str, s: Str)
+  ensures o.len() >= old(o.len()) + 2
+{
   o += "\"" + escape(s, '"') + "\""
 }
 
@@ -266,16 +278,20 @@ fn push_char_lit(o: &mut Str, c: Int) {
 
 // ---------- the printer's helpers ----------
 
-fn Printer.text(self, lo: Int, hi: Int) -> Str {
-  let a = max(lo - self.base, 0)
-  let b = max(max(hi - self.base, 0), a)
+fn Printer.text(self, lo: Int, hi: Int) -> Str
+  ensures result.len() <= self.src.len()
+{
+  let a = max(lo, self.base) - self.base
+  let b = max(max(hi, self.base) - self.base, a)
   if b > self.src.len() {
     return ""
   }
   return self.src[a..b]
 }
 
-fn Printer.span_text(self, s: Span) -> Str {
+fn Printer.span_text(self, s: Span) -> Str
+  ensures result.len() <= self.src.len()
+{
   return self.text(s.lo, s.hi)
 }
 
@@ -293,7 +309,9 @@ fn Printer.has(self, key: Key) -> Bool {
 }
 
 /// Did the author leave a blank line between offsets `a` and `b`?
-fn Printer.blank_between(self, a: Int, b: Int) -> Bool {
+fn Printer.blank_between(self, a: Int, b: Int) -> Bool
+  ensures !result || !self.blank_lines.is_empty()
+{
   for x in self.blank_lines {
     if x > a {
       return x <= b
@@ -461,7 +479,9 @@ fn Printer.braced(self, key: Key, elems: List<LineElem>, ind: Int) -> Str {
 
 // ---------- comments: the first pass ----------
 
-fn span_pair(s: Span) -> (Int, Int) {
+fn span_pair(s: Span) -> (Int, Int)
+  ensures result.0 == s.lo && result.1 == s.hi
+{
   return (s.lo, s.hi)
 }
 
@@ -930,7 +950,9 @@ fn Printer.effects_text(self, es: List<Name>) -> Str {
   return o
 }
 
-fn Printer.fn_elems(self, f: FnDecl) -> List<Elem> {
+fn Printer.fn_elems(self, f: FnDecl) -> List<Elem>
+  ensures result.len() == f.params.len() + (if f.self_param.is_some() { 1 } else { 0 })
+{
   var elems: List<Elem> = []
   match f.self_param {
     Some(sp) => elems.push(Elem.SelfParam(sp))

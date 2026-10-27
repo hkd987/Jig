@@ -9,7 +9,9 @@ struct StableHasher {
   len: U64
 }
 
-fn new_hasher() -> StableHasher {
+fn new_hasher() -> StableHasher
+  ensures result.len == 0
+{
   return StableHasher { a: 2611923443488327891, b: 1376283091369227076, len: 0 }
 }
 
@@ -52,12 +54,14 @@ fn StableHasher.str(&mut self, s: Str) {
   self.word(w)
 }
 
-fn hex64(x: U64) -> Str {
+fn hex64(x: U64) -> Str
+  ensures result.len() == 16
+{
   let digits = "0123456789abcdef"
   var out = ""
   var k = 60
-  for k >= 0 {
-    let d = ((x >> k) & 15) as Int
+  for k >= 0 invariant k >= -4 && k <= 60 && k % 4 == 0 && out.len() * 4 == 60 - k {
+    let d = ((x >> k) % 16) as Int
     out += digits[d..d + 1]
     k -= 4
   }
@@ -65,7 +69,9 @@ fn hex64(x: U64) -> Str {
 }
 
 /// The 128-bit hash as 32 hex digits.
-fn StableHasher.finish_hex(self) -> Str {
+fn StableHasher.finish_hex(self) -> Str
+  ensures result.len() == 32
+{
   let a = mix64(self.a ^ self.len)
   let b = mix64(self.b ^ rotl64(a, 17))
   return hex64(a) + hex64(b)
@@ -127,7 +133,9 @@ fn json_ws(cs: List<Char>, pos: &mut Int) {
   }
 }
 
-fn hex_val(c: Char) -> Int {
+fn hex_val(c: Char) -> Int
+  ensures result >= -1 && result < 16
+{
   let v = c as Int
   if v >= 48 && v <= 57 {
     return v - 48

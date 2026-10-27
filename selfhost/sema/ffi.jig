@@ -51,7 +51,9 @@ fn jig_ccall_free(p: Int) effects {ffi}
 fn jig_ccall_str(p: Int) -> Str effects {ffi}
 
 /// The 64 bits of a `U64` as an `Int`, and back.
-fn int_bits_of(u: U64) -> Int {
+fn int_bits_of(u: U64) -> Int
+  ensures (u < 9223372036854775808) == (result >= 0)
+{
   return if u >= 9223372036854775808 {
     ((u - 9223372036854775808) as Int) - 9223372036854775807 - 1
   } else {
@@ -59,7 +61,9 @@ fn int_bits_of(u: U64) -> Int {
   }
 }
 
-fn u64_bits_of(i: Int) -> U64 {
+fn u64_bits_of(i: Int) -> U64
+  ensures (i >= 0) == (result < 9223372036854775808)
+{
   return if i < 0 { ((i + 9223372036854775807 + 1) as U64) + 9223372036854775808 } else { i as U64 }
 }
 

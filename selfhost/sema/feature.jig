@@ -45,7 +45,9 @@ struct ScenarioAst {
 }
 
 /// Unicode white space, as Rust's `char::is_whitespace`.
-fn is_white(c: Char) -> Bool {
+fn is_white(c: Char) -> Bool
+  ensures !result || (c as Int) >= 9
+{
   let v = c as Int
   return (v >= 9 && v <= 13) ||
     v == 32 ||
@@ -60,7 +62,9 @@ fn is_white(c: Char) -> Bool {
     v == 12288
 }
 
-fn char_bytes(c: Char) -> Int {
+fn char_bytes(c: Char) -> Int
+  ensures result >= 1 && result <= 4
+{
   let v = c as Int
   if v < 128 {
     return 1
@@ -74,7 +78,9 @@ fn char_bytes(c: Char) -> Int {
   return 4
 }
 
-fn trim_start_ws(s: Str) -> Str {
+fn trim_start_ws(s: Str) -> Str
+  ensures result.len() <= s.len()
+{
   var i = 0
   for c in s.chars() {
     if !is_white(c) {
@@ -85,7 +91,9 @@ fn trim_start_ws(s: Str) -> Str {
   return s[i..s.len()]
 }
 
-fn trim_end_ws(s: Str) -> Str {
+fn trim_end_ws(s: Str) -> Str
+  ensures result.len() <= s.len()
+{
   var end = 0
   var i = 0
   for c in s.chars() {
@@ -97,7 +105,9 @@ fn trim_end_ws(s: Str) -> Str {
   return s[0..end]
 }
 
-fn trim_ws(s: Str) -> Str {
+fn trim_ws(s: Str) -> Str
+  ensures result.len() <= s.len()
+{
   return trim_end_ws(trim_start_ws(s))
 }
 
@@ -326,7 +336,12 @@ enum Piece {
   Hole(name: Str)
 }
 
-fn is_ascii_word(c: Char) -> Bool {
+fn is_ascii_word(c: Char) -> Bool
+  ensures result ==
+    ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')
+  ensures result ==
+    ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')
+{
   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
 }
 
@@ -380,7 +395,9 @@ fn compile_pattern(p: Str) -> Result<List<Piece>, Str> {
 }
 
 /// Does byte `i` of `s` start a character?
-fn is_boundary(s: Str, i: Int) -> Bool {
+fn is_boundary(s: Str, i: Int) -> Bool
+  ensures result || (i > 0 && i < s.len())
+{
   if i <= 0 || i >= s.len() {
     return true
   }
@@ -452,10 +469,12 @@ fn match_pattern(pieces: List<Piece>, text: Str) -> Option<List<Str>> {
   return None
 }
 
-fn holes_of(pieces: List<Piece>) -> List<Str> {
+fn holes_of(pieces: List<Piece>) -> List<Str>
+  ensures result.len() <= pieces.len()
+{
   var out: List<Str> = []
-  for p in pieces {
-    match p {
+  for i in 0..pieces.len() invariant out.len() <= i {
+    match pieces[i] {
       Hole(h) => out.push(h)
       _ => {}
     }
@@ -473,7 +492,9 @@ struct StepDef {
 }
 
 /// Whether `s` is a quoted string with valid escapes.
-fn is_quoted(s: Str) -> Bool {
+fn is_quoted(s: Str) -> Bool
+  ensures !result || s.len() >= 2
+{
   if s.len() < 2 || !s.starts_with("\"") || !s.ends_with("\"") {
     return false
   }
@@ -489,7 +510,9 @@ fn is_quoted(s: Str) -> Bool {
   return !esc
 }
 
-fn all_digits(s: Str) -> Bool {
+fn all_digits(s: Str) -> Bool
+  ensures !result || !s.is_empty()
+{
   if s.is_empty() {
     return false
   }
@@ -502,7 +525,9 @@ fn all_digits(s: Str) -> Bool {
 }
 
 /// Compare two decimal digit strings without leading zeros.
-fn dec_le(a: Str, b: Str) -> Bool {
+fn dec_le(a: Str, b: Str) -> Bool
+  ensures a.len() == b.len() || result == (a.len() < b.len())
+{
   if a.len() != b.len() {
     return a.len() < b.len()
   }
@@ -581,7 +606,9 @@ fn is_float_text(text: Str) -> Bool {
   return i == bs.len()
 }
 
-fn int_bounds(k: IntTy) -> (Str, Str) {
+fn int_bounds(k: IntTy) -> (Str, Str)
+  ensures !result.0.is_empty() && !result.1.is_empty()
+{
   return match k {
     I64 => ("9223372036854775808", "9223372036854775807")
     I32 => ("2147483648", "2147483647")
@@ -630,7 +657,9 @@ fn Sema.convert_error(self, text: Str, t: Int) -> Str {
 }
 
 /// A scenario's runs: one, or one per `Examples` row with `<column>` substituted.
-fn expand(sc: ScenarioAst) -> List<(Str, List<StepLine>)> {
+fn expand(sc: ScenarioAst) -> List<(Str, List<StepLine>)>
+  ensures sc.outline || result.len() == 1
+{
   if !sc.outline {
     return [(sc.name, sc.steps)]
   }
@@ -990,7 +1019,9 @@ fn unquote(s: Str) -> Str {
   return Str.from_chars(out)
 }
 
-fn data_table_diag(span: syntax.Span) -> syntax.Diag {
+fn data_table_diag(span: syntax.Span) -> syntax.Diag
+  ensures result.code == "E0801" && result.notes.len() == 1
+{
   return diag("E0801", span, "data tables on steps are not supported").note(
     "pass values in the step text, or use a `Scenario Outline` with `Examples`",
   )
@@ -1036,7 +1067,9 @@ fn suggest_pattern(text: Str) -> (Str, List<(Str, Str)>) {
 }
 
 /// Unicode whitespace, as the bootstrap compiler splits words.
-fn is_space_char(c: Char) -> Bool {
+fn is_space_char(c: Char) -> Bool
+  ensures !result || (c as Int) >= 9
+{
   let v = c as Int
   return c == ' ' ||
     (v >= 9 && v <= 13) ||
@@ -1070,7 +1103,9 @@ fn ascii_words(s: Str) -> List<Str> {
 }
 
 /// Text Rust's `i64` parser accepts: a sign, then digits, in range.
-fn is_int_text(s: Str) -> Bool {
+fn is_int_text(s: Str) -> Bool
+  ensures !result || !s.is_empty()
+{
   var t = s
   if t.starts_with("+") || t.starts_with("-") {
     t = t[1..t.len()]

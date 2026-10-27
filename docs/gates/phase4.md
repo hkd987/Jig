@@ -61,7 +61,7 @@ The PRD's proposed targets, measured on `main` (4-core Xeon, clang 18):
 | Self-hosted vs bootstrap compiler, same corpus | equal or faster | 0.94 by instructions (CI gate 1.05); 1.36 by wall time | instructions only |
 | Agent tasks reaching a verified build, vs Rust | equal or better | harness and tasks ready (`bench/agents`); no agent runs yet | not measured |
 | Agent iterations per task, vs Rust and TypeScript | equal or fewer | as above | not measured |
-| Std and compiler functions with proven contracts | over 80% | std 91%; jigc 10% (112 of 1,069 functions state contracts and 110 of them prove completely: the lexer, the parser but six functions, tokens and operators) | std only |
+| Std and compiler functions with proven contracts | over 80% | std 91%; jigc 29% (358 of 1,209 functions state contracts and 351 of them prove completely, every safety obligation included: the lexer, nearly all of the parser, and helpers across every pass; most of the rest index the compiler's arenas, which needs index invariants the prover cannot yet carry) | std only |
 | Language reference size | fits in 10k tokens | about 6,000 | met |
 
 **Self-hosted speed.** By pass (`bench/selfhost.py --instructions --prove`, with jigc built

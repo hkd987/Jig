@@ -17,7 +17,9 @@ enum MutFrame {
   Paths(ps: List<List<Int>>)
 }
 
-fn starts_with_path(p: List<Int>, q: List<Int>) -> Bool {
+fn starts_with_path(p: List<Int>, q: List<Int>) -> Bool
+  ensures !result || q.len() <= p.len()
+{
   if q.len() > p.len() {
     return false
   }
@@ -30,7 +32,9 @@ fn starts_with_path(p: List<Int>, q: List<Int>) -> Bool {
 }
 
 /// -1, 0 or 1: paths in lexicographic order.
-fn cmp_path(p: List<Int>, q: List<Int>) -> Int {
+fn cmp_path(p: List<Int>, q: List<Int>) -> Int
+  ensures result >= -1 && result <= 1
+{
   for i in 0..min(p.len(), q.len()) {
     if p[i] != q[i] {
       return if p[i] < q[i] { -1 } else { 1 }
