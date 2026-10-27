@@ -33,13 +33,12 @@ have contracts that prove.
 commit gate, a proof-hint skill, spec-first commands and MCP tools. Opt-in, local-only
 trace collection.
 
-**Self-hosting.** `jigc`, the compiler written in Jig, checks programs and compiles them to
-C identical to the Rust compiler's, runs tests and scenarios on its own interpreter with
-the same results, and compiles itself: `bootstrap/jigc.c` builds with any
-C compiler and regenerates itself byte for byte. It runs tests and proves contracts with the
-same results as the Rust compiler too, and has its whole command line: every command
-takes `jig`'s arguments and prints what it prints, the hooks and the MCP server included.
+**Self-hosting.** `jig` is `jigc`, the compiler written in Jig. It compiles itself:
+`bootstrap/jigc.c` builds with any C compiler and regenerates itself byte for byte, and
+`bootstrap/install.sh` installs it with nothing else. It passes every test suite on its own
+(`bootstrap/suites.py`, in CI without Rust), and for the same input each command prints what
+the Rust compiler that bootstrapped it prints, which is now frozen as the reference the
+tests compare with (D6).
 
-**Not yet.** The `jig` command is still the Rust compiler until `jigc` passes every test
-suite (D6). Agent benchmark results, contracts on most of the compiler (its lexer and nearly
+**Not yet.** Agent benchmark results, contracts on most of the compiler (its lexer and nearly
 all of its parser prove), and self-hosted speed parity are open (`docs/gates/phase4.md`).

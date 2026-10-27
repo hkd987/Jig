@@ -25,6 +25,7 @@ the UI annotations, run and native outputs, prover reports, property tests, trac
 the cookbook, every example and `jigc`'s own tests, modules over git, and the network
 example. CI runs it without Rust, with gcc and with clang.
 
-The Rust compiler (`compiler/`) is kept, and kept passing the same tests, until `jigc`
-passes every test suite; `compiler/tests/selfhost.rs` checks that both generate the same C
-for every example and run test.
+`bootstrap/install.sh [PREFIX]` builds `jigc` from this file and installs it as `jig` in
+`PREFIX/bin` (`~/.local/bin` by default). The Rust compiler (`compiler/`) is frozen (D6): it
+stays as the reference `compiler/tests/selfhost.rs` compares `jigc` with, pass by pass and
+command by command.

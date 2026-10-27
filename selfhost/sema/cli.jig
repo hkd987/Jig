@@ -238,7 +238,7 @@ fn run_cmd(o: Opts, std_dir: Str, cwd: Str, args: List<Str>) -> Output
 
 fn usage() -> Str {
   return [
-    "usage: jigc <command> [path] [options]",
+    "usage: jig <command> [path] [options]",
     "",
     "commands:",
     "  check [--json]          parse, types, effects, lints and dead code for the project",
@@ -257,7 +257,7 @@ fn usage() -> Str {
     "  hook <name>             Claude Code hook entry points (post-edit, pre-commit)",
     "  cc DIR [STD]            DIR's release build as one C file, the runtime included",
     "  debug tokens|ast|fmt FILE, debug check|c|vc|sim DIR",
-    "                          the dumps compared with the bootstrap compiler's `jig debug`",
+    "                          the dumps compared with the Rust compiler's `jig debug`",
     "",
     "The standard library is built in; `$JIG_STD` names a directory to read instead.",
   ].join("\n") +

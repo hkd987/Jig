@@ -45,7 +45,7 @@ impossible, in which case the check disappears from the binary.
 ## Quick start
 
 ```
-cargo build --release                       # the compiler: target/release/jig
+sh bootstrap/install.sh                     # the compiler, built with only a C compiler: ~/.local/bin/jig
 jig check examples/bank                     # types, effects, lints, dead code (milliseconds)
 jig test examples/bank                      # unit tests and feature scenarios
 jig prove examples/bank                     # contracts and safety, with counterexamples
@@ -80,9 +80,11 @@ Measured in CI on every push (see `bench/` and `docs/gates/`):
 | Self-hosted compiler vs bootstrap (instructions) | equal or faster | 0.94 |
 | Standard library functions with proven contracts | over 80% | 91% |
 
-## Building without Rust
+## Self-hosted
 
-`bootstrap/jigc.c` is `jigc` compiled to C by itself: one file that any C11 compiler builds.
+`jig` is `jigc`, the compiler written in Jig (`selfhost/`). `bootstrap/jigc.c` is `jigc`
+compiled to C by itself: one file that any C11 compiler builds, which `bootstrap/install.sh`
+installs as `jig`.
 
 ```
 cc -O2 -std=gnu11 -pthread bootstrap/jigc.c -lm -o jigc
@@ -90,16 +92,12 @@ cc -O2 -std=gnu11 -pthread bootstrap/jigc.c -lm -o jigc
 ./jigc cc selfhost compiler/std > jigc.c    # the same bytes as bootstrap/jigc.c
 ```
 
-`jigc` checks programs and compiles them to C with output identical to the Rust compiler's.
-It binds `.feature` scenarios, loads required modules, formats, and runs tests and scenarios
-on its own interpreter (`jigc test`, the lines of `jig test --json`), and proves contracts with
-Z3 (`jigc prove`, the same results as `jig prove`, sharing its proof cache), and builds
-executables with the checks those proofs discharge removed (`jigc build`, the same C as
-`jig build`). Every `jigc` command takes `jig`'s arguments and prints what `jig` prints, every
-diagnostic's notes and suggested fixes included, `jigc run` runs programs with real effects
-and `jigc mcp` serves the agent tools; the standard library and runtime are built in. Until
-it passes every test suite (D6), the Rust compiler (`compiler/`) is the one `jig` command and
-is kept passing the same tests.
+The compiler that bootstrapped it, written in Rust (`compiler/`, `cargo build --release`), is
+frozen (D6): `jigc` passes every test suite on its own (`bootstrap/suites.py`, run in CI
+without Rust), and the Rust compiler stays as the reference `compiler/tests/selfhost.rs`
+compares `jigc` with, pass by pass and command by command: the same tokens, syntax trees,
+diagnostics, types, verification conditions, proofs, test results and C, and the same output
+from every command for the same input.
 
 ## License
 

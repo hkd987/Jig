@@ -1,8 +1,9 @@
 # jigc: the Jig compiler in Jig
 
-The PRD's north star is a compiler written in Jig that compiles itself. It is being ported
-from the bootstrap compiler (`compiler/`, Rust) one pass at a time, keeping its design:
-flat arenas and indices, which map directly onto Jig's value semantics.
+The PRD's north star is a compiler written in Jig that compiles itself. `jigc` is that
+compiler, and the `jig` command (`bootstrap/install.sh`). It was ported from the bootstrap
+compiler (`compiler/`, Rust, now frozen as the reference) one pass at a time, keeping its
+design: flat arenas and indices, which map directly onto Jig's value semantics.
 
 Each ported pass must agree with the bootstrap compiler byte for byte on a dump of its
 output. `compiler/tests/selfhost.rs` builds `jigc` natively and compares it with the

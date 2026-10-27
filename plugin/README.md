@@ -22,10 +22,11 @@ The official agent plugin for the Jig language.
 
 ## Install
 
-1. Install the `jig` binary on your `PATH`:
+1. Install the `jig` binary on your `PATH` (it needs only a C compiler; it goes to
+   `~/.local/bin`):
 
    ```
-   cargo install --path compiler
+   sh bootstrap/install.sh
    ```
 
 2. In Claude Code:

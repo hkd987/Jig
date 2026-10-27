@@ -25,6 +25,16 @@ itself (token and AST dumps on every `.jig` file plus 400 mutated copies; diagno
 the type of every expression on 300 semantically mutated projects; the whole C program for
 every program that builds). `cargo test` fails if `bootstrap/jigc.c` is stale.
 
+`jigc` is the `jig` command. It has the whole command line (`check`, `test`, `prove`, `run`
+with real effects or `--native`, `build`, `trace`, `search`, `fmt`, `get`, `traces`, `hook`,
+`mcp`, `explain`, `reference`), and for the same input every command prints what the Rust
+compiler's prints, which the same test checks command by command (hook input and MCP
+sessions included). It passes every test suite on its own: `bootstrap/suites.py` builds it
+from `bootstrap/jigc.c` and runs the UI, run, native, prover, property, trace, cookbook,
+project, module and network suites through it, in CI on a runner without Rust. So, per D6,
+the Rust compiler is frozen as the reference the differential tests compare with, and
+`bootstrap/install.sh` installs `jigc` as `jig` with only a C compiler.
+
 The port paid for itself before it finished. It found bugs every Jig program had:
 
 - A struct invariant check copied the whole struct and kept the copy alive, so the next
@@ -106,11 +116,6 @@ Release notes are in [`CHANGELOG.md`](../../CHANGELOG.md).
 
 ## Open
 
-- The Rust compiler stays the `jig` command until `jigc` passes every test suite (D6). `jigc`
-  has `jig`'s whole command line: every command (`check`, `test`, `prove`, `run` with real
-  effects and `--native`, `build`, `trace`, `search`, `fmt`, `get`, `traces`, `hook`, `mcp`,
-  `explain`, `reference`) takes `jig`'s arguments and prints what it prints, with the standard
-  library, runtime, code registry and reference built in.
 - Self-hosted speed: identifiers interned instead of sliced, and wall time (memory).
 - Contracts on the compiler's passes.
 - Agent benchmark runs.
