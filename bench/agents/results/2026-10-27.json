@@ -1,0 +1,170 @@
+{
+  "date": "2026-10-27",
+  "agent": "Claude Code (`claude -p`), one run per task and language",
+  "command": "claude -p --output-format json --max-turns 40 --permission-mode acceptEdits --allowedTools Read Edit Write Glob Grep Bash(./check.sh:*) Bash(./prog:*) Bash(jig:*) Bash(rustc:*) Bash(node:*) Bash(cat:*) Bash(ls:*) Bash(head:*) Bash(diff:*) Bash(cmp:*) Bash(echo:*) --",
+  "jig": "jigc 0.1.0-alpha built from bootstrap/jigc.c",
+  "runs": [
+    {
+      "task": "intervals",
+      "lang": "jig",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 6,
+      "seconds": 21.8
+    },
+    {
+      "task": "ledger",
+      "lang": "jig",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 9,
+      "seconds": 35.7
+    },
+    {
+      "task": "maze",
+      "lang": "jig",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 6,
+      "seconds": 42.2
+    },
+    {
+      "task": "roman",
+      "lang": "jig",
+      "passed": 4,
+      "cases": 4,
+      "solved": true,
+      "turns": 10,
+      "seconds": 55.6
+    },
+    {
+      "task": "rpn",
+      "lang": "jig",
+      "passed": 7,
+      "cases": 7,
+      "solved": true,
+      "turns": 7,
+      "seconds": 30.6
+    },
+    {
+      "task": "wordfreq",
+      "lang": "jig",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 6,
+      "seconds": 26.9
+    },
+    {
+      "task": "intervals",
+      "lang": "rust",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 6,
+      "seconds": 34.4
+    },
+    {
+      "task": "ledger",
+      "lang": "rust",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 7,
+      "seconds": 31.8
+    },
+    {
+      "task": "maze",
+      "lang": "rust",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 6,
+      "seconds": 30.3
+    },
+    {
+      "task": "roman",
+      "lang": "rust",
+      "passed": 4,
+      "cases": 4,
+      "solved": true,
+      "turns": 9,
+      "seconds": 41.6
+    },
+    {
+      "task": "rpn",
+      "lang": "rust",
+      "passed": 7,
+      "cases": 7,
+      "solved": true,
+      "turns": 7,
+      "seconds": 33.8
+    },
+    {
+      "task": "wordfreq",
+      "lang": "rust",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 6,
+      "seconds": 26.5
+    },
+    {
+      "task": "intervals",
+      "lang": "ts",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 7,
+      "seconds": 26.9
+    },
+    {
+      "task": "ledger",
+      "lang": "ts",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 8,
+      "seconds": 40.9
+    },
+    {
+      "task": "maze",
+      "lang": "ts",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 6,
+      "seconds": 36.9
+    },
+    {
+      "task": "roman",
+      "lang": "ts",
+      "passed": 4,
+      "cases": 4,
+      "solved": true,
+      "turns": 6,
+      "seconds": 59.0
+    },
+    {
+      "task": "rpn",
+      "lang": "ts",
+      "passed": 7,
+      "cases": 7,
+      "solved": true,
+      "turns": 7,
+      "seconds": 35.4
+    },
+    {
+      "task": "wordfreq",
+      "lang": "ts",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 3,
+      "seconds": 16.1
+    }
+  ]
+}

@@ -59,8 +59,8 @@ The PRD's proposed targets, measured on `main` (4-core Xeon, clang 18):
 | Runtime vs Rust, shared suite | within 10% | 0.89 by instructions, 0.97 wall clock ([phase 3](phase3.md)) | met |
 | Hello-world release binary | under 100 KB | 84 KB (72 KB stripped) | met |
 | Self-hosted vs bootstrap compiler, same corpus | equal or faster | 0.92 by instructions (CI gate 1.05); 1.21 by wall time | instructions only |
-| Agent tasks reaching a verified build, vs Rust | equal or better | harness and tasks ready (`bench/agents`); no agent runs yet | not measured |
-| Agent iterations per task, vs Rust and TypeScript | equal or fewer | as above | not measured |
+| Agent tasks reaching a verified build, vs Rust | equal or better | 6 of 6 in Jig, 6 of 6 in Rust and in TypeScript (one run each) | met |
+| Agent iterations per task, vs Rust and TypeScript | equal or fewer | 7.3 turns in Jig, 6.8 in Rust, 6.2 in TypeScript (one run each) | not met |
 | Std and compiler functions with proven contracts | over 80% | std 91%; jigc 39% (491 of 1,209 functions state contracts and 475 of them (97%) prove completely, every safety obligation included: the lexer, nearly all of the parser, the JSON reader, and helpers across every pass, among them those that index an arena by a parameter, which now require the index; most of the rest read an index out of a tree node or a table, so proving it needs an invariant over every node's payload, which contracts cannot yet state). 79% of jigc's functions have no unproven obligation but such an index (`bench/contracts.py`) | std only |
 | Language reference size | fits in 10k tokens | about 6,000 | met |
 
@@ -93,8 +93,26 @@ values.
 
 **Agent measures.** `bench/agents/run.py --agent CMD` runs an agent per task and language
 and reports tasks solved and turns. Its six tasks have reference solutions in all three
-languages, checked in CI, but the agent runs themselves are not part of CI and have not
-been done.
+languages, checked in CI; the agent runs are not part of CI. The first runs (2026-10-27,
+`bench/agents/results/2026-10-27.json`): a Claude Code agent (`claude -p`, at most 40 turns,
+the same short list of tools in every language, as in `bench/agents/README.md`), once per
+task and language, with jigc as `jig` and the workspace's `CLAUDE.md` pointing it at
+`jig reference`:
+
+| Task | Jig | Rust | TypeScript |
+| --- | --- | --- | --- |
+| intervals | 6 | 6 | 7 |
+| ledger | 9 | 7 | 8 |
+| maze | 6 | 6 | 6 |
+| roman | 10 | 9 | 6 |
+| rpn | 7 | 7 | 7 |
+| wordfreq | 6 | 6 | 3 |
+| Mean turns | 7.3 | 6.8 | 6.2 |
+
+Every task reached a verified build in every language (for Jig: `jig check` with every lint
+an error, then the cases), so the first measure is met. Jig took about half a turn more than
+Rust and one more than TypeScript, mostly on `ledger` and `roman`, so the second is not; with
+one run per cell, a turn or two is within the noise, and more runs would tell.
 
 **Compiler contracts.** The standard library meets the target; the compiler does not. The
 lexer is proved completely: each of its 26 functions states a contract and every
@@ -142,4 +160,4 @@ Release notes are in [`CHANGELOG.md`](../../CHANGELOG.md).
 
 - Self-hosted speed: identifiers interned instead of sliced, and wall time (memory).
 - Contracts on the compiler's passes.
-- Agent benchmark runs.
+- Agent benchmark: more runs per task, to separate the turn counts from the noise.

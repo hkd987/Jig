@@ -69,7 +69,8 @@ human approval between steps. `jig mcp` serves the same tools over MCP.
 
 ## Numbers
 
-Measured in CI on every push (see `bench/` and `docs/gates/`):
+Measured in CI on every push, except the agent runs, which are one run per task and language
+so far (see `bench/` and `docs/gates/`):
 
 | Metric | Target | Now |
 | --- | --- | --- |
@@ -79,6 +80,8 @@ Measured in CI on every push (see `bench/` and `docs/gates/`):
 | Hello-world release binary | under 100 KB | 84 KB |
 | Self-hosted compiler vs bootstrap (instructions) | equal or faster | 0.92 |
 | Standard library functions with proven contracts | over 80% | 91% |
+| Agent tasks reaching a verified build, vs Rust | equal or better | 6 of 6 (Rust 6 of 6) |
+| Agent turns per task, vs Rust and TypeScript | equal or fewer | 7.3 (Rust 6.8, TypeScript 6.2) |
 
 ## Self-hosted
 
