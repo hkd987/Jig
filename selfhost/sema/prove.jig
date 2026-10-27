@@ -1,0 +1,1119 @@
+// `jigc prove`, ported from the bootstrap compiler's `verify/mod.rs` and `smt.rs`: each
+// function's verification conditions (see `vc.jig`) go to an SMT solver, failed contracts are
+// replayed on the interpreter to confirm them, and the report is the same as `jig prove`'s.
+//
+// The bootstrap compiler talks to the solver over pipes. Here every function's queries go into
+// one SMT-LIB script, with the same commands (a reset per function, a push and pop per
+// obligation, model values after `sat`); `echo` markers tell which answers belong to which
+// obligation. Model values are asked for after every check and ignored unless it was `sat`.
+
+import "std/fs"
+import "std/os"
+import "std/time"
+import "syntax"
+
+fn system(cmd: Str) -> I32 effects {ffi}
+
+enum Status {
+  Proved
+  /// The solver found inputs that break it (under the modular abstraction).
+  Failed(cex: List<(Str, Str)>)
+  Unknown(why: Str)
+}
+
+enum Replay {
+  /// Running the function on these inputs fails the same check: a real bug.
+  Confirmed(inputs: Str)
+  /// The counterexample's inputs pass: the prover is missing a fact.
+  NotReproduced
+}
+
+struct ObResult {
+  kind: ObKind
+  span: syntax.Span
+  msg: Str
+  status: Status
+  /// For failed contracts: what running the function on the interpreter showed.
+  replay: Option<Replay>
+  /// The counterexample's parameter values (integers as text), when they can be rebuilt.
+  model: Option<List<List<Str>>>
+}
+
+struct FnReport {
+  fid: Int
+  name: Str
+  obligations: List<ObResult>
+}
+
+// ---------- solver responses ----------
+
+enum Sexp {
+  Atom(a: Str)
+  Sl(items: List<Sexp>)
+}
+
+fn sexp_tokens(s: Str) -> List<Str> {
+  var out: List<Str> = []
+  var cur: List<Char> = []
+  let cs = s.chars()
+  var i = 0
+  for i < cs.len() {
+    let c = cs[i]
+    i += 1
+    if c == '(' || c == ')' {
+      if !cur.is_empty() {
+        out.push(Str.from_chars(cur))
+        cur = []
+      }
+      out.push(Str.from_chars([c]))
+    } else if c == '"' || c == '|' {
+      cur.push(c)
+      for i < cs.len() {
+        let d = cs[i]
+        i += 1
+        cur.push(d)
+        if d == c {
+          break
+        }
+      }
+    } else if is_white(c) {
+      if !cur.is_empty() {
+        out.push(Str.from_chars(cur))
+        cur = []
+      }
+    } else {
+      cur.push(c)
+    }
+  }
+  if !cur.is_empty() {
+    out.push(Str.from_chars(cur))
+  }
+  return out
+}
+
+fn sexp_at(toks: List<Str>, pos: &mut Int) -> Option<Sexp> {
+  if pos >= toks.len() {
+    return None
+  }
+  let t = toks[pos]
+  pos += 1
+  if t == "(" {
+    var items: List<Sexp> = []
+    for pos < toks.len() && toks[pos] != ")" {
+      items.push(sexp_at(toks, &mut pos)?)
+    }
+    if pos >= toks.len() {
+      return None
+    }
+    pos += 1
+    return Some(Sexp.Sl(items))
+  }
+  return Some(Sexp.Atom(t))
+}
+
+fn parse_sexp(s: Str) -> Option<Sexp> {
+  var pos = 0
+  return sexp_at(sexp_tokens(s), &mut pos)
+}
+
+/// An integer value (`5`, `(- 5)`), as text.
+fn sexp_int(v: Sexp) -> Option<Str> {
+  match v {
+    Atom(a) => {
+      if a.is_empty() {
+        return None
+      }
+      for b in a.bytes() {
+        if b < 48 || b > 57 {
+          return None
+        }
+      }
+      // Leading zeros are dropped, as an integer parse would.
+      var k = 0
+      for k + 1 < a.len() && a[k] == 48 {
+        k += 1
+      }
+      return Some(a[k..a.len()])
+    }
+    Sl(l) => {
+      if l.len() == 2 && l[0] == Sexp.Atom("-") {
+        let x = sexp_int(l[1])?
+        return Some(
+          if x == "0" { "0" } else if x.starts_with("-") { x[1..x.len()] } else { "-" + x },
+        )
+      }
+      return None
+    }
+  }
+}
+
+fn sexp_bool(v: Sexp) -> Option<Bool> {
+  return match v {
+    Atom(a) => if a == "true" { Some(true) } else if a == "false" { Some(false) } else { None }
+    _ => None
+  }
+}
+
+/// The solver's output as responses: atoms and complete s-expressions, as the bootstrap
+/// compiler reads them off the pipe.
+fn split_responses(out: Str) -> List<Str> {
+  var rs: List<Str> = []
+  var cur = ""
+  var depth = 0
+  var in_str = false
+  for line in out.split("\n") {
+    for c in line.chars() {
+      if c == '"' {
+        in_str = !in_str
+      } else if c == '(' && !in_str {
+        depth += 1
+      } else if c == ')' && !in_str {
+        depth -= 1
+      }
+    }
+    cur += line + "\n"
+    if depth <= 0 && !cur.trim().is_empty() {
+      rs.push(cur.trim())
+      cur = ""
+      depth = 0
+    }
+  }
+  if !cur.trim().is_empty() {
+    rs.push(cur.trim())
+  }
+  return rs
+}
+
+/// Model values for terms from a `get-value` response.
+fn model_values(r: Str, n: Int) -> List<Option<Sexp>> {
+  var out: List<Option<Sexp>> = []
+  if !r.starts_with("(error") {
+    match parse_sexp(r) {
+      Some(Sl(pairs)) => {
+        for p in pairs {
+          out.push(
+            match p {
+              Sl(kv) => if kv.len() == 2 { Some(kv[1]) } else { None }
+              _ => None
+            },
+          )
+        }
+      }
+      _ => {}
+    }
+  }
+  for out.len() < n {
+    out.push(None)
+  }
+  return out[0..n]
+}
+
+/// A model value in a counterexample.
+fn show_model_value(v: Sexp, b: Base) -> Str {
+  match b {
+    Bool => {
+      return match sexp_bool(v) {
+        Some(x) => if x { "true" } else { "false" }
+        None => "?"
+      }
+    }
+    Char => {
+      return match sexp_int(v) {
+        Some(t) => match t.to_int() {
+          Some(c) => if c >= 0 && c <= 1114111 && (c < 55296 || c > 57343) {
+            rust_char_debug(c as Char)
+          } else {
+            "?"
+          }
+          None => "?"
+        }
+        None => "?"
+      }
+    }
+    _ => {
+      return sexp_int(v).unwrap_or("?")
+    }
+  }
+}
+
+/// A character as Rust's `{:?}` shows it.
+fn rust_char_debug(c: Char) -> Str {
+  let v = c as Int
+  if c == '\'' {
+    return "'\\''"
+  }
+  if c == '\\' {
+    return "'\\\\'"
+  }
+  if c == '\n' {
+    return "'\\n'"
+  }
+  if c == '\r' {
+    return "'\\r'"
+  }
+  if c == '\t' {
+    return "'\\t'"
+  }
+  if c == '\0' {
+    return "'\\0'"
+  }
+  if v < 32 || v == 127 {
+    let hex = "0123456789abcdef"
+    var h = ""
+    var x = v
+    for x > 0 {
+      h = hex[x % 16..x % 16 + 1] + h
+      x = x / 16
+    }
+    return "'\\u{" + h + "}'"
+  }
+  return "'" + Str.from_chars([c]) + "'"
+}
+
+// ---------- solving ----------
+
+fn solver_path() -> Str effects {env} {
+  return os.env("JIG_Z3").unwrap_or("z3")
+}
+
+/// Run the solver on a script; its standard output.
+fn run_solver(script: Str) -> Result<Str, Str> effects {fs, env, ffi, clock} {
+  let dir = os.env("TMPDIR").unwrap_or("/tmp")
+  let stem = join_path(dir, "jigc-prove-" + time.now_ns().str())
+  let input = stem + ".smt2"
+  let output = stem + ".out"
+  fs.write(input, script)?
+  let cmd = solver_path() + " -smt2 '" + input + "' > '" + output + "' 2>/dev/null"
+  let _ = system(cmd)
+  let out = fs.read(output)
+  let _ = system("rm -f '" + input + "' '" + output + "'")
+  return match out {
+    Ok(o) => Ok(o)
+    Err(_) => Err("cannot run the SMT solver `" + solver_path() + "` (install z3 or set JIG_Z3)")
+  }
+}
+
+/// Whether an obligation is settled without the solver.
+fn trivially_proved(ob: Obligation) -> Bool {
+  if ob.goal == "true" {
+    return true
+  }
+  for p in ob.pc {
+    if p == "false" {
+      return true
+    }
+  }
+  return false
+}
+
+/// The leaf terms of each replayable parameter, when the obligation is a contract.
+fn model_queries(vcs: FnVcs, ob: Obligation) -> List<List<Str>> {
+  var out: List<List<Str>> = []
+  if !ob.kind.is_contract() {
+    return out
+  }
+  match vcs.inputs {
+    Some(ins) => {
+      for (_, leaves) in ins {
+        var ts: List<Str> = []
+        for (t, _) in leaves {
+          ts.push(t)
+        }
+        out.push(ts)
+      }
+    }
+    None => {}
+  }
+  return out
+}
+
+/// The script for every function's obligations.
+fn solver_script(all: List<FnVcs>, timeout_ms: Int) -> Str {
+  var out = ""
+  for vcs in all {
+    out += "(reset)\n(set-option :produce-models true)\n(set-option :timeout " +
+      timeout_ms.str() +
+      ")\n(set-option :random-seed 0)\n(set-logic ALL)\n(push 1)\n"
+    for d in vcs.decls {
+      out += d + "\n"
+    }
+    var show: List<Str> = []
+    for (_, t, _) in vcs.show {
+      show.push(t)
+    }
+    for ob in vcs.obligations {
+      if trivially_proved(ob) {
+        continue
+      }
+      out += "(push 1)\n"
+      for p in ob.pc {
+        out += "(assert " + p + ")\n"
+      }
+      out += "(assert (not " + ob.goal + "))\n(echo \"@ob\")\n(check-sat)\n(echo \"@gv\")\n"
+      if !show.is_empty() {
+        out += "(get-value (" + show.join(" ") + "))\n"
+      }
+      for ts in model_queries(vcs, ob) {
+        if !ts.is_empty() {
+          out += "(get-value (" + ts.join(" ") + "))\n"
+        }
+      }
+      out += "(pop 1)\n"
+    }
+    out += "(pop 1)\n"
+  }
+  return out
+}
+
+/// Each function's results from the solver's responses.
+fn read_results(all: List<FnVcs>, rs: List<Str>) -> List<List<ObResult>> {
+  var pos = 0
+  var results: List<List<ObResult>> = []
+  for vcs in all {
+    var obs: List<ObResult> = []
+    for ob in vcs.obligations {
+      var model: Option<List<List<Str>>> = None
+      var status = Status.Proved
+      if !trivially_proved(ob) {
+        // Errors since the last answer belong to this check (as the bootstrap reads them).
+        var last_error: Option<Str> = None
+        for pos < rs.len() && rs[pos] != "@ob" {
+          if rs[pos].starts_with("(error") {
+            last_error = Some(rs[pos])
+          }
+          pos += 1
+        }
+        pos += 1
+        var answer = "unknown"
+        for pos < rs.len() {
+          let r = rs[pos]
+          pos += 1
+          if r == "sat" || r == "unsat" || r == "unknown" || r == "timeout" {
+            answer = r
+            break
+          }
+          if r.starts_with("(error") {
+            last_error = Some(r)
+          }
+          if r == "@gv" {
+            pos -= 1
+            break
+          }
+        }
+        // The model queries' answers follow the `@gv` marker.
+        for pos < rs.len() && rs[pos] != "@gv" {
+          pos += 1
+        }
+        pos += 1
+        var answers: List<Str> = []
+        let queries = model_queries(vcs, ob)
+        var n = if vcs.show.is_empty() { 0 } else { 1 }
+        for ts in queries {
+          if !ts.is_empty() {
+            n += 1
+          }
+        }
+        for _ in 0..n {
+          answers.push(if pos < rs.len() { rs[pos] } else { "" })
+          pos += 1
+        }
+        if answer == "unsat" {
+          status = Status.Proved
+        } else if answer == "sat" {
+          var k = 0
+          var cex: List<(Str, Str)> = []
+          if !vcs.show.is_empty() {
+            let vals = model_values(answers[0], vcs.show.len())
+            k = 1
+            for i in 0..vcs.show.len() {
+              match vals[i] {
+                Some(v) => cex.push((vcs.show[i].0, show_model_value(v, vcs.show[i].2)))
+                None => {}
+              }
+            }
+          }
+          if ob.kind.is_contract() && vcs.inputs.is_some() {
+            var ok = true
+            var params: List<List<Str>> = []
+            for ts in queries {
+              var vs: List<Str> = []
+              if !ts.is_empty() {
+                let vals = model_values(answers[k], ts.len())
+                k += 1
+                for v in vals {
+                  match v {
+                    Some(x) => match sexp_int(x) {
+                      Some(t) => vs.push(t)
+                      None => match sexp_bool(x) {
+                        Some(b) => vs.push(if b { "1" } else { "0" })
+                        None => ok = false
+                      }
+                    }
+                    None => ok = false
+                  }
+                }
+              }
+              params.push(vs)
+            }
+            if ok {
+              model = Some(params)
+            }
+          }
+          status = Status.Failed(cex)
+        } else {
+          status = Status.Unknown(
+            match last_error {
+              Some(e) => "solver error: " + e
+              None => "timeout"
+            },
+          )
+        }
+      }
+      obs.push(
+        ObResult {
+          kind: ob.kind
+          span: ob.span
+          msg: ob.msg
+          status: status
+          replay: None
+          model: model
+        },
+      )
+    }
+    results.push(obs)
+  }
+  return results
+}
+
+/// The functions to prove whose name contains `filter`.
+fn Sema.prove_fns(self, std: Bool, filter: Str) -> List<Int> {
+  var out: List<Int> = []
+  for f in self.prove_targets(std) {
+    if self.defs.fns[f].name.contains(filter) {
+      out.push(f)
+    }
+  }
+  return out
+}
+
+/// Prove the program's functions (or, with `std`, the standard library's) whose name contains
+/// `filter`.
+fn prove_program(s: Sema, std: Bool, filter: Str, cwd: Str) -> Result<List<FnReport>, Str>
+  effects {fs, env, ffi, clock}
+{
+  let fns = s.prove_fns(std, filter)
+  let frames = compute_frames(s)
+  var g = new_gen(s, frames)
+  var reports: List<FnReport> = []
+  var all: List<FnVcs> = []
+  for f in fns {
+    match g.function(f) {
+      Some(v) => {
+        reports.push(FnReport { fid: f, name: g.s.fn_display_name(f), obligations: [] })
+        all.push(v)
+      }
+      None => {}
+    }
+  }
+  let out = run_solver(solver_script(all, 2000))?
+  let results = read_results(all, split_responses(out))
+  for i in 0..reports.len() {
+    reports[i].obligations = results[i]
+  }
+  return Ok(replay_failures(g.s, reports, cwd))
+}
+
+// ---------- replay ----------
+
+/// Spans of a function's own entry checks (`requires`, parameter refinements).
+fn Sema.own_entry_spans(self, f: Int) -> List<syntax.Span> {
+  let fd = self.defs.fns[f]
+  var out: List<syntax.Span> = []
+  for p in fd.params {
+    out.push(p.span)
+  }
+  let ast = self.pkgs[fd.pkg].files[fd.file].ast
+  match ast.items[fd.item].kind {
+    Fn(d) => {
+      for r in d.pre {
+        out.push(ast.exprs[r].span)
+      }
+      for p in d.params {
+        match p.refine {
+          Some(r) => out.push(ast.exprs[r].span)
+          None => {}
+        }
+      }
+    }
+    _ => {}
+  }
+  return out
+}
+
+/// Run `m(args)`: `Some(true)` if it fails the obligation's check, `Some(false)` if it runs to
+/// completion, `None` if it stops elsewhere first.
+fn Interp.run_matches(
+  &mut self,
+  m: Int,
+  args: List<Value>,
+  o: ObResult,
+  own: List<syntax.Span>,
+) -> Option<Bool>
+  effects {ffi}
+{
+  self.fx = fake_effects(1)
+  self.stack = []
+  self.fuel = 5000000
+  var a = args
+  match self.call(m, &mut a) {
+    Ok(_) => {
+      return Some(false)
+    }
+    Err(t) => match t {
+      Exit(_) => {
+        return None
+      }
+      Panic(msg, span, _) => {
+        for sp in own {
+          if same_span(sp, span) {
+            return None
+          }
+        }
+        var pred = o.msg
+        match last_index_of(o.msg, "requires ") {
+          Some(i) => pred = o.msg[i + 9..o.msg.len()]
+          None => {}
+        }
+        for pred.ends_with(" (on entry)") {
+          pred = pred[0..pred.len() - 11]
+        }
+        for pred.ends_with(" (preserved)") {
+          pred = pred[0..pred.len() - 12]
+        }
+        if same_span(span, o.span) || (o.kind == ObKind.Precondition && msg.contains(pred)) {
+          return Some(true)
+        }
+        return None
+      }
+    }
+  }
+}
+
+fn last_index_of(s: Str, t: Str) -> Option<Int> {
+  var found: Option<Int> = None
+  var from = 0
+  for from <= s.len() {
+    match s[from..s.len()].find(t) {
+      Some(i) => {
+        found = Some(from + i)
+        from = from + i + 1
+        for from < s.len() && (s[from] as Int) >= 128 && (s[from] as Int) < 192 {
+          from += 1
+        }
+      }
+      None => {
+        break
+      }
+    }
+  }
+  return found
+}
+
+fn Interp.show_args(&mut self, args: List<Value>, tys: List<Int>, names: List<Str>) -> Str
+  effects {ffi}
+{
+  self.fx = fake_effects(1)
+  self.stack = []
+  var parts: List<Str> = []
+  for i in 0..min(args.len(), min(tys.len(), names.len())) {
+    let s = match self.show(args[i], tys[i], true) {
+      Ok(t) => t
+      Err(_) => "?"
+    }
+    parts.push(names[i] + " = " + s)
+  }
+  return parts.join(", ")
+}
+
+/// The 64 bits of a model integer (as text), wrapped as a cast would.
+fn model_bits(t: Str) -> Int {
+  var neg = false
+  var digits = t
+  if t.starts_with("-") {
+    neg = true
+    digits = t[1..t.len()]
+  }
+  var u: U64 = 0
+  for b in digits.bytes() {
+    u = u.wrapping_mul(10).wrapping_add((b - 48) as U64)
+  }
+  let i = int_bits_of(u)
+  return if neg { 0.wrapping_sub(i) } else { i }
+}
+
+/// A value of a scalar-tree type from model values in leaf order.
+fn Interp.build_value(&mut self, t: Int, vals: List<Str>, k: &mut Int) -> Option<Value> {
+  match self.lw.s.tys.kinds[t] {
+    Int(ik, _) => {
+      if k >= vals.len() {
+        return None
+      }
+      k += 1
+      let bits = model_bits(vals[k - 1])
+      return Some(if ik == IntTy.U64 { Value.UInt(u64_bits_of(bits)) } else { Value.Int(bits) })
+    }
+    Bool => {
+      if k >= vals.len() {
+        return None
+      }
+      k += 1
+      return Some(Value.Bool(vals[k - 1] != "0"))
+    }
+    Char => {
+      if k >= vals.len() {
+        return None
+      }
+      k += 1
+      return Some(Value.Char(model_bits(vals[k - 1]) & 4294967295))
+    }
+    Tuple(ts) => {
+      if ts.is_empty() {
+        return Some(Value.Unit)
+      }
+      var xs: List<Value> = []
+      for x in ts {
+        xs.push(self.build_value(x, vals, &mut k)?)
+      }
+      return Some(Value.Tuple(xs))
+    }
+    Adt(a, args) => {
+      if self.lw.s.defs.adts[a].is_enum {
+        return None
+      }
+      var xs: List<Value> = []
+      for f in self.lw.s.defs.adts[a].fields {
+        let ft = self.lw.s.tys.subst(f.ty, args)
+        xs.push(self.build_value(ft, vals, &mut k)?)
+      }
+      return Some(Value.Tuple(xs))
+    }
+    _ => {
+      return None
+    }
+  }
+}
+
+/// The smallest inputs found that still fail the obligation's check.
+fn Interp.shrink_replay(
+  &mut self,
+  m: Int,
+  ptys: List<Int>,
+  first: List<Value>,
+  o: ObResult,
+  own: List<syntax.Span>,
+) -> List<Value>
+  effects {ffi}
+{
+  var args = first
+  var budget = 300
+  var progress = true
+  for progress && budget > 0 {
+    progress = false
+    var i = 0
+    for !progress && budget > 0 && i < args.len() {
+      let cands = self.shrink(ptys[i], args[i])
+      var j = 0
+      for !progress && j < cands.len() {
+        budget -= 1
+        if budget == 0 {
+          break
+        }
+        var trial = args
+        trial[i] = cands[j]
+        if self.run_matches(m, trial, o, own) == Some(true) {
+          args = trial
+          progress = true
+        }
+        j += 1
+      }
+      i += 1
+    }
+  }
+  return args
+}
+
+/// Run functions whose contracts failed on the interpreter: first with the counterexample (when
+/// its inputs can be rebuilt), then with generated inputs. A run that fails the same check
+/// confirms a real bug; a counterexample that passes means a missing fact.
+fn replay_failures(s: Sema, reports: List<FnReport>, cwd: Str) -> List<FnReport> effects {ffi} {
+  var todo = false
+  for r in reports {
+    for o in r.obligations {
+      if o.kind.is_contract() && is_failed(o.status) {
+        todo = true
+      }
+    }
+  }
+  if !todo {
+    return reports
+  }
+  var out = reports
+  var it = new_interp(new_lw(s), fake_effects(1), cwd)
+  for ri in 0..out.len() {
+    let rep = out[ri]
+    var any = false
+    for o in rep.obligations {
+      any = any || (o.kind.is_contract() && is_failed(o.status))
+    }
+    if !any {
+      continue
+    }
+    let f = rep.fid
+    let body = match it.lw.s.bodies[f] {
+      Some(b) => b
+      None => {
+        continue
+      }
+    }
+    var ptys: List<Int> = []
+    var names: List<Str> = []
+    for l in body.param_locals {
+      ptys.push(body.locals[l].ty)
+      names.push(body.locals[l].name)
+    }
+    // The function's own entry checks reject inputs instead of failing them.
+    let own = it.lw.s.own_entry_spans(f)
+    let m = it.lw.instance(f, [])
+    for oi in 0..rep.obligations.len() {
+      let o = rep.obligations[oi]
+      if !o.kind.is_contract() || !is_failed(o.status) {
+        continue
+      }
+      var replay: Option<Replay> = None
+      var done = false
+      match o.model {
+        Some(model) => {
+          var args: List<Value> = []
+          var ok = true
+          for i in 0..ptys.len() {
+            if i >= model.len() {
+              ok = false
+              break
+            }
+            var k = 0
+            match it.build_value(ptys[i], model[i], &mut k) {
+              Some(v) => args.push(v)
+              None => {
+                ok = false
+                break
+              }
+            }
+          }
+          if ok {
+            replay = match it.run_matches(m, args, o, own) {
+              Some(true) => Some(Replay.Confirmed(it.show_args(args, ptys, names)))
+              Some(false) => Some(Replay.NotReproduced)
+              None => None
+            }
+            done = true
+          }
+        }
+        None => {}
+      }
+      if !done {
+        // No rebuildable counterexample: try generated inputs, seeded by the function's name
+        // so the inputs don't change when unrelated functions are added.
+        var h: U64 = 14695981039346656037
+        for b in rep.name.bytes() {
+          h = (h ^ (b as U64)).wrapping_mul(1099511628211)
+        }
+        var rng = new_rng(h)
+        var case_n = 0
+        for case_n < 200 {
+          var args: List<Value> = []
+          var ok = true
+          for t in ptys {
+            match it.generate(t, &mut rng, (2 + case_n * 5) as U64, 0) {
+              Some(v) => args.push(v)
+              None => {
+                ok = false
+                break
+              }
+            }
+          }
+          if !ok {
+            break
+          }
+          if it.run_matches(m, args, o, own) == Some(true) {
+            let small = it.shrink_replay(m, ptys, args, o, own)
+            replay = Some(Replay.Confirmed(it.show_args(small, ptys, names)))
+            break
+          }
+          case_n += 1
+        }
+      }
+      out[ri].obligations[oi].replay = replay
+    }
+  }
+  return out
+}
+
+fn is_failed(s: Status) -> Bool {
+  return match s {
+    Failed(_) => true
+    _ => false
+  }
+}
+
+// ---------- reports ----------
+
+/// Whether a function states a contract: `requires`, `ensures` or a refined parameter or result.
+fn Sema.has_contract(self, f: Int) -> Bool {
+  let fd = self.defs.fns[f]
+  if fd.ret_refine.is_some() {
+    return true
+  }
+  for p in fd.params {
+    if p.refine.is_some() {
+      return true
+    }
+  }
+  return match self.pkgs[fd.pkg].files[fd.file].ast.items[fd.item].kind {
+    Fn(d) => !d.pre.is_empty() || !d.post.is_empty()
+    _ => false
+  }
+}
+
+/// (contracts proved, contracts, safety proved, safety).
+fn report_counts(fs: List<FnReport>) -> (Int, Int, Int, Int) {
+  var c = (0, 0, 0, 0)
+  for f in fs {
+    for o in f.obligations {
+      let proved = o.status == Status.Proved
+      if o.kind.is_contract() {
+        c = (c.0 + (if proved { 1 } else { 0 }), c.1 + 1, c.2, c.3)
+      } else {
+        c = (c.0, c.1, c.2 + (if proved { 1 } else { 0 }), c.3 + 1)
+      }
+    }
+  }
+  return c
+}
+
+/// Functions with contracts, and how many of them prove completely.
+fn Sema.contract_coverage(self, fs: List<FnReport>) -> (Int, Int) {
+  var with = 0
+  var proved = 0
+  for f in fs {
+    if self.has_contract(f.fid) {
+      with += 1
+      var all = true
+      for o in f.obligations {
+        all = all && o.status == Status.Proved
+      }
+      if all {
+        proved += 1
+      }
+    }
+  }
+  return (with, proved)
+}
+
+fn failed_contracts(fs: List<FnReport>) -> Int {
+  var n = 0
+  for f in fs {
+    for o in f.obligations {
+      if o.kind.is_contract() && is_failed(o.status) {
+        n += 1
+      }
+    }
+  }
+  return n
+}
+
+/// How to make a failed or unknown obligation go through.
+fn ob_hint(o: ObResult) -> Str {
+  let possible = "If the counterexample can happen, the code is wrong; otherwise add the missing fact as a `requires`, an `ensures` on a callee or a loop `invariant`."
+  return match o.kind {
+    Precondition => "Establish it before the call (an `if`, or an `assert` that is proved), or add it to this function's `requires` so callers must."
+    Postcondition => "If the counterexample can happen, fix the code or the contract. Otherwise the prover is missing a fact (it sees only this body, its `requires` and its callees' contracts): add it as a `requires`, an `ensures` on a callee, or a loop `invariant`."
+    LoopInvariant => if o.msg.ends_with("(on entry)") {
+      "It must hold before the first iteration: establish it before the loop."
+    } else {
+      "The body must re-establish it. The prover knows only the invariants at the top of an iteration, so add the facts the body relies on to the invariant."
+    }
+    StructInvariant | Refinement => "Show the new value satisfies the predicate: check it first, or require it of the inputs it is computed from."
+    Assert => possible
+    Overflow => "Bound the operands (`requires x <= 1_000_000`, a loop invariant), or use `wrapping_add` if wrapping is intended."
+    DivZero => "Check the divisor first, or add `requires d != 0`."
+    Bounds => "Show `0 <= i < xs.len()`: loop over `0..xs.len()`, check the index first, or add it to `requires`."
+    Unwrap => "Match on the value instead, or have its producer `ensures` it is present."
+    Panic => "Show this `panic` is unreachable: the branch condition must be impossible given the `requires`."
+    Cast | Shift => "Bound the value first (a check or a `requires`)."
+  }
+}
+
+/// `path:line:col` of a global offset, relative to `cwd`.
+fn Sema.location_text(self, lo: Int, cwd: Str) -> Str {
+  match self.src_file_at(lo) {
+    Some(f) => {
+      var line = 1
+      var col = 1
+      let end = min(lo - f.base, f.text.len())
+      for i in 0..end {
+        if f.text[i] == 10 {
+          line += 1
+          col = 1
+        } else if (f.text[i] as Int) < 128 || (f.text[i] as Int) >= 192 {
+          col += 1
+        }
+      }
+      return display_path(f.path, cwd) + ":" + line.str() + ":" + col.str()
+    }
+    None => {
+      return "<unknown>"
+    }
+  }
+}
+
+fn status_json(s: Status) -> Str {
+  return match s {
+    Proved => "\"status\":\"proved\""
+    Failed(cex) => {
+      var kv: List<Str> = []
+      for (k, v) in cex {
+        kv.push(json_str(k) + ":" + json_str(v))
+      }
+      "\"status\":\"failed\",\"counterexample\":{" + kv.join(",") + "}"
+    }
+    Unknown(why) => "\"status\":\"unknown\",\"reason\":" + json_str(why)
+  }
+}
+
+/// An obligation as one line of `jig prove --json`.
+fn Sema.obligation_json(self, f: FnReport, o: ObResult, cwd: Str) -> Str {
+  var j = "{" + status_json(o.status)
+  j += ",\"kind\":\"obligation\",\"obligation\":" + json_str(o.kind.name())
+  j += ",\"contract\":" + (if o.kind.is_contract() { "true" } else { "false" })
+  j += ",\"function\":" + json_str(f.name)
+  j += ",\"location\":" + json_str(self.location_text(o.span.lo, cwd))
+  j += ",\"message\":" + json_str(o.msg)
+  if o.status != Status.Proved {
+    j += ",\"hint\":" + json_str(ob_hint(o))
+  }
+  match o.replay {
+    Some(Confirmed(inputs)) => j += ",\"confirmed_with\":" + json_str(inputs)
+    Some(NotReproduced) => j += ",\"reproduced\":false"
+    None => {}
+  }
+  return j + "}"
+}
+
+/// The text report: failures and unknown contracts in full, safety obligations counted.
+fn Sema.render_report(self, fs: List<FnReport>, verbose: Bool, millis: Int, cwd: Str) -> Str {
+  var out = ""
+  for f in fs {
+    for o in f.obligations {
+      let show = match o.status {
+        Proved => false
+        _ => o.kind.is_contract() || verbose
+      }
+      if !show {
+        continue
+      }
+      var word = "proved"
+      var detail = ""
+      match o.status {
+        Failed(cex) => {
+          var c: List<Str> = []
+          for (k, v) in cex {
+            c.push(k + " = " + v)
+          }
+          word = if o.kind.is_contract() { "FAILED" } else { "may trap" }
+          detail = if c.is_empty() { "" } else { "\n  counterexample: " + c.join(", ") }
+        }
+        Unknown(why) => {
+          word = "unknown"
+          detail = " (" + why + ")"
+        }
+        Proved => {}
+      }
+      out += word +
+        " " +
+        o.kind.name() +
+        " in `" +
+        f.name +
+        "` at " +
+        self.location_text(o.span.lo, cwd) +
+        ": " +
+        o.msg +
+        detail +
+        "\n"
+      match o.replay {
+        Some(Confirmed(inputs)) => {
+          if inputs.is_empty() {
+            out += "  confirmed: running it fails this check\n"
+          } else {
+            out += "  confirmed: running it with " + inputs + " fails this check\n"
+          }
+        }
+        Some(NotReproduced) => out += "  not reproduced: the counterexample passes at run time, so the prover is missing a fact\n"
+        None => {}
+      }
+      if o.kind.is_contract() {
+        out += "  hint: " + ob_hint(o) + "\n"
+      }
+    }
+  }
+  let (cp, ct, sp, stot) = report_counts(fs)
+  let hundredths = (millis + 5) / 10
+  let frac = (hundredths % 100).str()
+  out += "proved " +
+    cp.str() +
+    " of " +
+    ct.str() +
+    " contract obligations and " +
+    sp.str() +
+    " of " +
+    stot.str() +
+    " safety obligations in " +
+    fs.len().str() +
+    " functions (0 from cache), " +
+    (hundredths / 100).str() +
+    "." +
+    (if frac.len() < 2 { "0" + frac } else { frac }) +
+    " s\n"
+  let (with, proved) = self.contract_coverage(fs)
+  if with > 0 {
+    out += with.str() +
+      " of " +
+      fs.len().str() +
+      " functions have contracts; " +
+      proved.str() +
+      " of those prove completely\n"
+  }
+  return out
+}
+
+/// The summary line of `jig prove --json`.
+fn Sema.summary_json(self, fs: List<FnReport>, millis: Int) -> Str {
+  let (cp, ct, sp, stot) = report_counts(fs)
+  let (with, proved) = self.contract_coverage(fs)
+  return "{\"kind\":\"summary\",\"contracts_proved\":" +
+    cp.str() +
+    ",\"contracts\":" +
+    ct.str() +
+    ",\"safety_proved\":" +
+    sp.str() +
+    ",\"safety\":" +
+    stot.str() +
+    ",\"functions\":" +
+    fs.len().str() +
+    ",\"functions_with_contracts\":" +
+    with.str() +
+    ",\"functions_with_contracts_proved\":" +
+    proved.str() +
+    ",\"cached\":0,\"millis\":" +
+    millis.str() +
+    "}"
+}

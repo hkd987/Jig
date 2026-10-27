@@ -3,6 +3,8 @@
 // and pattern of the project's own packages.
 
 import "std/fs"
+import "std/os"
+import "std/time"
 import "syntax"
 
 /// A package that failed to parse reports only its syntax errors: recovery drops code, and
@@ -358,4 +360,67 @@ pub fn vc_dump(dir: Str, std_dir: Str, std: Bool) -> Result<Str, Str> effects {f
     }
   }
   return Ok(out)
+}
+
+/// `jigc prove DIR STD [--json] [--verbose] [--std] [FILTER]`: prove the package in DIR (or the
+/// standard library) as `jig prove --no-cache` does, printing the same report. Returns the
+/// output and the exit code.
+pub fn prove_cmd(dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> (Str, Int)
+  effects {fs, env, ffi, clock}
+{
+  let json = flags.contains("--json")
+  let verbose = flags.contains("--verbose")
+  let std = flags.contains("--std")
+  var filter = ""
+  for f in flags {
+    if !f.starts_with("--") {
+      filter = f
+    }
+  }
+  var root = dir
+  if std {
+    // A package importing every standard package, as the bootstrap compiler's `analyze_std`.
+    root = join_path(os.env("TMPDIR").unwrap_or("/tmp"), "jigc-std-" + time.now_ns().str())
+    var src = ""
+    for p in ["io", "fs", "os", "time", "rand", "math", "task", "sim", "net", "lists", "strings"] {
+      src += "import \"std/" + p + "\"\n"
+    }
+    let _ = system("mkdir -p '" + root + "'")
+    let _ = fs.write(join_path(root, "main.jig"), src + "\nfn main() {\n}\n")
+  }
+  var (s, _) = analyze(root, std_dir)
+  if std {
+    let _ = system("rm -rf '" + root + "'")
+    // The imports are there to load the packages.
+    var kept: List<syntax.Diag> = []
+    for d in s.diags {
+      if d.code != "E0502" {
+        kept.push(d)
+      }
+    }
+    s.diags = kept
+  }
+  if !s.diags.is_empty() {
+    return ("error: " + dir + " has errors\n", 1)
+  }
+  let start = time.now_ms()
+  let reports = match prove_program(s, std, filter, cwd) {
+    Ok(r) => r
+    Err(e) => {
+      return ("error: " + e + "\n", 2)
+    }
+  }
+  let millis = time.now_ms() - start
+  var out = ""
+  if json {
+    for f in reports {
+      for o in f.obligations {
+        out += s.obligation_json(f, o, cwd) + "\n"
+      }
+    }
+    out += s.summary_json(reports, millis) + "\n"
+  } else {
+    out = s.render_report(reports, verbose, millis, cwd)
+  }
+  return (out, if failed_contracts(reports) > 0 { 1 } else { 0 })
 }

@@ -13,9 +13,10 @@ import "syntax"
 // the file as `jig fmt` writes it. `jigc test DIR STD [FILTER]` runs DIR's tests and
 // scenarios on the interpreter and prints the lines of `jig test --json`; `jigc sim DIR STD`
 // runs `main` there with simulated effects. `jigc vc DIR STD [std]` prints the verification
-// conditions `jig debug vc DIR [std]` prints.
+// conditions `jig debug vc DIR [std]` prints, and `jigc prove DIR STD [--json] [--verbose]
+// [--std] [FILTER]` proves them as `jig prove --no-cache` does (with z3, or `$JIG_Z3`).
 
-fn main() effects {io, fs, env, ffi} {
+fn main() effects {io, fs, env, ffi, clock} {
   let args = os.args()
   if args.len() == 4 && args[1] == "check" {
     io.print(sema.check_dump(args[2], args[3]))
@@ -50,6 +51,19 @@ fn main() effects {io, fs, env, ffi} {
         io.eprintln("error: " + e)
         os.exit(1)
       }
+    }
+    return
+  }
+  if args.len() >= 4 && args[1] == "prove" {
+    let (out, code) = sema.prove_cmd(
+      args[2],
+      args[3],
+      os.env("PWD").unwrap_or(""),
+      args[4..args.len()],
+    )
+    io.print(out)
+    if code != 0 {
+      os.exit(code)
     }
     return
   }
@@ -89,7 +103,7 @@ fn main() effects {io, fs, env, ffi} {
   }
   if args.len() < 3 || (args[1] != "tokens" && args[1] != "ast") {
     io.eprintln(
-      "usage: jigc tokens|ast|fmt FILE, jigc check|c|cc|sim DIR STD, jigc vc DIR STD [std], jigc test DIR STD [FILTER]",
+      "usage: jigc tokens|ast|fmt FILE, jigc check|c|cc|sim DIR STD, jigc vc DIR STD [std], jigc test DIR STD [FILTER], jigc prove DIR STD [--json] [--verbose] [--std] [FILTER]",
     )
     os.exit(2)
   }

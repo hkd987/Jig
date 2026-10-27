@@ -17,7 +17,7 @@ bootstrap compiler on every `.jig` file in the repository plus a few hundred mut
 | Formatter | `compiler/src/fmt/` | `syntax/fmt.jig`, `syntax/fmt_expr.jig` | `jigc fmt FILE` = `jig fmt FILE` |
 | Interpreter, test runner, property tests | `compiler/src/mir/interp.rs`, `compiler/src/runner.rs`, `compiler/src/proptest.rs` | `sema/interp.jig`, `sema/intrinsics.jig`, `sema/runner.jig` | `jigc test DIR STD` = `jig test --json DIR` |
 | Prover: verification conditions | `compiler/src/verify/vc.rs`, `frame.rs` | `sema/vc*.jig`, `sema/frame.jig` | `jigc vc DIR STD` = `jig debug vc DIR` |
-| Prover: solving, replay, reports | `compiler/src/verify/mod.rs`, `smt.rs` | not yet | |
+| Prover: solving, replay, reports | `compiler/src/verify/mod.rs`, `smt.rs` | `sema/prove.jig` | `jigc prove DIR STD --json` = `jig prove --json --no-cache DIR` |
 
 `jigc` compiles itself: `jigc cc selfhost compiler/std` prints a self-contained C file that a
 C compiler builds into a `jigc` printing the same file again. That file is checked in as
@@ -65,6 +65,16 @@ every run test's expected output. C functions are called as the bootstrap's inte
 calls them (`sema/ffi.jig`): found by name with `dlsym` among the process's symbols and the
 libraries `jig.mod` links, and called through the runtime's `jig_ccall_*`, which fill every
 argument register.
+
+The prover (`sema/frame.jig`, `sema/vc*.jig`, `sema/prove.jig`) evaluates each function
+symbolically into SMT-LIB obligations, as the bootstrap compiler's `verify/` does, and the
+test requires the same text: `jigc vc DIR STD` prints what `jig debug vc DIR` prints (every
+declaration, path fact and goal) for every example, run test, prover test, agent solution,
+the standard library and 200 mutations, and for `jigc` itself (5.7 million lines, which jigc
+generates eight times faster). `jigc prove` then runs Z3 once on a script of every
+function's queries (through the C library's `system`; `echo` markers tell the answers apart)
+and replays failed contracts on the interpreter; its report matches `jig prove --no-cache`
+on the prover tests, examples, agent solutions and 60 mutations. It keeps no proof cache.
 
 The back end (about 6,600 lines of Jig for 7,300 of Rust) lowers to the same MIR, runs the
 same ownership analyses (borrowed locals, last uses, unique lists) and prints the same C:

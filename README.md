@@ -92,8 +92,10 @@ cc -O2 -std=gnu11 -pthread bootstrap/jigc.c -lm -o jigc
 
 `jigc` checks programs and compiles them to C with output identical to the Rust compiler's.
 It binds `.feature` scenarios, loads required modules, formats, and runs tests and scenarios
-on its own interpreter (`jigc test`, the lines of `jig test --json`), but does not yet prove;
-until it does, the Rust compiler (`compiler/`) is the one `jig` command and is kept passing the same tests.
+on its own interpreter (`jigc test`, the lines of `jig test --json`), and proves contracts with
+Z3 (`jigc prove`, the same results as `jig prove`). It does not yet keep a proof cache or use
+proofs to remove checks from builds, and has no full command line of its own; until it does,
+the Rust compiler (`compiler/`) is the one `jig` command and is kept passing the same tests.
 
 ## License
 

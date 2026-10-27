@@ -195,8 +195,11 @@ and 0.1.0-alpha is ready to tag (`.github/workflows/release.yml`).
       files and step patterns compared), resolves imports through required modules, and
       formats like `jig fmt` (every repository file and 600 layout mutations compared).
       It runs tests too: its interpreter and test runner print what `jig test --json`
-      prints for every package with tests and 150 mutations, C calls included. Left to
-      port: the prover.
+      prints for every package with tests and 150 mutations, C calls included. And it
+      proves: its verification conditions are the bootstrap's byte for byte (`jigc vc` =
+      `jig debug vc`; 5.7 million lines for jigc itself), and `jigc prove` reports the same
+      statuses, counterexamples and replays as `jig prove`. Left: the proof cache, builds
+      that use proofs, and a full command line.
 - [ ] Agent benchmark vs. Rust and TypeScript. `bench/agents`: six tasks with acceptance cases
       and reference solutions in all three languages (checked in CI), and a harness that runs
       an agent per task and language and reports tasks solved and turns. Results need agent

@@ -1166,3 +1166,89 @@ fn jigc_vcs_match_bootstrap() {
     assert!(compared >= 100, "only {compared} mutations checked");
     assert!(failures.is_empty(), "{} cases differ:\n{}", failures.len(), failures.join("\n"));
 }
+
+/// `jigc prove DIR --json` against `jig prove --json --no-cache DIR` (timings left out): every
+/// obligation's status, counterexample, replay and hint, and the summary.
+fn compare_prove(exe: &Path, std_dir: &Path, dir: &Path) -> Option<String> {
+    let root = std::fs::canonicalize(repo_root()).unwrap();
+    let jig = env!("CARGO_BIN_EXE_jig");
+    let strip = |s: String| -> String {
+        s.lines()
+            .map(|l| match l.find(",\"millis\":") {
+                Some(i) => format!("{}}}", &l[..i]),
+                None => l.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let (_, expected) =
+        output_within(Command::new(jig).args(["prove", "--json", "--no-cache"]).arg(dir).current_dir(&root), 120)?;
+    let out = output_within(
+        Command::new(exe).arg("prove").arg(dir).arg(std_dir).arg("--json").current_dir(&root).env("PWD", &root),
+        120,
+    );
+    let Some((_, actual)) = out else { return Some(format!("{}: jigc prove timed out", dir.display())) };
+    let (e, a) = (strip(expected), strip(actual));
+    if e == a {
+        return None;
+    }
+    let (el, al): (Vec<&str>, Vec<&str>) = (e.lines().collect(), a.lines().collect());
+    let first = el.iter().zip(&al).position(|(x, y)| x != y).unwrap_or(el.len().min(al.len()));
+    Some(format!(
+        "{}: line {} differs (bootstrap {:?}, jigc {:?})",
+        dir.display(),
+        first + 1,
+        el.get(first),
+        al.get(first)
+    ))
+}
+
+/// jigc proves what the bootstrap proves: the same obligations come back proved, failed (with
+/// the same counterexamples, and confirmed or not by replay on the interpreter) or unknown, for
+/// the prover tests, examples, agent solutions and mutated copies of them that still check.
+#[test]
+fn jigc_proofs_match_bootstrap() {
+    if !have_cc() || jig::verify::smt::solver_version().is_none() {
+        eprintln!("skipping: no C compiler or no SMT solver");
+        return;
+    }
+    let root = repo_root();
+    let exe = jigc();
+    let std_dir = std::fs::canonicalize(root.join("compiler/std")).unwrap();
+    let work = std::fs::canonicalize(PathBuf::from(env!("CARGO_TARGET_TMPDIR"))).unwrap().join("selfhost-prove");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    let mut cases: Vec<PathBuf> = Vec::new();
+    for dir in ["compiler/tests/prove", "examples", "bench/agents/reference/jig"] {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(root.join(dir)).unwrap().map(|e| e.unwrap().path()).collect();
+        entries.sort();
+        cases.extend(entries.into_iter().filter(|p| p.is_dir()));
+    }
+    let mut failures: Vec<String> = Vec::new();
+    for d in &cases {
+        failures.extend(compare_prove(exe, &std_dir, d));
+    }
+    let originals = cases.len();
+    let mut rng = Rng(0xbb67_ae85_84ca_a73b);
+    let mut compared = 0;
+    for k in 0..400 {
+        if compared == 60 {
+            break;
+        }
+        let proj = &cases[rng.below(originals)];
+        let copy = work.join(format!("mut{k}"));
+        copy_dir(proj, &copy);
+        let mut files = Vec::new();
+        jig_files(&copy, &mut files);
+        let f = &files[rng.below(files.len())];
+        let src = std::fs::read_to_string(f).unwrap();
+        std::fs::write(f, mutate(&src, &mut rng)).unwrap();
+        if jig::sema::analyze(&Sources::Disk, &copy).diags.has_errors() {
+            continue;
+        }
+        compared += 1;
+        failures.extend(compare_prove(exe, &std_dir, &copy).map(|m| format!("mutation {k}: {m}")));
+    }
+    assert!(compared >= 30, "only {compared} mutations checked");
+    assert!(failures.is_empty(), "{} cases differ:\n{}", failures.len(), failures.join("\n"));
+}

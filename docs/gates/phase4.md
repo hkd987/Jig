@@ -92,9 +92,10 @@ Release notes are in [`CHANGELOG.md`](../../CHANGELOG.md).
 
 ## Open
 
-- `jigc`: the prover (Z3 through
-  the `ffi` effect); its test runner, interpreter and C calls are done. Until `jigc` passes every test
-  suite the Rust compiler stays the `jig` command (D6).
+- `jigc`: the proof cache and builds that use proofs, and a full command line (human
+  diagnostics, `run` with real effects, `build`, `get`, `trace`, `mcp`); its checker, back end,
+  formatter, test runner and prover are done. Until `jigc` passes every test suite the Rust
+  compiler stays the `jig` command (D6).
 - Self-hosted speed: identifiers interned instead of sliced, and wall time (memory).
 - Contracts on the compiler's passes.
 - Agent benchmark runs.
