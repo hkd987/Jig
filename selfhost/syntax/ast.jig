@@ -172,7 +172,9 @@ fn BinOp.precedence(self) -> Int
   }
 }
 
-pub fn BinOp.text(self) -> Str {
+pub fn BinOp.text(self) -> Str
+  ensures !result.is_empty()
+{
   return match self {
     Mul => "*"
     Div => "/"
@@ -195,7 +197,9 @@ pub fn BinOp.text(self) -> Str {
   }
 }
 
-fn UnOp.text(self) -> Str {
+fn UnOp.text(self) -> Str
+  ensures !result.is_empty()
+{
   return match self {
     Neg => "-"
     Not => "!"

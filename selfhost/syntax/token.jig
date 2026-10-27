@@ -139,7 +139,9 @@ fn Kind.ends_statement(self) -> Bool {
 }
 
 /// How errors name this kind of token.
-fn Kind.describe(self) -> Str {
+fn Kind.describe(self) -> Str
+  ensures !result.is_empty()
+{
   return match self {
     Ident => "identifier"
     Int => "integer literal"

@@ -88,10 +88,13 @@ benchmark solution and `jigc` itself (about 110,000 lines of C). To make that co
 bootstrap compiler now numbers the C names it derives from types (reference-count glue,
 task and sort thunks) in order of first use rather than by its type table's ids.
 
-Every function `jigc` states a contract for proves completely (`jig prove selfhost`), and
-the lexer states one for every function: the cursor stays in the source and only moves
-forward, tokens lie inside it and end with `Eof`, global offsets cannot overflow, and
-literal decoding stays in range. Each of its obligations proves, its traps included.
+`jig prove selfhost` proves the contracts `jigc` states. The lexer states one for every
+function, and each of its obligations proves, its traps included: the cursor stays in the
+source and only moves forward, tokens lie inside it and end with `Eof`, global offsets
+cannot overflow, and literal decoding stays in range. The parser's cursor is always on a
+token, no parsing function moves it back, and node constructors return the new index; all
+of the parser proves but the six functions that index the tree by a node id or slice the
+source by a token's offsets, which would need facts about every node or token.
 
 ## Speed
 

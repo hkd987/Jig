@@ -18,6 +18,9 @@ struct Parser {
   /// Inside `if`/`for`/`match` heads and contract clauses, `Name {` is not a struct literal.
   no_struct: Bool
   prev_hi: Int
+  // The cursor is always on a token, and the last token is the end of the file.
+  invariant toks.len() > 0 && toks[toks.len() - 1].kind == Kind.Eof
+  invariant pos >= 0 && pos < toks.len()
 }
 
 /// A function's `requires`, `ensures` and `effects` clauses.
@@ -67,13 +70,17 @@ fn is_numeric_type_name(s: Str) -> Bool {
   return s == "Int" || s == "Float" || s == "I32" || s == "U8" || s == "U32" || s == "U64"
 }
 
-fn token_span(t: Token) -> Span {
+fn token_span(t: Token) -> Span
+  ensures result.lo == t.lo && result.hi == t.hi && result.lo <= result.hi
+{
   return Span { lo: t.lo, hi: t.hi }
 }
 
 /// A string or character literal's text without its quotes (an unterminated one has no
 /// closing quote).
-fn literal_body(raw: Str, quote: Str) -> Str {
+fn literal_body(raw: Str, quote: Str) -> Str
+  ensures result.len() <= raw.len()
+{
   if raw.len() >= 2 && raw.ends_with(quote) {
     return raw[1..raw.len() - 1]
   }
@@ -249,26 +256,41 @@ fn small_decimal(text: Str, limit: Int, fallback: Int) -> Int
 
 // ---------- token helpers ----------
 
-fn Parser.tok(self) -> Token {
+fn Parser.tok(self) -> Token
+  ensures result.kind == self.toks[self.pos].kind
+{
   return self.toks[self.pos]
 }
 
-fn Parser.peek(self) -> Kind {
+fn Parser.peek(self) -> Kind
+  ensures result == self.toks[self.pos].kind
+{
   return self.toks[self.pos].kind
 }
 
-fn Parser.peek_at(self, n: Int) -> Kind {
+/// The kind of the token `n` past the cursor (`Eof` past the end).
+fn Parser.peek_at(self, n: Int) -> Kind
+  requires n >= 0 && n <= MAX_OFFSET
+  ensures result == Kind.Eof || self.pos + n < self.toks.len()
+{
   return match self.toks.get(self.pos + n) {
     Some(t) => t.kind
     None => Kind.Eof
   }
 }
 
-fn Parser.at(self, k: Kind) -> Bool {
+fn Parser.at(self, k: Kind) -> Bool
+  ensures result == (self.toks[self.pos].kind == k)
+{
   return self.peek() == k
 }
 
-fn Parser.bump(&mut self) -> Token {
+/// The token at the cursor; the cursor moves past it unless it is the end of the file.
+fn Parser.bump(&mut self) -> Token
+  ensures result.kind == self.toks[old(self.pos)].kind
+  ensures result.kind == Kind.Eof || self.pos == old(self.pos) + 1
+  ensures result.kind != Kind.Eof || self.pos == old(self.pos)
+{
   let t = self.toks[self.pos]
   if t.kind != Kind.Eof {
     self.pos += 1
@@ -280,11 +302,16 @@ fn Parser.bump(&mut self) -> Token {
   return t
 }
 
-fn Parser.advance(&mut self) {
+fn Parser.advance(&mut self)
+  ensures self.toks[old(self.pos)].kind == Kind.Eof || self.pos == old(self.pos) + 1
+  ensures self.pos >= old(self.pos)
+{
   let _ = self.bump()
 }
 
-fn Parser.eat(&mut self, k: Kind) -> Bool {
+fn Parser.eat(&mut self, k: Kind) -> Bool
+  ensures result == (self.toks[old(self.pos)].kind == k), self.pos >= old(self.pos)
+{
   if self.at(k) {
     self.advance()
     return true
@@ -296,50 +323,68 @@ fn Parser.text(self, t: Token) -> Str {
   return self.src[t.lo - self.base..t.hi - self.base]
 }
 
-fn Parser.tok_is_ident(self, s: Str) -> Bool {
+fn Parser.tok_is_ident(self, s: Str) -> Bool
+  ensures !result || self.toks[self.pos].kind == Kind.Ident
+{
   return self.at(Kind.Ident) && self.text(self.tok()) == s
 }
 
-fn Parser.ident_at(self, n: Int, s: Str) -> Bool {
+fn Parser.ident_at(self, n: Int, s: Str) -> Bool
+  requires n >= 0 && n <= MAX_OFFSET
+  ensures !result || self.pos + n < self.toks.len()
+{
   return match self.toks.get(self.pos + n) {
     Some(t) => t.kind == Kind.Ident && self.text(t) == s
     None => false
   }
 }
 
-fn Parser.span_from(self, lo: Int) -> Span {
+fn Parser.span_from(self, lo: Int) -> Span
+  ensures result.lo == lo && result.hi >= lo
+{
   if self.prev_hi > lo {
     return Span { lo: lo, hi: self.prev_hi }
   }
   return Span { lo: lo, hi: lo }
 }
 
-fn Parser.skip_semis(&mut self) {
-  for self.at(Kind.Semi) {
+fn Parser.skip_semis(&mut self)
+  ensures self.pos >= old(self.pos)
+{
+  let start = self.pos
+  for self.at(Kind.Semi) invariant self.pos >= start {
     self.advance()
   }
 }
 
 /// Skip line-break terminators if the next real token is one of `ks`.
-fn Parser.skip_semis_before_any(&mut self, ks: List<Kind>) -> Bool {
+fn Parser.skip_semis_before_any(&mut self, ks: List<Kind>) -> Bool
+  ensures self.pos >= old(self.pos)
+{
   var n = 0
-  for self.peek_at(n) == Kind.Semi {
+  for self.peek_at(n) == Kind.Semi invariant n >= 0 && n <= self.toks.len() {
     n += 1
   }
   if !ks.contains(self.peek_at(n)) {
     return false
   }
-  for _ in 0..n {
+  let start = self.pos
+  for _ in 0..n invariant self.pos >= start {
     self.advance()
   }
   return true
 }
 
-fn Parser.skip_semis_before(&mut self, k: Kind) -> Bool {
+fn Parser.skip_semis_before(&mut self, k: Kind) -> Bool
+  ensures self.pos >= old(self.pos)
+{
   return self.skip_semis_before_any([k])
 }
 
-fn Parser.error_at(&mut self, span: Span, msg: Str) {
+/// Report an error (diagnostics are only ever added).
+fn Parser.error_at(&mut self, span: Span, msg: Str)
+  ensures self.errors.len() >= old(self.errors.len())
+{
   // Avoid cascades at one position.
   match self.errors.last() {
     Some(d) => if d.lo == span.lo {
@@ -351,14 +396,18 @@ fn Parser.error_at(&mut self, span: Span, msg: Str) {
 }
 
 /// How an error names the token `t`.
-fn Parser.found(self, t: Token) -> Str {
+fn Parser.found(self, t: Token) -> Str
+  ensures !result.is_empty()
+{
   if t.kind == Kind.Ident {
     return "`" + self.text(t) + "`"
   }
   return t.kind.describe()
 }
 
-fn Parser.expected(&mut self, what: Str) {
+fn Parser.expected(&mut self, what: Str)
+  ensures self.errors.len() >= old(self.errors.len())
+{
   let t = self.tok()
   var span = token_span(t)
   if t.kind == Kind.Semi || t.kind == Kind.Eof {
@@ -367,7 +416,13 @@ fn Parser.expected(&mut self, what: Str) {
   self.error_at(span, "expected " + what + ", found " + self.found(t))
 }
 
-fn Parser.expect(&mut self, k: Kind) -> Result<Token, ()> {
+fn Parser.expect(&mut self, k: Kind) -> Result<Token, ()>
+  ensures self.pos >= old(self.pos)
+  ensures match result {
+    Ok(t) => t.kind == k
+    Err(_) => true
+  }
+{
   if self.at(k) {
     return Ok(self.bump())
   }
@@ -375,7 +430,9 @@ fn Parser.expect(&mut self, k: Kind) -> Result<Token, ()> {
   return Err(())
 }
 
-fn Parser.expect_ident(&mut self, what: Str) -> Result<Name, ()> {
+fn Parser.expect_ident(&mut self, what: Str) -> Result<Name, ()>
+  ensures self.pos >= old(self.pos)
+{
   if self.at(Kind.Ident) {
     let t = self.bump()
     return Ok(Name { text: self.text(t), span: token_span(t) })
@@ -386,34 +443,46 @@ fn Parser.expect_ident(&mut self, what: Str) -> Result<Name, ()> {
 
 // ---------- node constructors ----------
 
-fn Parser.mk_expr(&mut self, kind: ExprKind, span: Span) -> Int {
+fn Parser.mk_expr(&mut self, kind: ExprKind, span: Span) -> Int
+  ensures result == old(self.ast.exprs.len()) && self.ast.exprs.len() > result
+{
   self.ast.exprs.push(Expr { kind: kind, span: span })
   return self.ast.exprs.len() - 1
 }
 
-fn Parser.mk_type(&mut self, kind: TypeKind, span: Span) -> Int {
+fn Parser.mk_type(&mut self, kind: TypeKind, span: Span) -> Int
+  ensures result == old(self.ast.types.len()) && self.ast.types.len() > result
+{
   self.ast.types.push(TypeExpr { kind: kind, span: span })
   return self.ast.types.len() - 1
 }
 
-fn Parser.mk_pat(&mut self, kind: PatKind, span: Span) -> Int {
+fn Parser.mk_pat(&mut self, kind: PatKind, span: Span) -> Int
+  ensures result == old(self.ast.pats.len()) && self.ast.pats.len() > result
+{
   self.ast.pats.push(Pat { kind: kind, span: span })
   return self.ast.pats.len() - 1
 }
 
-fn Parser.mk_stmt(&mut self, kind: StmtKind, span: Span) -> Int {
+fn Parser.mk_stmt(&mut self, kind: StmtKind, span: Span) -> Int
+  ensures result == old(self.ast.stmts.len()) && self.ast.stmts.len() > result
+{
   self.ast.stmts.push(Stmt { kind: kind, span: span })
   return self.ast.stmts.len() - 1
 }
 
-fn Parser.push_item(&mut self, kind: ItemKind, name: Name, lo: Int, is_pub: Bool) -> Int {
+fn Parser.push_item(&mut self, kind: ItemKind, name: Name, lo: Int, is_pub: Bool) -> Int
+  ensures result == old(self.ast.items.len()) && self.ast.items.len() > result
+{
   let span = self.span_from(lo)
   self.ast.items.push(Item { kind: kind, name: name, span: span, is_pub: is_pub })
   return self.ast.items.len() - 1
 }
 
 /// An expression where `Name {` does not start a struct literal.
-fn Parser.expr_no_struct(&mut self) -> Result<Int, ()> {
+fn Parser.expr_no_struct(&mut self) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
   let saved = self.no_struct
   self.no_struct = true
   let r = self.parse_expr()
@@ -423,15 +492,21 @@ fn Parser.expr_no_struct(&mut self) -> Result<Int, ()> {
 
 // ---------- recovery ----------
 
-fn is_open(k: Kind) -> Bool {
+fn is_open(k: Kind) -> Bool
+  ensures result == (k == Kind.LBrace || k == Kind.LParen || k == Kind.LBracket)
+{
   return k == Kind.LBrace || k == Kind.LParen || k == Kind.LBracket
 }
 
-fn is_close(k: Kind) -> Bool {
+fn is_close(k: Kind) -> Bool
+  ensures result == (k == Kind.RBrace || k == Kind.RParen || k == Kind.RBracket)
+{
   return k == Kind.RBrace || k == Kind.RParen || k == Kind.RBracket
 }
 
-fn starts_item(k: Kind) -> Bool {
+fn starts_item(k: Kind) -> Bool
+  ensures !result || k != Kind.Eof
+{
   return match k {
     Fn | Struct | Enum | Interface | Type | Const | Unit | Test | Step | Import | Pub => true
     _ => false
@@ -439,9 +514,13 @@ fn starts_item(k: Kind) -> Bool {
 }
 
 /// Skip to the end of the current statement (a terminator or a closing brace at depth 0).
-fn Parser.recover_stmt(&mut self) {
+fn Parser.recover_stmt(&mut self)
+  ensures self.pos >= old(self.pos)
+{
+  let start = self.pos
   var depth = 0
-  for {
+  // One token per round, so the depth is bounded by the tokens passed.
+  for invariant self.pos >= start && depth >= 0 && depth <= self.pos - start {
     let k = self.peek()
     if k == Kind.Eof {
       return
@@ -462,9 +541,12 @@ fn Parser.recover_stmt(&mut self) {
 }
 
 /// Skip to the next token that can start an item at the start of a line.
-fn Parser.recover_item(&mut self) {
+fn Parser.recover_item(&mut self)
+  ensures self.pos >= old(self.pos)
+{
+  let start = self.pos
   var depth = 0
-  for {
+  for invariant self.pos >= start && depth <= self.pos - start && depth >= start - self.pos {
     let k = self.peek()
     if k == Kind.Eof {
       return
@@ -484,9 +566,12 @@ fn Parser.recover_item(&mut self) {
 
 /// After a bad match arm: skip to the end of its line (outside any brackets). Returns false
 /// at the end of the file.
-fn Parser.skip_to_arm_end(&mut self) -> Bool {
+fn Parser.skip_to_arm_end(&mut self) -> Bool
+  ensures self.pos >= old(self.pos)
+{
+  let start = self.pos
   var depth = 0
-  for {
+  for invariant self.pos >= start && depth <= self.pos - start && depth >= start - self.pos {
     let k = self.peek()
     if k == Kind.Eof {
       return false
@@ -510,9 +595,12 @@ fn Parser.skip_to_arm_end(&mut self) -> Bool {
 
 // ---------- items ----------
 
-fn Parser.parse_items(&mut self) -> List<Int> {
+fn Parser.parse_items(&mut self) -> List<Int>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   var items: List<Int> = []
-  for {
+  for invariant self.pos >= pos0 {
     self.skip_semis()
     if self.at(Kind.Eof) {
       break
@@ -531,7 +619,9 @@ fn Parser.parse_items(&mut self) -> List<Int> {
   return items
 }
 
-fn Parser.end_item(&mut self) -> Result<(), ()> {
+fn Parser.end_item(&mut self) -> Result<(), ()>
+  ensures self.pos >= old(self.pos)
+{
   if self.at(Kind.Semi) || self.at(Kind.Eof) {
     self.skip_semis()
     return Ok(())
@@ -541,12 +631,16 @@ fn Parser.end_item(&mut self) -> Result<(), ()> {
 }
 
 /// The quoted string at the cursor and its value.
-fn Parser.string_lit(&mut self) -> Result<(Str, Span), ()> {
+fn Parser.string_lit(&mut self) -> Result<(Str, Span), ()>
+  ensures self.pos >= old(self.pos)
+{
   let t = self.expect(Kind.Str)?
   return Ok((unescape(literal_body(self.text(t), "\"")), token_span(t)))
 }
 
-fn Parser.parse_item(&mut self) -> Result<Int, ()> {
+fn Parser.parse_item(&mut self) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
   let lo = self.tok().lo
   let is_pub = self.eat(Kind.Pub)
   match self.peek() {
@@ -645,20 +739,23 @@ fn Parser.parse_item(&mut self) -> Result<Int, ()> {
   }
 }
 
-fn Parser.parse_generic_params_opt(&mut self) -> Result<List<GenericParam>, ()> {
+fn Parser.parse_generic_params_opt(&mut self) -> Result<List<GenericParam>, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   var params: List<GenericParam> = []
   if !self.at(Kind.Lt) {
     return Ok(params)
   }
   self.advance()
-  for {
+  for invariant self.pos >= pos0 {
     if self.close_angle() {
       break
     }
     let name = self.expect_ident("a type parameter")?
     var bounds: List<Int> = []
     if self.eat(Kind.Colon) {
-      for {
+      for invariant self.pos >= pos0 {
         bounds.push(self.parse_type()?)
         if !self.eat(Kind.Plus) {
           break
@@ -679,7 +776,9 @@ fn Parser.parse_generic_params_opt(&mut self) -> Result<List<GenericParam>, ()> 
 }
 
 /// Consume a `>`, splitting `>>`, `>=` or `>>=` if needed. Returns false if not at one.
-fn Parser.close_angle(&mut self) -> Bool {
+fn Parser.close_angle(&mut self) -> Bool
+  ensures self.pos >= old(self.pos)
+{
   let t = self.tok()
   if t.kind == Kind.Gt {
     self.advance()
@@ -697,7 +796,7 @@ fn Parser.close_angle(&mut self) -> Bool {
   // These tokens are at least two bytes wide.
   let lo = if t.lo < t.hi { t.lo + 1 } else { t.hi }
   self.toks[self.pos] = Token { kind: kind, lo: lo, hi: t.hi }
-  self.prev_hi = t.lo + 1
+  self.prev_hi = lo
   return true
 }
 
@@ -707,7 +806,9 @@ fn Parser.parse_fn(
   is_pub: Bool,
   step_attr: Option<Step>,
   need_body: Bool,
-) -> Result<Int, ()> {
+) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
   let _ = self.expect(Kind.Fn)?
   let first = self.expect_ident("a function name")?
   let first_generics = self.parse_generic_params_opt()?
@@ -756,9 +857,12 @@ fn Parser.parse_fn(
   return Ok(self.push_item(ItemKind.Fn(decl), name, lo, is_pub))
 }
 
-fn Parser.parse_clause_exprs(&mut self) -> Result<List<Int>, ()> {
+fn Parser.parse_clause_exprs(&mut self) -> Result<List<Int>, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   var es: List<Int> = []
-  for {
+  for invariant self.pos >= pos0 {
     es.push(self.expr_no_struct()?)
     if !self.eat(Kind.Comma) {
       break
@@ -767,12 +871,17 @@ fn Parser.parse_clause_exprs(&mut self) -> Result<List<Int>, ()> {
   return Ok(es)
 }
 
-fn Parser.parse_clauses(&mut self, ret_preds: List<Int>) -> Result<Clauses, ()> {
+fn Parser.parse_clauses(&mut self, ret_preds: List<Int>) -> Result<Clauses, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   var req: List<Int> = []
   var ens = ret_preds
   var effect_names: Option<List<Name>> = None
   var effects_span = Span { lo: 0, hi: 0 }
-  for self.skip_semis_before_any([Kind.Requires, Kind.Ensures, Kind.Effects]) {
+  for self.skip_semis_before_any([Kind.Requires, Kind.Ensures, Kind.Effects])
+    invariant self.pos >= pos0
+  {
     let t = self.bump()
     if t.kind == Kind.Effects {
       let set = self.parse_effect_set(t.lo)?
@@ -782,7 +891,7 @@ fn Parser.parse_clauses(&mut self, ret_preds: List<Int>) -> Result<Clauses, ()> 
       effect_names = Some(set.names)
       effects_span = set.span
     } else {
-      for {
+      for invariant self.pos >= pos0 {
         let e = self.expr_no_struct()?
         if t.kind == Kind.Requires {
           req.push(e)
@@ -799,10 +908,13 @@ fn Parser.parse_clauses(&mut self, ret_preds: List<Int>) -> Result<Clauses, ()> 
 }
 
 /// After the `effects` keyword: `{io, fs}`.
-fn Parser.parse_effect_set(&mut self, lo: Int) -> Result<EffectSet, ()> {
+fn Parser.parse_effect_set(&mut self, lo: Int) -> Result<EffectSet, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   let _ = self.expect(Kind.LBrace)?
   var names: List<Name> = []
-  for {
+  for invariant self.pos >= pos0 {
     self.skip_semis()
     if self.eat(Kind.RBrace) {
       break
@@ -824,15 +936,15 @@ fn Parser.parse_effect_set(&mut self, lo: Int) -> Result<EffectSet, ()> {
 
 /// `(self, a: T, b: &mut U where pred)`. Closure parameters (`allow_self` false) may omit
 /// their types.
-fn Parser.parse_params(
-  &mut self,
-  allow_self: Bool,
-) -> Result<(Option<SelfParam>, List<Param>), ()> {
+fn Parser.parse_params(&mut self, allow_self: Bool) -> Result<(Option<SelfParam>, List<Param>), ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   let _ = self.expect(Kind.LParen)?
   var self_param: Option<SelfParam> = None
   var params: List<Param> = []
   var first = true
-  for {
+  for invariant self.pos >= pos0 {
     if self.eat(Kind.RParen) {
       break
     }
@@ -884,21 +996,24 @@ fn Parser.parse_params(
   return Ok((self_param, params))
 }
 
-fn Parser.parse_struct(&mut self, lo: Int, is_pub: Bool) -> Result<Int, ()> {
+fn Parser.parse_struct(&mut self, lo: Int, is_pub: Bool) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   self.advance()
   let name = self.expect_ident("a struct name")?
   let generics = self.parse_generic_params_opt()?
   let _ = self.expect(Kind.LBrace)?
   var fields: List<FieldDecl> = []
   var invs: List<Int> = []
-  for {
+  for invariant self.pos >= pos0 {
     self.skip_semis()
     if self.eat(Kind.RBrace) {
       break
     }
     if self.at(Kind.Invariant) {
       self.advance()
-      for {
+      for invariant self.pos >= pos0 {
         invs.push(self.expr_no_struct()?)
         if !self.eat(Kind.Comma) {
           break
@@ -921,7 +1036,9 @@ fn Parser.parse_struct(&mut self, lo: Int, is_pub: Bool) -> Result<Int, ()> {
   return Ok(id)
 }
 
-fn Parser.parse_field_decl(&mut self, allow_pub: Bool) -> Result<FieldDecl, ()> {
+fn Parser.parse_field_decl(&mut self, allow_pub: Bool) -> Result<FieldDecl, ()>
+  ensures self.pos >= old(self.pos)
+{
   let lo = self.tok().lo
   let is_pub = allow_pub && self.eat(Kind.Pub)
   let name = self.expect_ident("a field name")?
@@ -936,13 +1053,16 @@ fn Parser.parse_field_decl(&mut self, allow_pub: Bool) -> Result<FieldDecl, ()> 
   )
 }
 
-fn Parser.parse_enum(&mut self, lo: Int, is_pub: Bool) -> Result<Int, ()> {
+fn Parser.parse_enum(&mut self, lo: Int, is_pub: Bool) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   self.advance()
   let name = self.expect_ident("an enum name")?
   let generics = self.parse_generic_params_opt()?
   let _ = self.expect(Kind.LBrace)?
   var variants: List<VariantDecl> = []
-  for {
+  for invariant self.pos >= pos0 {
     self.skip_semis()
     if self.eat(Kind.RBrace) {
       break
@@ -953,7 +1073,7 @@ fn Parser.parse_enum(&mut self, lo: Int, is_pub: Bool) -> Result<Int, ()> {
     var has_parens = false
     if self.eat(Kind.LParen) {
       has_parens = true
-      for {
+      for invariant self.pos >= pos0 {
         if self.eat(Kind.RParen) {
           break
         }
@@ -1000,13 +1120,16 @@ fn Parser.parse_enum(&mut self, lo: Int, is_pub: Bool) -> Result<Int, ()> {
   return Ok(id)
 }
 
-fn Parser.parse_interface(&mut self, lo: Int, is_pub: Bool) -> Result<Int, ()> {
+fn Parser.parse_interface(&mut self, lo: Int, is_pub: Bool) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   self.advance()
   let name = self.expect_ident("an interface name")?
   let generics = self.parse_generic_params_opt()?
   let _ = self.expect(Kind.LBrace)?
   var methods: List<Int> = []
-  for {
+  for invariant self.pos >= pos0 {
     self.skip_semis()
     if self.eat(Kind.RBrace) {
       break
@@ -1021,14 +1144,17 @@ fn Parser.parse_interface(&mut self, lo: Int, is_pub: Bool) -> Result<Int, ()> {
 
 // ---------- types ----------
 
-fn Parser.parse_type(&mut self) -> Result<Int, ()> {
+fn Parser.parse_type(&mut self) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   let lo = self.tok().lo
   match self.peek() {
     LParen => {
       self.advance()
       var elems: List<Int> = []
       var trailing_comma = false
-      for {
+      for invariant self.pos >= pos0 {
         if self.eat(Kind.RParen) {
           break
         }
@@ -1051,7 +1177,7 @@ fn Parser.parse_type(&mut self) -> Result<Int, ()> {
       self.advance()
       let _ = self.expect(Kind.LParen)?
       var params: List<Int> = []
-      for {
+      for invariant self.pos >= pos0 {
         if self.eat(Kind.RParen) {
           break
         }
@@ -1117,9 +1243,12 @@ fn Parser.parse_type(&mut self) -> Result<Int, ()> {
   }
 }
 
-fn Parser.parse_type_args_after_lt(&mut self) -> Result<List<Int>, ()> {
+fn Parser.parse_type_args_after_lt(&mut self) -> Result<List<Int>, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   var args: List<Int> = []
-  for {
+  for invariant self.pos >= pos0 {
     if self.close_angle() {
       break
     }
@@ -1137,11 +1266,14 @@ fn Parser.parse_type_args_after_lt(&mut self) -> Result<List<Int>, ()> {
 }
 
 /// After `Float<`: `m`, `m/s^2`, `kg*m`, `1/s`, then `>`.
-fn Parser.parse_unit_expr(&mut self) -> Result<List<UnitFactor>, ()> {
+fn Parser.parse_unit_expr(&mut self) -> Result<List<UnitFactor>, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   var factors: List<UnitFactor> = []
   var sign = 1
   var first = true
-  for invariant sign == 1 || sign == -1 {
+  for invariant sign == 1 || sign == -1, self.pos >= pos0 {
     if self.close_angle() {
       break
     }
@@ -1176,13 +1308,16 @@ fn Parser.parse_unit_expr(&mut self) -> Result<List<UnitFactor>, ()> {
 
 // ---------- statements ----------
 
-fn Parser.parse_block(&mut self) -> Result<Int, ()> {
+fn Parser.parse_block(&mut self) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   let lo = self.tok().lo
   let _ = self.expect(Kind.LBrace)?
   let saved = self.no_struct
   self.no_struct = false
   var stmts: List<Int> = []
-  for {
+  for invariant self.pos >= pos0 {
     self.skip_semis()
     if self.at(Kind.RBrace) || self.at(Kind.Eof) {
       break
@@ -1226,7 +1361,9 @@ fn Parser.assign_op(self) -> Option<Option<BinOp>> {
   }
 }
 
-fn Parser.parse_stmt(&mut self) -> Result<Int, ()> {
+fn Parser.parse_stmt(&mut self) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
   let lo = self.tok().lo
   match self.peek() {
     Let | Var => {
@@ -1279,7 +1416,9 @@ fn Parser.parse_stmt(&mut self) -> Result<Int, ()> {
   }
 }
 
-fn Parser.parse_arm(&mut self) -> Result<Arm, ()> {
+fn Parser.parse_arm(&mut self) -> Result<Arm, ()>
+  ensures self.pos >= old(self.pos)
+{
   let lo = self.tok().lo
   let pat = self.parse_pat()?
   var guard: Option<Int> = None
@@ -1293,7 +1432,9 @@ fn Parser.parse_arm(&mut self) -> Result<Arm, ()> {
 
 /// A match arm body: an expression, or an assignment (`Open => open += 1`), which is
 /// shorthand for a block holding it.
-fn Parser.parse_arm_body(&mut self) -> Result<Int, ()> {
+fn Parser.parse_arm_body(&mut self) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
   let lo = self.tok().lo
   let e = self.parse_expr()?
   match self.assign_op() {
@@ -1309,7 +1450,12 @@ fn Parser.parse_arm_body(&mut self) -> Result<Int, ()> {
   }
 }
 
-fn Parser.is_for_in(self) -> Bool {
+/// Does a `for` head start with a pattern and `in`?
+fn Parser.is_for_in(self) -> Bool
+  ensures !result ||
+    self.toks[self.pos].kind == Kind.Ident ||
+    self.toks[self.pos].kind == Kind.LParen
+{
   let k = self.peek()
   if k == Kind.Ident {
     return self.peek_at(1) == Kind.In
@@ -1319,7 +1465,9 @@ fn Parser.is_for_in(self) -> Bool {
   }
   var depth = 0
   var i = self.pos
-  for i < self.toks.len() {
+  for i < self.toks.len()
+    invariant i >= self.pos && depth <= i - self.pos && depth >= self.pos - i
+  {
     let ki = self.toks[i].kind
     if ki == Kind.LParen {
       depth += 1
@@ -1339,7 +1487,9 @@ fn Parser.is_for_in(self) -> Bool {
   return false
 }
 
-fn Parser.parse_for(&mut self) -> Result<Int, ()> {
+fn Parser.parse_for(&mut self) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
   let lo = self.tok().lo
   self.advance()
   var head = ForHead.Forever
@@ -1367,7 +1517,9 @@ fn Parser.parse_for(&mut self) -> Result<Int, ()> {
 }
 
 /// `a..b`, `..b`, `a..` (before `]`), or a plain expression.
-fn Parser.parse_range_or_expr(&mut self) -> Result<Int, ()> {
+fn Parser.parse_range_or_expr(&mut self) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
   let lo = self.tok().lo
   if self.eat(Kind.DotDot) {
     let hi = self.parse_expr()?
@@ -1387,20 +1539,26 @@ fn Parser.parse_range_or_expr(&mut self) -> Result<Int, ()> {
 
 // ---------- patterns ----------
 
-fn Parser.parse_pat(&mut self) -> Result<Int, ()> {
+fn Parser.parse_pat(&mut self) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   let lo = self.tok().lo
   let first = self.parse_pat_primary()?
   if !self.at(Kind.Pipe) {
     return Ok(first)
   }
   var alts = [first]
-  for self.eat(Kind.Pipe) {
+  for self.eat(Kind.Pipe) invariant self.pos >= pos0 {
     alts.push(self.parse_pat_primary()?)
   }
   return Ok(self.mk_pat(PatKind.Or(alts), self.span_from(lo)))
 }
 
-fn Parser.parse_pat_primary(&mut self) -> Result<Int, ()> {
+fn Parser.parse_pat_primary(&mut self) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   let lo = self.tok().lo
   match self.peek() {
     Ident => {
@@ -1442,7 +1600,7 @@ fn Parser.parse_pat_primary(&mut self) -> Result<Int, ()> {
       self.advance()
       var elems: List<Int> = []
       var trailing = false
-      for {
+      for invariant self.pos >= pos0 {
         if self.eat(Kind.RParen) {
           break
         }
@@ -1467,12 +1625,15 @@ fn Parser.parse_pat_primary(&mut self) -> Result<Int, ()> {
   }
 }
 
-fn Parser.finish_variant_pat(&mut self, lo: Int, name: Name) -> Result<Int, ()> {
+fn Parser.finish_variant_pat(&mut self, lo: Int, name: Name) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   var args: List<Int> = []
   var has_parens = false
   if self.eat(Kind.LParen) {
     has_parens = true
-    for {
+    for invariant self.pos >= pos0 {
       if self.eat(Kind.RParen) {
         break
       }
@@ -1489,7 +1650,9 @@ fn Parser.finish_variant_pat(&mut self, lo: Int, name: Name) -> Result<Int, ()> 
 
 // ---------- expressions ----------
 
-fn Parser.parse_expr(&mut self) -> Result<Int, ()> {
+fn Parser.parse_expr(&mut self) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
   return self.parse_binary(1)
 }
 
@@ -1517,10 +1680,13 @@ fn Parser.cur_binop(self) -> Option<BinOp> {
   }
 }
 
-fn Parser.parse_binary(&mut self, min_prec: Int) -> Result<Int, ()> {
+fn Parser.parse_binary(&mut self, min_prec: Int) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   let lo = self.tok().lo
   var lhs = self.parse_cast()?
-  for {
+  for invariant self.pos >= pos0 {
     let op = match self.cur_binop() {
       Some(o) => o
       None => {
@@ -1533,7 +1699,7 @@ fn Parser.parse_binary(&mut self, min_prec: Int) -> Result<Int, ()> {
     }
     self.advance()
     // An operand is expected: a line break here does not end the statement.
-    for self.at(Kind.Semi) && self.tok().lo == self.tok().hi {
+    for self.at(Kind.Semi) && self.tok().lo == self.tok().hi invariant self.pos >= pos0 {
       self.advance()
     }
     let rhs = self.parse_binary(prec + 1)?
@@ -1542,10 +1708,13 @@ fn Parser.parse_binary(&mut self, min_prec: Int) -> Result<Int, ()> {
   return Ok(lhs)
 }
 
-fn Parser.parse_cast(&mut self) -> Result<Int, ()> {
+fn Parser.parse_cast(&mut self) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   let lo = self.tok().lo
   var e = self.parse_unary()?
-  for self.at(Kind.As) {
+  for self.at(Kind.As) invariant self.pos >= pos0 {
     self.advance()
     let ty = self.parse_type()?
     e = self.mk_expr(ExprKind.Cast(e, ty), self.span_from(lo))
@@ -1553,7 +1722,9 @@ fn Parser.parse_cast(&mut self) -> Result<Int, ()> {
   return Ok(e)
 }
 
-fn Parser.parse_unary(&mut self) -> Result<Int, ()> {
+fn Parser.parse_unary(&mut self) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
   let lo = self.tok().lo
   let op = match self.peek() {
     Minus => Some(UnOp.Neg)
@@ -1600,7 +1771,9 @@ fn Parser.expr_as_type_path(self, e: Int) -> Bool {
 }
 
 /// The type a path expression names; `expr_as_type_path(e)` holds.
-fn Parser.expr_to_type(&mut self, e: Int) -> Int {
+fn Parser.expr_to_type(&mut self, e: Int) -> Int
+  ensures self.pos >= old(self.pos)
+{
   let x = self.ast.exprs[e]
   match x.kind {
     Name(s) => {
@@ -1629,11 +1802,21 @@ fn Parser.expr_to_type(&mut self, e: Int) -> Int {
 
 /// C#-style disambiguation: `<` starts type arguments if a balanced `<...>` made only of
 /// type tokens is followed by one of `( . { ) , ] }`, a line end or the end of the file.
-fn Parser.looks_like_type_args(self) -> Bool {
+fn Parser.looks_like_type_args(self) -> Bool
+  requires self.toks[self.pos].kind == Kind.Lt
+{
   var i = self.pos
   var depth = 0
   var parens = 0
-  for i < self.toks.len() {
+  // Each token changes the depth by at most two and the parentheses by one.
+  for i < self.toks.len()
+    invariant i >= self.pos &&
+      i <= self.toks.len() &&
+      depth <= 2 * (i - self.pos) &&
+      depth >= 2 * (self.pos - i) &&
+      parens <= i - self.pos &&
+      parens >= self.pos - i
+  {
     let k = self.toks[i].kind
     if k == Kind.Lt {
       depth += 1
@@ -1679,9 +1862,12 @@ fn in_type_args(k: Kind) -> Bool {
   }
 }
 
-fn Parser.parse_postfix(&mut self, start: Int, lo: Int) -> Result<Int, ()> {
+fn Parser.parse_postfix(&mut self, start: Int, lo: Int) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   var e = start
-  for {
+  for invariant self.pos >= pos0 {
     let k = self.peek()
     if k == Kind.LParen {
       let args = self.parse_call_args()?
@@ -1726,7 +1912,9 @@ fn Parser.parse_postfix(&mut self, start: Int, lo: Int) -> Result<Int, ()> {
   }
 }
 
-fn Parser.parse_struct_lit_fields(&mut self) -> Result<List<FieldInit>, ()> {
+fn Parser.parse_struct_lit_fields(&mut self) -> Result<List<FieldInit>, ()>
+  ensures self.pos >= old(self.pos)
+{
   let _ = self.expect(Kind.LBrace)?
   let saved = self.no_struct
   self.no_struct = false
@@ -1735,9 +1923,12 @@ fn Parser.parse_struct_lit_fields(&mut self) -> Result<List<FieldInit>, ()> {
   return r
 }
 
-fn Parser.struct_lit_fields(&mut self) -> Result<List<FieldInit>, ()> {
+fn Parser.struct_lit_fields(&mut self) -> Result<List<FieldInit>, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   var fields: List<FieldInit> = []
-  for {
+  for invariant self.pos >= pos0 {
     self.skip_semis()
     if self.eat(Kind.RBrace) {
       break
@@ -1763,7 +1954,9 @@ fn Parser.struct_lit_fields(&mut self) -> Result<List<FieldInit>, ()> {
   return Ok(fields)
 }
 
-fn Parser.parse_call_args(&mut self) -> Result<List<Int>, ()> {
+fn Parser.parse_call_args(&mut self) -> Result<List<Int>, ()>
+  ensures self.pos >= old(self.pos)
+{
   let _ = self.expect(Kind.LParen)?
   let saved = self.no_struct
   self.no_struct = false
@@ -1772,9 +1965,12 @@ fn Parser.parse_call_args(&mut self) -> Result<List<Int>, ()> {
   return r
 }
 
-fn Parser.call_args(&mut self) -> Result<List<Int>, ()> {
+fn Parser.call_args(&mut self) -> Result<List<Int>, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   var args: List<Int> = []
-  for {
+  for invariant self.pos >= pos0 {
     if self.eat(Kind.RParen) {
       break
     }
@@ -1800,10 +1996,13 @@ fn Parser.call_args(&mut self) -> Result<List<Int>, ()> {
 }
 
 /// `(a)`, `(a, b)` or `()`, after the `(`.
-fn Parser.paren_or_tuple(&mut self, lo: Int) -> Result<Int, ()> {
+fn Parser.paren_or_tuple(&mut self, lo: Int) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   var elems: List<Int> = []
   var trailing = false
-  for {
+  for invariant self.pos >= pos0 {
     if self.eat(Kind.RParen) {
       break
     }
@@ -1823,9 +2022,12 @@ fn Parser.paren_or_tuple(&mut self, lo: Int) -> Result<Int, ()> {
 }
 
 /// `[a, b]`, after the `[`.
-fn Parser.list_lit(&mut self, lo: Int) -> Result<Int, ()> {
+fn Parser.list_lit(&mut self, lo: Int) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   var elems: List<Int> = []
-  for {
+  for invariant self.pos >= pos0 {
     if self.eat(Kind.RBracket) {
       break
     }
@@ -1839,7 +2041,9 @@ fn Parser.list_lit(&mut self, lo: Int) -> Result<Int, ()> {
   return Ok(self.mk_expr(ExprKind.List(elems), self.span_from(lo)))
 }
 
-fn Parser.parse_primary(&mut self) -> Result<Int, ()> {
+fn Parser.parse_primary(&mut self) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
   let t = self.tok()
   let lo = t.lo
   match t.kind {
@@ -1945,7 +2149,9 @@ fn Parser.parse_primary(&mut self) -> Result<Int, ()> {
   }
 }
 
-fn Parser.parse_quant(&mut self) -> Result<Int, ()> {
+fn Parser.parse_quant(&mut self) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
   let lo = self.tok().lo
   let kw = self.bump()
   let is_forall = self.text(kw) == "forall"
@@ -1961,7 +2167,9 @@ fn Parser.parse_quant(&mut self) -> Result<Int, ()> {
   )
 }
 
-fn Parser.parse_if(&mut self) -> Result<Int, ()> {
+fn Parser.parse_if(&mut self) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
   let lo = self.tok().lo
   let _ = self.expect(Kind.If)?
   let cond = self.expr_no_struct()?
@@ -1978,7 +2186,9 @@ fn Parser.parse_if(&mut self) -> Result<Int, ()> {
   return Ok(self.mk_expr(ExprKind.If(cond, then, els), self.span_from(lo)))
 }
 
-fn Parser.parse_match(&mut self) -> Result<Int, ()> {
+fn Parser.parse_match(&mut self) -> Result<Int, ()>
+  ensures self.pos >= old(self.pos)
+{
   let lo = self.tok().lo
   let _ = self.expect(Kind.Match)?
   let scrut = self.expr_no_struct()?
@@ -1991,9 +2201,12 @@ fn Parser.parse_match(&mut self) -> Result<Int, ()> {
   return Ok(self.mk_expr(ExprKind.Match(scrut, arms), self.span_from(lo)))
 }
 
-fn Parser.match_arms(&mut self) -> Result<List<Arm>, ()> {
+fn Parser.match_arms(&mut self) -> Result<List<Arm>, ()>
+  ensures self.pos >= old(self.pos)
+{
+  let pos0 = self.pos
   var arms: List<Arm> = []
-  for {
+  for invariant self.pos >= pos0 {
     self.skip_semis()
     if self.eat(Kind.RBrace) {
       break

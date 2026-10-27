@@ -51,7 +51,7 @@ The PRD's proposed targets, measured on `main` (4-core Xeon, clang 18):
 | Self-hosted vs bootstrap compiler, same corpus | equal or faster | 0.94 by instructions (CI gate 1.05); 1.36 by wall time | instructions only |
 | Agent tasks reaching a verified build, vs Rust | equal or better | harness and tasks ready (`bench/agents`); no agent runs yet | not measured |
 | Agent iterations per task, vs Rust and TypeScript | equal or fewer | as above | not measured |
-| Std and compiler functions with proven contracts | over 80% | std 91%; jigc 3% (31 of 1,069 functions state contracts, and all 31 prove completely, every function of the lexer among them) | std only |
+| Std and compiler functions with proven contracts | over 80% | std 91%; jigc 10% (112 of 1,069 functions state contracts and 110 of them prove completely: the lexer, the parser but six functions, tokens and operators) | std only |
 | Language reference size | fits in 10k tokens | about 6,000 | met |
 
 **Self-hosted speed.** By pass (`bench/selfhost.py --instructions --prove`, with jigc built
@@ -81,8 +81,15 @@ forward, tokens lie inside it and end with `Eof`, global offsets cannot overflow
 decoding stays in range). That took one prover change, in both compilers: a call to a pure
 function that reads only scalars is a function of what it reads (read off its body like a
 frame), so `self.at(i)` gives the same character twice even after other fields of the lexer
-changed. Most of jigc's 1,069 functions state no contract yet, and those in the checker and
-back end index the program's arenas, where proofs need invariants on the indices.
+changed. The parser states that its cursor is always on a token and the last token is the
+end of the file, that no parsing function moves the cursor back, and that the node
+constructors return the new node's index; all of it proves, and with it every bounds and
+overflow check in the parser but those that index the tree by a node id. Those, and the
+checker and back end, which index the program's arenas everywhere, need facts about every
+node (quantified invariants). The prover handles those, but the bootstrap C is built
+without proofs, where a quantified invariant is checked at each change: on a list that
+grows token by token or node by node, that makes compiling quadratic. Most of jigc's 1,069
+functions state no contract yet.
 
 ## The alpha
 
@@ -99,9 +106,8 @@ Release notes are in [`CHANGELOG.md`](../../CHANGELOG.md).
 
 ## Open
 
-- `jigc`: a full command line (human
-  diagnostics, `run` with real effects, `build`, `get`, `trace`, `mcp`); its checker, back end,
-  formatter, test runner and prover are done. Until `jigc` passes every test suite the Rust
+- `jigc`: a full command line (human diagnostics, `run` with real effects, `get`, `trace`,
+  `mcp`); its checker, back end, formatter, test runner, prover and builds are done. Until `jigc` passes every test suite the Rust
   compiler stays the `jig` command (D6).
 - Self-hosted speed: identifiers interned instead of sliced, and wall time (memory).
 - Contracts on the compiler's passes.
