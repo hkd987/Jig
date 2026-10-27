@@ -77,6 +77,8 @@ enum Json {
   Null
   Bool(b: Bool)
   Num(n: Int)
+  /// A number that is not a small integer (only `parse_json_result` makes these).
+  Real(f: Float)
   Str(s: Str)
   Arr(xs: List<Json>)
   Obj(kv: List<(Str, Json)>)

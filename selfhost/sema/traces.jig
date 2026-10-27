@@ -1,0 +1,161 @@
+// Opt-in trace collection, ported from the bootstrap compiler's `tools/traces.rs`. With the
+// user's consent (`jigc traces on`), the edit hook records every edit of a `.jig` file (its new
+// text and the errors the check then reported), and the commit hook records the project's
+// files whenever a commit passes its checks and tests. Nothing leaves the machine: traces stay
+// in `~/.jig/traces` (or `$JIG_HOME/traces`) until the user exports them. Projects are named by
+// a hash of their path, not the path.
+
+import "std/fs"
+import "std/os"
+import "std/time"
+
+const CONSENT: Str = "CONSENT"
+
+/// Where traces are kept.
+fn traces_dir() -> Str effects {env} {
+  return match os.env("JIG_HOME") {
+    Some(h) => path_join(h, "traces")
+    None => path_join(os.env("HOME").unwrap_or("."), ".jig/traces")
+  }
+}
+
+fn traces_enabled(dir: Str) -> Bool effects {fs} {
+  return fs.exists(join_path(dir, CONSENT))
+}
+
+/// A stable name for a project that does not reveal its path (FNV-1a).
+fn project_id(root: Str) -> Str {
+  var h: U64 = 14695981039346656037
+  for b in root.bytes() {
+    h = h ^ (b as U64)
+    h = h.wrapping_mul(1099511628211)
+  }
+  return hex64(h)
+}
+
+/// Add an event (a JSON object's fields) to the project's trace file.
+fn append_trace(dir: Str, root: Str, fields: List<(Str, Json)>) effects {fs, ffi, clock} {
+  let id = project_id(root)
+  var all = fields
+  all.push(("project", Json.Str(id)))
+  all.push(("time", Json.Num(time.now_ms())))
+  let _ = create_dir_all(dir)
+  let file = join_path(dir, id + ".jsonl")
+  let before = fs.read(file).unwrap_or("")
+  let _ = fs.write(file, before + json_text(Json.Obj(all)) + "\n")
+}
+
+/// `file` relative to `root`.
+fn rel_path(root: Str, file: Str) -> Str {
+  let prefix = if root.ends_with("/") { root } else { root + "/" }
+  return if file.starts_with(prefix) { file[prefix.len()..file.len()] } else { file }
+}
+
+/// An edit: the file's text after it and the errors the check reported (code and message).
+fn record_edit(dir: Str, root: Str, file: Str, errors: List<(Str, Str)>) effects {fs, ffi, clock} {
+  if !traces_enabled(dir) {
+    return
+  }
+  var errs: List<Json> = []
+  for (c, m) in errors {
+    errs.push(Json.Obj([("code", Json.Str(c)), ("message", Json.Str(m))]))
+  }
+  append_trace(
+    dir,
+    root,
+    [
+      ("kind", Json.Str("edit")),
+      ("file", Json.Str(rel_path(root, file))),
+      ("text", Json.Str(fs.read(file).unwrap_or(""))),
+      ("errors", Json.Arr(errs)),
+    ],
+  )
+}
+
+/// A verified state: every `.jig` and `.feature` file of a project that checks and tests
+/// cleanly.
+fn record_verified(dir: Str, root: Str, files: List<Str>) effects {fs, ffi, clock} {
+  if !traces_enabled(dir) {
+    return
+  }
+  var fs_json: List<Json> = []
+  for f in files {
+    match fs.read(f) {
+      Ok(text) => fs_json.push(
+        Json.Obj([("path", Json.Str(rel_path(root, f))), ("text", Json.Str(text))]),
+      )
+      Err(_) => {}
+    }
+  }
+  append_trace(dir, root, [("kind", Json.Str("verified")), ("files", Json.Arr(fs_json))])
+}
+
+/// The trace files of a directory, in name order.
+fn trace_files(dir: Str) -> Result<List<Str>, Str> effects {fs} {
+  var out: List<Str> = []
+  for n in fs.list(dir)? {
+    if n.ends_with(".jsonl") && n.len() > 6 && !is_dir(join_path(dir, n)) {
+      out.push(n)
+    }
+  }
+  return Ok(out)
+}
+
+/// `jigc traces on|off|status|export FILE`, as `jig traces`.
+fn traces_cmd(args: List<Str>) -> Output effects {fs, env, ffi} {
+  let d = traces_dir()
+  if args.len() == 1 && args[0] == "on" {
+    let _ = create_dir_all(d)
+    let note = "Jig records your edits and verified programs in this directory, for a corpus to\n" +
+      "train models on Jig. Nothing is sent anywhere; share an export only if you choose\n" +
+      "to. Remove this file (`jig traces off`) to stop.\n"
+    let consent = join_path(d, CONSENT)
+    return match fs.write(consent, note) {
+      Ok(_) => output("trace collection is on; traces are kept in " + d + "\n", "", 0)
+      Err(e) => output("", "error: cannot write " + consent + ": " + error_reason(e) + "\n", 1)
+    }
+  }
+  if args.len() == 1 && args[0] == "off" {
+    let _ = system("rm -f " + shell_quote(join_path(d, CONSENT)))
+    return output("trace collection is off (recorded traces stay in " + d + ")\n", "", 0)
+  }
+  if args.is_empty() || (args.len() == 1 && args[0] == "status") {
+    let n = match trace_files(d) {
+      Ok(fs) => fs.len()
+      Err(_) => 0
+    }
+    return output(
+      "trace collection is " +
+        (if traces_enabled(d) { "on" } else { "off" }) +
+        "; " +
+        n.str() +
+        " project(s) recorded in " +
+        d +
+        "\n",
+      "",
+      0,
+    )
+  }
+  if args.len() == 2 && args[0] == "export" {
+    let files = match trace_files(d) {
+      Ok(fs) => fs
+      Err(e) => {
+        return output("", "error: no traces in " + d + ": " + error_reason(e) + "\n", 1)
+      }
+    }
+    var all = ""
+    for f in files {
+      match fs.read(join_path(d, f)) {
+        Ok(t) => all += t
+        Err(e) => {
+          return output("", "error: " + error_reason(e) + "\n", 1)
+        }
+      }
+    }
+    return match fs.write(args[1], all) {
+      Ok(_) => output("wrote " + all.lines().len().str() + " events to " + args[1] + "\n", "", 0)
+      Err(e) => output("", "error: cannot write " + args[1] + ": " + error_reason(e) + "\n", 1)
+    }
+  }
+  return output("", "usage: jig traces on|off|status|export FILE\n", 2)
+}

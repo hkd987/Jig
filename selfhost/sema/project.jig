@@ -187,10 +187,16 @@ fn absolute_path(start: Str, cwd: Str) -> Str {
   return "/" + parts.join("/")
 }
 
+/// `p` as an absolute path if it exists, else as given (as the bootstrap compiler canonicalizes
+/// paths that exist).
+fn existing_absolute(p: Str, cwd: Str) -> Str effects {fs} {
+  return if fs.exists(p) { absolute_path(p, cwd) } else { p }
+}
+
 /// Check the project containing `start` (or just the package at `start` if there is no
 /// `jig.mod`), as `jig check` does.
 fn check_project(start: Str, std_dir: Str, cwd: Str) -> List<ProjectDiag> effects {fs, env} {
-  let abs = absolute_path(start, cwd)
+  let abs = existing_absolute(start, cwd)
   let start_dir = if !is_dir(abs) && fs.exists(abs) { parent_dir(abs).unwrap_or(abs) } else { abs }
   let root = match find_project_root(start_dir) {
     Some(r) => r

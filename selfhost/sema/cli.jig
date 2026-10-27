@@ -249,9 +249,12 @@ fn usage() -> Str {
     "  trace [fn <name> | scenario <name> | uncovered] [--json]  which scenarios exercise which code",
     "  fmt [--check]           format .jig files in place",
     "  get                     download the modules jig.mod requires, recording their commits in jig.sum",
+    "  traces on|off|status|export FILE  opt-in collection of edits and verified programs (local only)",
     "  explain <code>          explain a diagnostic code",
     "  search <signature>      find functions by type, e.g. 'List<T> -> Option<T>'",
     "  reference               print the language reference",
+    "  mcp                     serve the agent tools over MCP (stdio)",
+    "  hook <name>             Claude Code hook entry points (post-edit, pre-commit)",
     "  cc DIR [STD]            DIR's release build as one C file, the runtime included",
     "  debug tokens|ast|fmt FILE, debug check|c|vc|sim DIR",
     "                          the dumps compared with the bootstrap compiler's `jig debug`",
@@ -369,6 +372,15 @@ pub fn run_cli(args: List<Str>, cwd: Str, std_dir: Str) -> Output
     var flags = o.rest
     flags.extend(out)
     return build_cmd(absolute_path(o.path, cwd), std_dir, cwd, flags)
+  }
+  if cmd == "traces" {
+    return traces_cmd(rest)
+  }
+  if cmd == "hook" {
+    return hook_cmd(rest, std_dir, cwd)
+  }
+  if cmd == "mcp" {
+    return mcp_serve(std_dir, cwd)
   }
   if cmd == "get" {
     return get_cmd(parse_opts(rest), cwd)

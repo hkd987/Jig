@@ -1882,3 +1882,168 @@ fn jigc_get_matches_bootstrap() {
     }
     assert!(failures.is_empty(), "{} steps differ:\n{}", failures.len(), failures.join("\n"));
 }
+
+/// Run with `stdin` from `cwd` and these variables; exit code, standard output, standard error.
+fn run_piped(
+    bin: &Path,
+    args: &[&str],
+    cwd: &Path,
+    stdin: &str,
+    env: &[(&str, &Path)],
+) -> (Option<i32>, String, String) {
+    use std::io::Write;
+    let mut cmd = Command::new(bin);
+    cmd.args(args).current_dir(cwd).env("PWD", cwd);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+/// `jigc traces`, `jigc hook` and `jigc mcp` behave as `jig`'s: each runs on its own copy of a
+/// project and its own `$JIG_HOME`. Trace collection switched on, reported, exported and off;
+/// the edit hook on files with errors, relative paths and other files, and the commit hook on
+/// commands that are and are not commits, with check errors, a failing test, an unformatted file
+/// and a clean project; the trace files they record (times aside). And an MCP session: every
+/// method and tool (prove twice, to read its own cache), unknown ones, notifications, and lines
+/// that are not JSON-RPC or not JSON.
+#[test]
+fn jigc_agent_tools_match_bootstrap() {
+    if !have_cc() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    let root = repo_root();
+    let exe = jigc();
+    let work = std::fs::canonicalize(PathBuf::from(env!("CARGO_TARGET_TMPDIR"))).unwrap().join("selfhost-agent");
+    let _ = std::fs::remove_dir_all(&work);
+    let jig = PathBuf::from(env!("CARGO_BIN_EXE_jig"));
+    let mut failures: Vec<String> = Vec::new();
+    // Each side's results with its directory written as SIDE and proof times as T.
+    let norm = |s: &str, side: &Path| {
+        let mut out = s.replace(&side.display().to_string(), "SIDE");
+        while let Some(i) = out.find(" s\\n") {
+            let digits = out[..i].trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+            out = format!("{digits}T{}", out[i..].replacen(" s\\n", " S\\n", 1));
+        }
+        out
+    };
+    let sides = [(jig.as_path(), work.join("a")), (exe, work.join("b"))];
+    let mut results: Vec<Vec<String>> = vec![Vec::new(), Vec::new()];
+    for (k, (bin, side)) in sides.iter().enumerate() {
+        let p = side.join("proj");
+        write_file(&p.join("jig.mod"), "module proj\n");
+        write_file(
+            &p.join("main.jig"),
+            "import \"std/io\"\n\nfn main() effects {io} {\n  let x = 1\n  io.println(\"hi\")\n}\n",
+        );
+        write_file(
+            &p.join("lib/lib.jig"),
+            "pub fn f() -> Int {\n  return 1\n}\n\ntest \"f\" {\n  assert(f() == 2)\n}\n",
+        );
+        copy_dir(&root.join("examples/bank"), &side.join("bank"));
+        copy_dir(&root.join("examples/wordfreq"), &side.join("wordfreq"));
+        copy_dir(&root.join("compiler/tests/prove/basics"), &side.join("basics"));
+        let home = side.join("home");
+        let env = [("JIG_HOME", home.as_path())];
+        let step = |args: &[&str], stdin: &str| {
+            let (c, o, e) = run_piped(bin, args, side, stdin, &env);
+            norm(&format!("{args:?} -> {c:?}\n{o}\n{e}"), side)
+        };
+        for a in [&["traces"][..], &["traces", "on"], &["traces", "status"], &["traces", "bogus"]] {
+            results[k].push(step(a, ""));
+        }
+        let edit = |file: &str| format!("{{\"tool_input\":{{\"file_path\":\"{file}\"}},\"cwd\":\"{}\"}}", p.display());
+        let commit = |cmd: &str| format!("{{\"tool_input\":{{\"command\":\"{cmd}\"}},\"cwd\":\"{}\"}}", p.display());
+        results[k].push(step(&["hook", "post-edit"], &edit(&p.join("main.jig").display().to_string())));
+        results[k].push(step(&["hook", "post-edit"], &edit("lib/lib.jig")));
+        results[k].push(step(&["hook", "post-edit"], &edit("notes.txt")));
+        results[k].push(step(&["hook", "post-edit"], "not json"));
+        results[k].push(step(&["hook", "pre-commit"], &commit("git commit -m x")));
+        results[k].push(step(&["hook", "pre-commit"], &commit("git status && echo commit")));
+        results[k].push(step(&["hook", "bogus"], ""));
+        let main = p.join("main.jig");
+        std::fs::write(&main, std::fs::read_to_string(&main).unwrap().replace("let x", "let _x")).unwrap();
+        results[k].push(step(&["hook", "pre-commit"], &commit("cd a && git -C b commit -am x")));
+        let lib = p.join("lib/lib.jig");
+        std::fs::write(&lib, std::fs::read_to_string(&lib).unwrap().replace("== 2", "== 1")).unwrap();
+        std::fs::write(&main, std::fs::read_to_string(&main).unwrap().replace("  io.println", "      io.println"))
+            .unwrap();
+        results[k].push(step(&["hook", "pre-commit"], &commit("git add -A; git commit")));
+        std::fs::write(&main, std::fs::read_to_string(&main).unwrap().replace("      io.println", "  io.println"))
+            .unwrap();
+        results[k].push(step(&["hook", "pre-commit"], &commit("git commit")));
+        let mut traces: Vec<String> = Vec::new();
+        for e in std::fs::read_dir(home.join("traces")).unwrap() {
+            let path = e.unwrap().path();
+            if path.extension().is_some_and(|x| x == "jsonl") {
+                for line in std::fs::read_to_string(&path).unwrap().lines() {
+                    let t = line.find("\"time\":").map_or(line.to_string(), |i| line[..i].to_string());
+                    traces.push(t);
+                }
+            }
+        }
+        // Projects are named by the FNV-1a hash of their path.
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in p.display().to_string().bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+        results[k].push(norm(&traces.join("\n").replace(&format!("{h:016x}"), "ID"), side));
+        let export = side.join("export.jsonl");
+        results[k].push(step(&["traces", "export", &export.display().to_string()], ""));
+        results[k].push(step(&["traces", "off"], ""));
+        results[k].push(step(&["traces", "status"], ""));
+        let session = [
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+            r#"{"jsonrpc":"2.0","id":"p","method":"ping"}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"check","arguments":{"path":"bank"}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"check","arguments":{"path":"proj"}}}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"check","arguments":{"path":"nowhere"}}}"#,
+            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"test","arguments":{"path":"bank","filter":"pay"}}}"#,
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"test","arguments":{"path":"proj/lib"}}}"#,
+            r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"run","arguments":{"path":"wordfreq","stdin":"a b a\nc","args":["x"]}}}"#,
+            r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"trace","arguments":{"path":"bank","function":"pay"}}}"#,
+            r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"trace","arguments":{"path":"bank/main.jig","uncovered":true}}}"#,
+            r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"explain","arguments":{"code":"e301"}}}"#,
+            r#"{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"explain","arguments":{"code":"E9"}}}"#,
+            r#"{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"search","arguments":{"query":"Str -> Option<Int>","path":"bank"}}}"#,
+            r#"{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"search","arguments":{"query":"List<"}}}"#,
+            r#"{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"fmt","arguments":{"path":"proj"}}}"#,
+            r#"{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"prove","arguments":{"path":"basics","all":true}}}"#,
+            r#"{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"prove","arguments":{"path":"basics","filter":"clamp"}}}"#,
+            r#"{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"reference"}}"#,
+            r#"{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"nope"}}"#,
+            r#"{"jsonrpc":"2.0","id":20,"method":"nope/x"}"#,
+            r#"{"jsonrpc":"2.0","id":1.5,"method":"ping"}"#,
+            "",
+            "{bad json",
+            r#"["x", -2e3, "é😀\ud800", true, null]"#,
+            r#"{"a":1} x"#,
+            r#"{"s":"tab\tend"}"#,
+            r#"{"s":"\q"}"#,
+        ];
+        results[k].push(step(&["mcp"], &(session.join("\n") + "\n")));
+    }
+    for (i, (a, b)) in results[0].iter().zip(&results[1]).enumerate() {
+        if a != b {
+            failures.push(format!("step {i}:\n  bootstrap {a:?}\n  jigc      {b:?}"));
+        }
+    }
+    assert!(results[0].iter().any(|r| r.contains("\"kind\":\"verified\"")), "no verified state recorded");
+    assert!(failures.is_empty(), "{} steps differ:\n{}", failures.len(), failures.join("\n"));
+}

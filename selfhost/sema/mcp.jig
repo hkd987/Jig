@@ -1,0 +1,572 @@
+// `jigc mcp`, ported from the bootstrap compiler's `tools/mcp.rs`: a Model Context Protocol
+// server over standard input and output (newline-delimited JSON-RPC). Tools: check, test,
+// prove, trace, run, fmt, explain, search, reference. Paths are relative to the server's
+// working directory (the project).
+
+import "std/fs"
+import "std/io"
+import "std/time"
+import "syntax"
+
+const PROTOCOL: Str = "2025-11-25"
+
+fn jstr(s: Str) -> Json {
+  return Json.Str(s)
+}
+
+fn prop(ty: Str, desc: Str) -> Json {
+  return Json.Obj([("type", jstr(ty)), ("description", jstr(desc))])
+}
+
+fn mcp_tool(name: Str, description: Str, props: List<(Str, Json)>, required: List<Str>) -> Json {
+  var req: List<Json> = []
+  for r in required {
+    req.push(jstr(r))
+  }
+  return Json.Obj(
+    [
+      ("name", jstr(name)),
+      ("description", jstr(description)),
+      (
+        "inputSchema",
+        Json.Obj(
+          [("type", jstr("object")), ("properties", Json.Obj(props)), ("required", Json.Arr(req))],
+        ),
+      ),
+    ],
+  )
+}
+
+fn mcp_tools() -> Json {
+  let path_desc = "A file or package directory; the whole project containing it is checked. " +
+    "Defaults to the working directory."
+  return Json.Arr(
+    [
+      mcp_tool(
+        "check",
+        "Type-check a Jig project: parse, types, effects, lints and dead code (all errors). " +
+          "Returns every diagnostic with its stable code, location, message and candidate fixes. " +
+          "Run after every edit.",
+        [("path", prop("string", path_desc))],
+        [],
+      ),
+      mcp_tool(
+        "test",
+        "Run the `test` blocks of a Jig package in the deterministic runner (console, clock, " +
+          "randomness and files are faked). Returns each test's result, failure message and " +
+          "location.",
+        [
+          ("path", prop("string", "Package directory. Defaults to the working directory.")),
+          ("filter", prop("string", "Only run tests whose name contains this text.")),
+        ],
+        [],
+      ),
+      mcp_tool(
+        "run",
+        "Run a Jig program's `main` on the interpreter with faked effects and return its " +
+          "output. Use it to see what a program prints for a given input.",
+        [
+          ("path", prop("string", "Package directory with `fn main`.")),
+          ("stdin", prop("string", "Text for standard input.")),
+          (
+            "args",
+            Json.Obj(
+              [
+                ("type", jstr("array")),
+                ("items", Json.Obj([("type", jstr("string"))])),
+                ("description", jstr("Command-line arguments.")),
+              ],
+            ),
+          ),
+        ],
+        [],
+      ),
+      mcp_tool(
+        "prove",
+        "Prove a Jig project's contracts (requires, ensures, invariants, refinements, asserts) " +
+          "and the absence of runtime traps (overflow, division by zero, bounds, unwrap) with an " +
+          "SMT solver, one function at a time against its callees' contracts. Results are cached " +
+          "per function. Returns each failed or unknown obligation with a counterexample in " +
+          "source terms and a hint; proven ones are only counted.",
+        [
+          (
+            "path",
+            prop(
+              "string",
+              "A file or package directory; the whole project is proved. Defaults to the working " +
+                "directory.",
+            ),
+          ),
+          ("filter", prop("string", "Only functions whose name contains this text.")),
+          (
+            "all",
+            prop(
+              "boolean",
+              "Also list unproven safety obligations (traps that keep their runtime check).",
+            ),
+          ),
+        ],
+        [],
+      ),
+      mcp_tool(
+        "trace",
+        "Traceability between scenarios (.feature files) and code: with no arguments, " +
+          "coverage per scenario and how much reachable code no scenario exercises; `function` " +
+          "lists the scenarios exercising matching functions; `scenario` lists what a scenario " +
+          "exercises and what becomes dead if it is deleted; `uncovered` lists reachable " +
+          "functions no scenario exercises.",
+        [
+          ("path", prop("string", "Package directory. Defaults to the working directory.")),
+          ("function", prop("string", "Function name (or part of one) to look up.")),
+          ("scenario", prop("string", "Scenario name (or part of one) to look up.")),
+          ("uncovered", prop("boolean", "List the reachable functions no scenario exercises.")),
+        ],
+        [],
+      ),
+      mcp_tool(
+        "fmt",
+        "Format Jig files in place with the canonical formatter (no options). Returns the " +
+          "files that changed.",
+        [("path", prop("string", "File or directory. Defaults to the working directory."))],
+        [],
+      ),
+      mcp_tool(
+        "explain",
+        "Explain a Jig diagnostic code (for example E0301): what it means and how to fix it.",
+        [("code", prop("string", "The code, e.g. E0401."))],
+        ["code"],
+      ),
+      mcp_tool(
+        "search",
+        "Find functions and methods by type signature, e.g. `List<T> -> Map<K, List<T>>` or " +
+          "`Str -> Option<Int>`. Single capital letters are type variables; a method's receiver " +
+          "is its first parameter. Searches the standard library and the project.",
+        [
+          (
+            "query",
+            prop("string", "Parameter types separated by commas, then `->` and the result type."),
+          ),
+          ("path", prop("string", "Package directory whose code is also searched.")),
+        ],
+        ["query"],
+      ),
+      mcp_tool(
+        "reference",
+        "Return the complete Jig language reference (syntax, types, effects, contracts, tests, " +
+          "standard library).",
+        [],
+        [],
+      ),
+    ],
+  )
+}
+
+fn text_result(text: Str, structured: Option<Json>, is_error: Bool) -> Json {
+  var kv: List<(Str, Json)> = [
+    ("content", Json.Arr([Json.Obj([("type", jstr("text")), ("text", jstr(text))])])),
+    ("isError", Json.Bool(is_error)),
+  ]
+  match structured {
+    Some(s) => kv.push(("structuredContent", s))
+    None => {}
+  }
+  return Json.Obj(kv)
+}
+
+/// An argument's text, if it is a non-empty string.
+fn arg_text(args: Json, k: Str) -> Option<Str> {
+  let v = args.get(k)?.as_str()?
+  return if v.is_empty() { None } else { Some(v) }
+}
+
+fn arg_flag(args: Json, k: Str) -> Bool {
+  return match args.get(k) {
+    Some(v) => v.as_bool().unwrap_or(false)
+    None => false
+  }
+}
+
+/// The `path` argument (the working directory by default), absolute if it exists.
+fn arg_path(args: Json, cwd: Str) -> Str effects {fs} {
+  return existing_absolute(arg_text(args, "path").unwrap_or("."), cwd)
+}
+
+/// A file stands for its directory.
+fn pkg_dir(p: Str) -> Str effects {fs} {
+  return if !is_dir(p) && fs.exists(p) { parent_dir(p).unwrap_or(".") } else { p }
+}
+
+/// JSON text this compiler wrote, as a value.
+fn json_of(text: Str) -> Json {
+  return parse_json(text).unwrap_or(Json.Null)
+}
+
+/// The analysis's first 20 errors, rendered.
+fn Sema.first_errors(self, cwd: Str) -> Str {
+  let files = self.files()
+  var out = ""
+  for i in 0..min(self.diags.len(), 20) {
+    out += files.render(self.diags[i], cwd)
+  }
+  return out
+}
+
+fn call_tool(name: Str, args: Json, std_dir: Str, cwd: Str) -> Json
+  effects {io, fs, net, clock, env, ffi}
+{
+  if name == "check" {
+    let diags = check_project(arg_path(args, cwd), std_dir, cwd)
+    let n = diags.len()
+    var text = if n == 0 { "ok: no errors\n" } else { n.str() + " error" + plural_s(n) + "\n\n" }
+    var js: List<Json> = []
+    for i in 0..diags.len() {
+      if i < 40 {
+        text += diags[i].text + "\n"
+      }
+      js.push(json_of(diags[i].json))
+    }
+    return text_result(
+      text,
+      Some(Json.Obj([("errors", Json.Num(n)), ("diagnostics", Json.Arr(js))])),
+      false,
+    )
+  }
+  if name == "prove" {
+    let dir = pkg_dir(arg_path(args, cwd))
+    let all = arg_flag(args, "all")
+    let (s, _) = analyze(dir, std_dir)
+    if !s.diags.is_empty() {
+      return text_result(
+        "the project does not check; run `check` and fix the errors first",
+        None,
+        true,
+      )
+    }
+    let root = find_project_root(dir).unwrap_or(dir)
+    let start = time.now_ms()
+    let cache = Some(join_path(join_path(root, ".jig"), "proofs"))
+    return match prove_program(
+      s,
+      std_dir,
+      false,
+      arg_text(args, "filter").unwrap_or(""),
+      cwd,
+      cache,
+    ) {
+      Ok(reports) => {
+        let text = s.render_report(reports, all, time.now_ms() - start, cwd)
+        var obs: List<Json> = []
+        for f in reports {
+          for o in f.obligations {
+            if o.status != Status.Proved && (all || o.kind.is_contract()) {
+              obs.push(json_of(s.obligation_json(f, o, cwd)))
+            }
+          }
+        }
+        let (cp, ct, sp, st) = report_counts(reports)
+        text_result(
+          text,
+          Some(
+            Json.Obj(
+              [
+                ("contracts_proved", Json.Num(cp)),
+                ("contracts", Json.Num(ct)),
+                ("safety_proved", Json.Num(sp)),
+                ("safety", Json.Num(st)),
+                ("obligations", Json.Arr(obs)),
+              ],
+            ),
+          ),
+          false,
+        )
+      }
+      Err(e) => text_result("error: " + e, None, true)
+    }
+  }
+  if name == "trace" {
+    let (s, _) = analyze(pkg_dir(arg_path(args, cwd)), std_dir)
+    if !s.diags.is_empty() {
+      return text_result("the project does not check; run `check` first", None, true)
+    }
+    let q = match arg_text(args, "function") {
+      Some(f) => TraceQuery.Function(f)
+      None => match arg_text(args, "scenario") {
+        Some(sc) => TraceQuery.Scenario(sc)
+        None => if arg_flag(args, "uncovered") { TraceQuery.Uncovered } else { TraceQuery.Summary }
+      }
+    }
+    let (text, json) = s.trace_query(q, cwd)
+    return text_result(text, Some(Json.Obj([("result", json_of(json))])), false)
+  }
+  if name == "test" {
+    let (s, _) = analyze(pkg_dir(arg_path(args, cwd)), std_dir)
+    if !s.diags.is_empty() {
+      return text_result(
+        "the package does not check; fix these first:\n\n" + s.first_errors(cwd),
+        None,
+        true,
+      )
+    }
+    let filter = match args.get("filter") {
+      Some(f) => f.as_str().unwrap_or("")
+      None => ""
+    }
+    let results = run_tests(new_lw(s), cwd, filter)
+    var failed = 0
+    var js: List<Json> = []
+    var lines = ""
+    for r in results {
+      js.push(json_of(test_result_json(r)))
+      if r.passed {
+        lines += "ok      " + r.name + "\n"
+      } else {
+        failed += 1
+        lines += "FAILED  " +
+          r.name +
+          "\n        " +
+          r.message.replace("\n", "\n        ") +
+          "\n        at " +
+          r.location +
+          "\n"
+      }
+    }
+    let passed = results.len() - failed
+    return text_result(
+      passed.str() + " passed, " + failed.str() + " failed\n" + lines,
+      Some(
+        Json.Obj(
+          [("passed", Json.Num(passed)), ("failed", Json.Num(failed)), ("results", Json.Arr(js))],
+        ),
+      ),
+      false,
+    )
+  }
+  if name == "run" {
+    let (s, _) = analyze(pkg_dir(arg_path(args, cwd)), std_dir)
+    if !s.diags.is_empty() {
+      return text_result(
+        "the program does not check; fix these first:\n\n" + s.first_errors(cwd),
+        None,
+        true,
+      )
+    }
+    let stdin = match args.get("stdin") {
+      Some(v) => v.as_str().unwrap_or("")
+      None => ""
+    }
+    var argv: List<Str> = []
+    match args.get("args") {
+      Some(Arr(xs)) => {
+        for x in xs {
+          match x.as_str() {
+            Some(a) => argv.push(a)
+            None => {}
+          }
+        }
+      }
+      _ => {}
+    }
+    let (out, status) = run_main_captured(new_lw(s), cwd, argv, stdin)
+    return text_result(
+      out + "\n[" + status + "]",
+      Some(Json.Obj([("stdout", jstr(out)), ("status", jstr(status))])),
+      false,
+    )
+  }
+  if name == "fmt" {
+    var files: List<Str> = []
+    collect_jig_files(arg_path(args, cwd), &mut files)
+    var changed: List<Str> = []
+    var errors: List<Str> = []
+    for f in files {
+      let src = match fs.read(f) {
+        Ok(t) => t
+        Err(_) => {
+          continue
+        }
+      }
+      match syntax.format_source(src) {
+        Ok(text) => if text != src && fs.write(f, text).is_ok() {
+          changed.push(display_path(f, cwd))
+        }
+        Err(diags) => {
+          let input = Files {
+            files: [SrcFile { path: "<input>", base: 1, text: src, ast: empty_ast() }]
+          }
+          var shown = ""
+          for d in diags {
+            shown += input.render(d, "")
+          }
+          errors.push(f + ": " + shown)
+        }
+      }
+    }
+    let text = if changed.is_empty() {
+      "already formatted\n"
+    } else {
+      "formatted:\n" + changed.join("\n") + "\n"
+    }
+    var cs: List<Json> = []
+    for c in changed {
+      cs.push(jstr(c))
+    }
+    return text_result(
+      text + errors.join(""),
+      Some(Json.Obj([("changed", Json.Arr(cs))])),
+      !errors.is_empty(),
+    )
+  }
+  if name == "explain" {
+    let code = match args.get("code") {
+      Some(c) => c.as_str().unwrap_or("")
+      None => ""
+    }
+    return match parse_code(code) {
+      Some((n, (slug, summary, explain))) => text_result(
+        code_name(n) + " (" + slug + "): " + summary + "\n\n" + explain,
+        None,
+        false,
+      )
+      None => text_result("unknown diagnostic code `" + code + "`", None, true)
+    }
+  }
+  if name == "search" {
+    let q = match args.get("query") {
+      Some(c) => c.as_str().unwrap_or("")
+      None => ""
+    }
+    let (s, _) = analyze(pkg_dir(arg_path(args, cwd)), std_dir)
+    return match s.search(q, 15) {
+      Ok(hits) => {
+        var text = ""
+        var ms: List<Json> = []
+        for h in hits {
+          text += h.name + h.signature + " [" + h.package + "]\n"
+          ms.push(
+            Json.Obj(
+              [
+                ("name", jstr(h.name)),
+                ("signature", jstr(h.signature)),
+                ("package", jstr(h.package)),
+              ],
+            ),
+          )
+        }
+        if hits.is_empty() {
+          text += "no matches\n"
+        }
+        text_result(text, Some(Json.Obj([("matches", Json.Arr(ms))])), false)
+      }
+      Err(e) => text_result(e, None, true)
+    }
+  }
+  if name == "reference" {
+    return text_result(REFERENCE, None, false)
+  }
+  return text_result("unknown tool `" + name + "`", None, true)
+}
+
+fn rpc_result(id: Json, result: Json) -> Str {
+  return json_text(Json.Obj([("jsonrpc", jstr("2.0")), ("id", id), ("result", result)]))
+}
+
+fn rpc_error(id: Json, code: Int, message: Str) -> Str {
+  return json_text(
+    Json.Obj(
+      [
+        ("jsonrpc", jstr("2.0")),
+        ("id", id),
+        ("error", Json.Obj([("code", Json.Num(code)), ("message", jstr(message))])),
+      ],
+    ),
+  )
+}
+
+/// `jigc mcp`: answer requests, one per line, until standard input ends.
+fn mcp_serve(std_dir: Str, cwd: Str) -> Output effects {io, fs, net, clock, env, ffi} {
+  let tool_names = [
+    "check",
+    "test",
+    "prove",
+    "trace",
+    "run",
+    "fmt",
+    "explain",
+    "search",
+    "reference",
+  ]
+  for {
+    let line = match io.read_line() {
+      Some(l) => l
+      None => {
+        break
+      }
+    }
+    if line.trim().is_empty() {
+      continue
+    }
+    let msg = match parse_json_result(line) {
+      Ok(m) => m
+      Err(e) => {
+        io.println(rpc_error(Json.Null, -32700, "parse error: " + e))
+        continue
+      }
+    }
+    let method = match msg.get("method") {
+      Some(m) => m.as_str().unwrap_or("")
+      None => ""
+    }
+    let params = msg.get("params").unwrap_or(Json.Obj([]))
+    let id = match msg.get("id") {
+      Some(i) => i
+      None => {
+        // Notifications (`notifications/initialized`, cancellations) need no reply.
+        continue
+      }
+    }
+    if method == "initialize" {
+      let requested = match params.get("protocolVersion") {
+        Some(v) => v.as_str().unwrap_or(PROTOCOL)
+        None => PROTOCOL
+      }
+      io.println(
+        rpc_result(
+          id,
+          Json.Obj(
+            [
+              ("protocolVersion", jstr(if requested.is_empty() { PROTOCOL } else { requested })),
+              ("capabilities", Json.Obj([("tools", Json.Obj([]))])),
+              ("serverInfo", Json.Obj([("name", jstr("jig")), ("version", jstr(JIG_VERSION))])),
+              (
+                "instructions",
+                jstr(
+                  "Jig toolchain. Run `check` after every edit; all lints are errors. `reference` " +
+                    "returns the language reference; `search` finds functions by type signature; " +
+                    "`explain` explains a diagnostic code.",
+                ),
+              ),
+            ],
+          ),
+        ),
+      )
+    } else if method == "ping" {
+      io.println(rpc_result(id, Json.Obj([])))
+    } else if method == "tools/list" {
+      io.println(rpc_result(id, Json.Obj([("tools", mcp_tools())])))
+    } else if method == "tools/call" {
+      let name = match params.get("name") {
+        Some(n) => n.as_str().unwrap_or("")
+        None => ""
+      }
+      if !tool_names.contains(name) {
+        io.println(rpc_error(id, -32602, "unknown tool: " + name))
+        continue
+      }
+      let args = params.get("arguments").unwrap_or(Json.Obj([]))
+      io.println(rpc_result(id, call_tool(name, args, std_dir, cwd)))
+    } else {
+      io.println(rpc_error(id, -32601, "method not found: " + method))
+    }
+  }
+  return output("", "", 0)
+}

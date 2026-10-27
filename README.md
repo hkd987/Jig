@@ -95,12 +95,11 @@ It binds `.feature` scenarios, loads required modules, formats, and runs tests a
 on its own interpreter (`jigc test`, the lines of `jig test --json`), and proves contracts with
 Z3 (`jigc prove`, the same results as `jig prove`, sharing its proof cache), and builds
 executables with the checks those proofs discharge removed (`jigc build`, the same C as
-`jig build`). `jigc check`, `test`, `prove`, `run`, `build`, `trace`, `search`, `fmt` and `get`
-take `jig`'s arguments and print what `jig` prints, every diagnostic's notes and suggested fixes included, and `jigc
-run` runs programs with real effects as `jig run` does; the standard library and runtime are
-built in. The rest of the command line (`traces`, `hook`, `mcp`) is not ported yet;
-until it is,
-the Rust compiler (`compiler/`) is the one `jig` command and is kept passing the same tests.
+`jig build`). Every `jigc` command takes `jig`'s arguments and prints what `jig` prints, every
+diagnostic's notes and suggested fixes included, `jigc run` runs programs with real effects
+and `jigc mcp` serves the agent tools; the standard library and runtime are built in. Until
+it passes every test suite (D6), the Rust compiler (`compiler/`) is the one `jig` command and
+is kept passing the same tests.
 
 ## License
 

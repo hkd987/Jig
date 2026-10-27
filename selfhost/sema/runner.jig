@@ -745,3 +745,35 @@ fn run_main_real(lw: Lw, cwd: Str, args: List<Str>) -> Result<Int, Str>
     }
   }
 }
+
+/// `main` on the interpreter with faked effects, these arguments and this input, as the MCP
+/// server's `run` tool runs it: what it printed (standard error after standard output) and how
+/// it ended (`exit N` or `panic at LOCATION: MESSAGE`).
+fn run_main_captured(lw: Lw, cwd: Str, args: List<Str>, stdin: Str) -> (Str, Str)
+  effects {io, fs, net, clock, env, ffi}
+{
+  let main = match lw.s.defs.main {
+    Some(f) => f
+    None => {
+      return ("", "error: no `main` function")
+    }
+  }
+  var fx = fake_effects(7)
+  var argv = ["main"]
+  argv.extend(args)
+  fx.args = argv
+  fx.stdin = stdin.lines()
+  var it = new_interp(lw, fx, cwd)
+  it.fuel = 500000000
+  let m = it.lw.instance(main, [])
+  var none: List<Value> = []
+  let r = it.call(m, &mut none)
+  let out = it.fx.stdout + it.fx.stderr
+  return match r {
+    Ok(_) => (out, "exit 0")
+    Err(t) => match t {
+      Exit(c) => (out, "exit " + c.str())
+      Panic(msg, span, _) => (out, "panic at " + it.location(span.lo) + ": " + msg)
+    }
+  }
+}

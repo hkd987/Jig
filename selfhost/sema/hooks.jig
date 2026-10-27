@@ -1,0 +1,228 @@
+// Claude Code hook entry points, ported from the bootstrap compiler's `tools/hooks.rs`:
+// `jigc hook post-edit` and `jigc hook pre-commit`. Both read the hook's JSON from standard
+// input.
+
+import "std/fs"
+import "std/io"
+import "std/strings"
+import "syntax"
+
+const MAX_SHOWN: Int = 12
+
+/// The hook's input (`null` if it is not JSON).
+fn read_hook_input() -> Json effects {io} {
+  return parse_json(io.read_all()).unwrap_or(Json.Null)
+}
+
+/// The hook's working directory (".", by default) as an absolute path.
+fn hook_cwd(input: Json, cwd: Str) -> Str {
+  let dir = match input.get("cwd") {
+    Some(c) => c.as_str().unwrap_or(".")
+    None => "."
+  }
+  return absolute_path(dir, cwd)
+}
+
+/// After an edit to a `.jig` file: check the project and feed its errors back (exit code 2
+/// shows standard error to the agent).
+fn post_edit(input: Json, std_dir: Str, cwd: Str) -> Output effects {fs, env, ffi, clock} {
+  let file = match input.get("tool_input") {
+    Some(t) => match t.get("file_path") {
+      Some(f) => f.as_str().unwrap_or("")
+      None => ""
+    }
+    None => ""
+  }
+  if !file.ends_with(".jig") && !file.ends_with(".feature") {
+    return output("", "", 0)
+  }
+  let path = if file.starts_with("/") { file } else { join_path(hook_cwd(input, cwd), file) }
+  let errors = check_project(path, std_dir, cwd)
+  let tdir = traces_dir()
+  if traces_enabled(tdir) {
+    let root = match find_project_root(path) {
+      Some(r) => r
+      None => parent_dir(path).unwrap_or("")
+    }
+    var errs: List<(Str, Str)> = []
+    for d in errors {
+      errs.push((d.code, d.msg))
+    }
+    record_edit(tdir, root, path, errs)
+  }
+  if errors.is_empty() {
+    return output("", "", 0)
+  }
+  let n = errors.len()
+  var out = "jig check: " +
+    n.str() +
+    " error" +
+    plural_s(n) +
+    " (all Jig lints are errors; fix them before continuing)\n\n"
+  for i in 0..min(n, MAX_SHOWN) {
+    out += errors[i].text + "\n"
+  }
+  if n > MAX_SHOWN {
+    out += "... and " + (n - MAX_SHOWN).str() + " more (run `jig check --json`)\n"
+  }
+  return output("", out, 2)
+}
+
+/// Is this shell command a `git commit` (`git -C dir commit`, chained with `&&` or `;`)?
+fn is_git_commit(cmd: Str) -> Bool {
+  var parts: List<Str> = [""]
+  for c in cmd.chars() {
+    if c == '&' || c == ';' || c == '|' || c == '\n' {
+      parts.push("")
+    } else {
+      parts[parts.len() - 1] = parts[parts.len() - 1] + c.str()
+    }
+  }
+  for part in parts {
+    let words = strings.words(part)
+    match words.index_of("git") {
+      Some(i) => {
+        var j = i + 1
+        for j < words.len() && words[j].starts_with("-") {
+          // Options and their arguments (`-C dir`, `-c k=v`).
+          if words[j] == "-C" || words[j] == "-c" {
+            j += 1
+          }
+          j += 1
+        }
+        if j < words.len() && words[j] == "commit" {
+          return true
+        }
+      }
+      None => {}
+    }
+  }
+  return false
+}
+
+fn deny(reason: Str) -> Output {
+  let j = Json.Obj(
+    [
+      (
+        "hookSpecificOutput",
+        Json.Obj(
+          [
+            ("hookEventName", Json.Str("PreToolUse")),
+            ("permissionDecision", Json.Str("deny")),
+            ("permissionDecisionReason", Json.Str(reason)),
+          ],
+        ),
+      ),
+    ],
+  )
+  return output(json_text(j) + "\n", "", 0)
+}
+
+/// The package directories of the project containing `dir` (just `dir` without `jig.mod`).
+fn project_packages(dir: Str) -> List<Str> effects {fs} {
+  return match find_project_root(dir) {
+    Some(root) => package_dirs(root)
+    None => [dir]
+  }
+}
+
+/// Before `git commit`: the project must check, test and format cleanly.
+fn pre_commit(input: Json, std_dir: Str, cwd: Str) -> Output
+  effects {io, fs, net, clock, env, ffi}
+{
+  let cmd = match input.get("tool_input") {
+    Some(t) => match t.get("command") {
+      Some(c) => c.as_str().unwrap_or("")
+      None => ""
+    }
+    None => ""
+  }
+  if !is_git_commit(cmd) {
+    return output("", "", 0)
+  }
+  let dir = hook_cwd(input, cwd)
+  if package_dirs(dir).is_empty() {
+    return output("", "", 0)
+  }
+  let errors = check_project(dir, std_dir, cwd)
+  if !errors.is_empty() {
+    var r = "jig check failed with " +
+      errors.len().str() +
+      " error(s); commits are blocked until the project checks cleanly:\n"
+    for i in 0..min(errors.len(), MAX_SHOWN) {
+      r += errors[i].text
+    }
+    return deny(r)
+  }
+  // Tests.
+  var failed: List<Str> = []
+  for p in project_packages(dir) {
+    let (s, _) = analyze(p, std_dir)
+    if !s.diags.is_empty() {
+      continue
+    }
+    for r in run_tests(new_lw(s), cwd, "") {
+      if !r.passed {
+        failed.push("FAILED " + r.name + " (" + r.pkg + "): " + r.message + " at " + r.location)
+      }
+    }
+  }
+  failed.sort()
+  var unique: List<Str> = []
+  for f in failed {
+    if unique.is_empty() || unique[unique.len() - 1] != f {
+      unique.push(f)
+    }
+  }
+  if !unique.is_empty() {
+    var r = "jig test: " +
+      unique.len().str() +
+      " test(s) failed; commits are blocked until tests pass:\n"
+    for i in 0..min(unique.len(), MAX_SHOWN) {
+      r += unique[i] + "\n"
+    }
+    return deny(r)
+  }
+  // Formatting.
+  var files: List<Str> = []
+  collect_jig_files(dir, &mut files)
+  var unformatted: List<Str> = []
+  for f in files {
+    match fs.read(f) {
+      Ok(src) => match syntax.format_source(src) {
+        Ok(text) => if text != src { unformatted.push(display_path(f, cwd)) }
+        Err(_) => {}
+      }
+      Err(_) => {}
+    }
+  }
+  if !unformatted.is_empty() {
+    return deny(
+      "these files are not formatted; run `jig fmt` and commit again:\n" + unformatted.join("\n"),
+    )
+  }
+  // A verified state, for the opt-in trace corpus.
+  let tdir = traces_dir()
+  if traces_enabled(tdir) {
+    record_verified(tdir, dir, files)
+  }
+  return output("", "", 0)
+}
+
+/// `jigc hook post-edit|pre-commit`, as `jig hook`.
+fn hook_cmd(args: List<Str>, std_dir: Str, cwd: Str) -> Output
+  effects {io, fs, net, clock, env, ffi}
+{
+  let which = args.first().unwrap_or("")
+  if which == "post-edit" {
+    return post_edit(read_hook_input(), std_dir, cwd)
+  }
+  if which == "pre-commit" {
+    return pre_commit(read_hook_input(), std_dir, cwd)
+  }
+  return output(
+    "",
+    "usage: jig hook <post-edit|pre-commit>  (reads Claude Code hook JSON on stdin)\n",
+    2,
+  )
+}

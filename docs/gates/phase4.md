@@ -106,11 +106,11 @@ Release notes are in [`CHANGELOG.md`](../../CHANGELOG.md).
 
 ## Open
 
-- `jigc`: the rest of the command line (`traces`, `hook`, `mcp`). `check`, `test`, `prove`,
-  `run` (real effects; `--native` too), `build`, `trace`, `search`, `fmt`, `get`, `explain` and
-  `reference` take `jig`'s arguments and print what it prints, with the standard library,
-  runtime, code registry and reference built in. Until `jigc` passes every test suite the Rust
-  compiler stays the `jig` command (D6).
+- The Rust compiler stays the `jig` command until `jigc` passes every test suite (D6). `jigc`
+  has `jig`'s whole command line: every command (`check`, `test`, `prove`, `run` with real
+  effects and `--native`, `build`, `trace`, `search`, `fmt`, `get`, `traces`, `hook`, `mcp`,
+  `explain`, `reference`) takes `jig`'s arguments and prints what it prints, with the standard
+  library, runtime, code registry and reference built in.
 - Self-hosted speed: identifiers interned instead of sliced, and wall time (memory).
 - Contracts on the compiler's passes.
 - Agent benchmark runs.
