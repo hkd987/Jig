@@ -16,8 +16,14 @@ or clang.
 Change anything under `selfhost/`, `compiler/std/` or `compiler/runtime/` and the file goes
 stale; `bootstrap/update.sh` rewrites `selfhost/sema/stdlib.jig` (the standard library and
 runtime jigc carries, with `stdlib.py`), rebuilds the file with only a C compiler (twice, so a
-changed back end compiles itself) and checks the fixed point. `cargo test` fails while it is stale, and
-CI checks the fixed point with `bootstrap/update.sh --check` without Rust installed.
+changed back end compiles itself) and checks the fixed point. `cargo test` fails while it is
+stale, and CI checks the fixed point with `bootstrap/update.sh --check` without Rust
+installed.
+
+`bootstrap/suites.py` builds `jigc` from this file and runs the test suites through it alone:
+the UI annotations, run and native outputs, prover reports, property tests, traceability,
+the cookbook, every example and `jigc`'s own tests, modules over git, and the network
+example. CI runs it without Rust, with gcc and with clang.
 
 The Rust compiler (`compiler/`) is kept, and kept passing the same tests, until `jigc`
 passes every test suite; `compiler/tests/selfhost.rs` checks that both generate the same C
