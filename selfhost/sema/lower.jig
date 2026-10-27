@@ -125,14 +125,27 @@ fn Lw.instance(&mut self, f: Int, args: List<Int>) -> Int {
   return m
 }
 
-fn Lw.ensure_lowered(&mut self, m: Int) {
+fn Lw.ensure_lowered(&mut self, m: Int)
+  requires m >= 0 && m < self.mir.fns.len()
+{
   if !self.mir.fns[m].lowered {
     self.lower_instance(m)
   }
 }
 
 /// Start building function `mfn` from a body in `pkg`'s file `file`.
-fn Lw.begin_fn(&mut self, pkg: Int, file: Int, body: Body, inst: List<Int>, mfn: Int) {
+fn Lw.begin_fn(&mut self, pkg: Int, file: Int, body: Body, inst: List<Int>, mfn: Int)
+  requires pkg >= 0 &&
+    pkg < self.s.pkgs.len() &&
+    mfn >= 0 &&
+    mfn < self.mir.fns.len() &&
+    pkg >= 0 &&
+    pkg < self.s.tables.len() &&
+    file >= 0 &&
+    file < self.s.tables[pkg].len() &&
+    file >= 0 &&
+    file < self.s.pkgs[pkg].files.len()
+{
   let ret = self.mir.fns[mfn].ret
   let span = self.mir.fns[mfn].span
   self.fb = Fb {
@@ -255,7 +268,9 @@ fn Lw.subst(&mut self, t: Int) -> Int {
   return self.s.tys.subst(t, self.fb.inst)
 }
 
-fn Lw.ty(&mut self, e: Int) -> Int {
+fn Lw.ty(&mut self, e: Int) -> Int
+  requires e >= 0 && e < self.fb.tab.expr_ty.len()
+{
   return self.subst(self.fb.tab.expr_ty[e])
 }
 
@@ -302,7 +317,9 @@ fn Lw.terminate_and_continue(&mut self, t: Terminator) {
   self.fb.cur = self.new_block()
 }
 
-fn Lw.sema_local(&mut self, id: Int) -> Int {
+fn Lw.sema_local(&mut self, id: Int) -> Int
+  requires id >= 0 && id < self.fb.body.locals.len()
+{
   match self.fb.local_map.get(id) {
     Some(l) => {
       return l
@@ -396,7 +413,9 @@ fn Lw.src(self, e: Int) -> Str {
   return s
 }
 
-fn Lw.res(self, e: Int) -> Res {
+fn Lw.res(self, e: Int) -> Res
+  requires e >= 0 && e < self.fb.tab.expr_res.len()
+{
   return self.fb.tab.expr_res[e]
 }
 
@@ -607,7 +626,9 @@ fn Lw.drop_scopes_to(&mut self, depth: Int) {
 
 // ---------- statements ----------
 
-fn Lw.lower_body_block(&mut self, block: Int) {
+fn Lw.lower_body_block(&mut self, block: Int)
+  requires block >= 0 && block < self.fb.ast.exprs.len()
+{
   match self.fb.ast.exprs[block].kind {
     Block(stmts) => {
       self.push_scope()
@@ -774,7 +795,9 @@ fn Lw.bind_irrefutable(&mut self, pat: Int, p: Place) {
   }
 }
 
-fn int_kind_of(tys: TyCtx, t: Int) -> IntTy {
+fn int_kind_of(tys: TyCtx, t: Int) -> IntTy
+  requires t >= 0 && t < tys.kinds.len()
+{
   return match tys.kinds[t] {
     Int(k, _) => k
     _ => IntTy.I64
@@ -1135,7 +1158,9 @@ fn Lw.expr(&mut self, e: Int) -> Operand {
   return op_local(l)
 }
 
-fn Lw.int_const(self, neg: Bool, mag: U64, t: Int) -> Operand {
+fn Lw.int_const(self, neg: Bool, mag: U64, t: Int) -> Operand
+  requires t >= 0 && t < self.s.tys.kinds.len()
+{
   return match self.s.tys.kinds[t] {
     Int(k, _) => Operand.Const(Const.Int(neg && mag != 0, mag, k))
     Float(_) => Operand.Const(

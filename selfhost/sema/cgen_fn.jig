@@ -1015,10 +1015,12 @@ fn Cg.cast(&mut self, x: Str, from: Int, to: Int, span: syntax.Span) -> Str {
 
 // ---------- calls ----------
 
-fn Cg.arg_exprs(&mut self, mf: MFn, cx: FnCx, args: List<Arg>, span: syntax.Span) -> List<Str> {
+fn Cg.arg_exprs(&mut self, mf: MFn, cx: FnCx, args: List<Arg>, span: syntax.Span) -> List<Str>
+  ensures result.len() == args.len()
+{
   var out: List<Str> = []
-  for a in args {
-    match a {
+  for i in 0..args.len() invariant out.len() == i {
+    match args[i] {
       Value(o) => out.push(self.operand(mf, cx, o, span))
       MutRef(p) => out.push("&" + self.place_expr(mf, cx, p, true, span))
     }

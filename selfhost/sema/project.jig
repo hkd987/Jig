@@ -106,7 +106,7 @@ fn has_main(dir: Str) -> Bool effects {fs} {
 fn trim_start_space(s: Str) -> Str {
   let cs = s.chars()
   var i = 0
-  for i < cs.len() && is_space_char(cs[i]) {
+  for i < cs.len() && is_space_char(cs[i]) invariant i >= 0 && i <= cs.len() {
     i += 1
   }
   return Str.from_chars(cs[i..cs.len()])

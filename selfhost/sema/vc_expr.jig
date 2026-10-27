@@ -52,7 +52,9 @@ fn Gen.concat(&mut self, a: Sv, b: Sv) -> Sv {
 }
 
 /// An integer literal (sign and magnitude) as a value of type `t`.
-fn Gen.lit_of_ty(&mut self, neg: Bool, mag: U64, t: Int) -> Sv {
+fn Gen.lit_of_ty(&mut self, neg: Bool, mag: U64, t: Int) -> Sv
+  requires t >= 0 && t < self.s.tys.kinds.len()
+{
   let text = smt_lit(neg, mag)
   return match self.s.tys.kinds[t] {
     Int(k, _) => sv_int(text, k)
@@ -313,7 +315,9 @@ fn Gen.name_value(&mut self, fr: VFrame, st: &mut St, e: Int, n: Str, t: Int) ->
 }
 
 /// Construct an enum value.
-fn Gen.construct(&mut self, t: Int, adt: Int, v: Int, fields: List<Sv>) -> Sv {
+fn Gen.construct(&mut self, t: Int, adt: Int, v: Int, fields: List<Sv>) -> Sv
+  requires adt >= 0 && adt < self.s.defs.adts.len()
+{
   let ad = self.s.defs.adts[adt]
   let n = ad.variants.len()
   if ad.recursive {
@@ -391,7 +395,9 @@ fn Gen.unary(
   v: Sv,
   t: Int,
   span: syntax.Span,
-) -> Option<Sv> {
+) -> Option<Sv>
+  requires t >= 0 && t < self.s.tys.kinds.len()
+{
   let x = match sv_term(v) {
     Some(x) => x
     None => {
@@ -495,7 +501,9 @@ fn Gen.binary_vals(
   b: Sv,
   t: Int,
   span: syntax.Span,
-) -> Option<Sv> {
+) -> Option<Sv>
+  requires t >= 0 && t < self.s.tys.kinds.len()
+{
   let k = self.s.tys.kinds[t]
   if op == syntax.BinOp.Eq || op == syntax.BinOp.Ne {
     let eq = match self.eq_term(a, b) {
@@ -632,7 +640,9 @@ fn Gen.cast(
   from: Int,
   to: Int,
   span: syntax.Span,
-) -> Option<Sv> {
+) -> Option<Sv>
+  requires from >= 0 && from < self.s.tys.kinds.len() && to >= 0 && to < self.s.tys.kinds.len()
+{
   let x = match sv_term(v) {
     Some(x) => x
     None => {

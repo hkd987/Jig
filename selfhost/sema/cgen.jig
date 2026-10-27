@@ -353,7 +353,9 @@ fn Cg.enqueue(&mut self, f: Int) {
 
 // ---------- types ----------
 
-fn Cg.kind(self, t: Int) -> TyKind {
+fn Cg.kind(self, t: Int) -> TyKind
+  requires t >= 0 && t < self.lw.s.tys.kinds.len()
+{
   return self.lw.s.tys.kinds[t]
 }
 
@@ -1052,7 +1054,9 @@ fn Cg.gen_show_body(&mut self, t: Int, k: TyKind) -> Str {
 
 /// A static table of an enum's variant names, if its variants have no fields and it has no
 /// `str` method of its own.
-fn Cg.enum_name_table(&mut self, ad: Int) -> Option<Str> {
+fn Cg.enum_name_table(&mut self, ad: Int) -> Option<Str>
+  requires ad >= 0 && ad < self.lw.s.defs.adts.len()
+{
   match self.enum_names.get(ad) {
     Some(n) => {
       return Some(n)

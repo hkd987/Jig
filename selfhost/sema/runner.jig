@@ -127,7 +127,9 @@ fn Rng.next_u64(&mut self) -> U64 {
   return x.wrapping_mul(2685821657736338717)
 }
 
-fn Rng.below(&mut self, n: U64) -> U64 {
+fn Rng.below(&mut self, n: U64) -> U64
+  ensures n == 0 || result < n
+{
   if n == 0 {
     return 0
   }

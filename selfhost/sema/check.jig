@@ -180,7 +180,16 @@ fn new_sema(ld: Loaded) -> Sema
 }
 
 /// Start checking an item of `pkg`'s file `file`: fresh state, and the file's tables.
-fn Sema.begin(&mut self, pkg: Int, file: Int) {
+fn Sema.begin(&mut self, pkg: Int, file: Int)
+  requires pkg >= 0 &&
+    pkg < self.pkgs.len() &&
+    pkg >= 0 &&
+    pkg < self.tables.len() &&
+    file >= 0 &&
+    file < self.tables[pkg].len() &&
+    file >= 0 &&
+    file < self.pkgs[pkg].files.len()
+{
   self.pkg = pkg
   self.file = file
   self.ast = self.pkgs[pkg].files[file].ast
@@ -336,7 +345,9 @@ fn Sema.fix_snippet(self, span: syntax.Span) -> Str
   return s
 }
 
-fn Sema.expr_span(self, e: Int) -> syntax.Span {
+fn Sema.expr_span(self, e: Int) -> syntax.Span
+  requires e >= 0 && e < self.ast.exprs.len()
+{
   return self.ast.exprs[e].span
 }
 
@@ -457,7 +468,9 @@ fn Sema.rollback(&mut self, snap: Int)
   }
 }
 
-fn Sema.bind(&mut self, v: Int, t: Int) {
+fn Sema.bind(&mut self, v: Int, t: Int)
+  requires v >= 0 && v < self.var_ty.len()
+{
   self.var_ty[v] = t
   self.trail.push(v)
 }
@@ -646,9 +659,11 @@ fn Sema.declare_local(&mut self, name: Str, ty: Int, kind: LocalKind, span: synt
   return id
 }
 
-fn Sema.lookup_local(self, name: Str) -> Option<Int> {
+fn Sema.lookup_local(self, name: Str) -> Option<Int>
+  ensures result.is_none() || !self.scope.is_empty()
+{
   var i = self.scope.len() - 1
-  for i >= 0 {
+  for i >= 0 invariant i < self.scope.len() {
     if self.scope[i].0 == name {
       return Some(self.scope[i].1)
     }
@@ -840,7 +855,9 @@ fn Sema.satisfies(&mut self, t: Int, b: Bound, seen: &mut Set<(Int, Bound)>) -> 
 }
 
 /// The type arguments of a type constructor.
-fn Sema.type_args_of(self, t: Int) -> List<Int> {
+fn Sema.type_args_of(self, t: Int) -> List<Int>
+  requires t >= 0 && t < self.tys.kinds.len()
+{
   return match self.tys.kinds[t] {
     Adt(_, args) => args
     List(x) | Set(x) => [x]
@@ -1293,7 +1310,9 @@ fn Sema.check_alias_predicate(&mut self, al: Int) {
 
 // ---------- shared helpers ----------
 
-fn Sema.record(&mut self, e: Int, t: Int) -> Int {
+fn Sema.record(&mut self, e: Int, t: Int) -> Int
+  requires e >= 0 && e < self.tab.expr_ty.len()
+{
   self.tab.expr_ty[e] = t
   self.touched.push(e)
   return t
@@ -1306,12 +1325,16 @@ fn Sema.set_inst(&mut self, e: Int, args: List<Int>)
   self.touched_insts.push(e)
 }
 
-fn Sema.set_pat_ty(&mut self, p: Int, t: Int) {
+fn Sema.set_pat_ty(&mut self, p: Int, t: Int)
+  requires p >= 0 && p < self.tab.pat_ty.len()
+{
   self.tab.pat_ty[p] = t
   self.touched_pats.push(p)
 }
 
-fn Sema.set_res(&mut self, e: Int, r: Res) {
+fn Sema.set_res(&mut self, e: Int, r: Res)
+  requires e >= 0 && e < self.tab.expr_res.len()
+{
   self.tab.expr_res[e] = r
 }
 
@@ -1369,9 +1392,11 @@ fn to_camel(s: Str) -> Str {
   return out
 }
 
-fn Sema.check_snake(&mut self, name: Str, span: syntax.Span, what: Str) {
+fn Sema.check_snake(&mut self, name: Str, span: syntax.Span, what: Str)
+  ensures self.diags.len() == old(self.diags.len()) || self.diags.len() == old(self.diags.len()) + 1
+{
   var start = 0
-  for start < name.len() && name[start] == '_' {
+  for start < name.len() && name[start] == '_' invariant start >= 0 && start <= name.len() {
     start += 1
   }
   let t = name[start..name.len()]
@@ -1390,17 +1415,17 @@ fn Sema.check_snake(&mut self, name: Str, span: syntax.Span, what: Str) {
 
 fn to_snake(s: Str) -> Str {
   var out = ""
-  var i = 0
+  var first = true
   for c in s.chars() {
     if c >= 'A' && c <= 'Z' {
-      if i > 0 && !out.ends_with("_") {
+      if !first && !out.ends_with("_") {
         out += "_"
       }
       out += ((c as Int + 32) as Char).str()
     } else {
       out += c.str()
     }
-    i += 1
+    first = false
   }
   return out
 }

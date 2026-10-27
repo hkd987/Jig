@@ -42,7 +42,11 @@ fn Sema.quiet_after_syntax_errors(&mut self) {
 }
 
 /// The (package, file) holding global offset `pos`.
-fn Sema.file_of(self, pos: Int) -> Option<(Int, Int)> {
+fn Sema.file_of(self, pos: Int) -> Option<(Int, Int)>
+  ensures result.is_none() || (result.unwrap().0 >= 0 && result.unwrap().0 < self.pkgs.len())
+  ensures result.is_none() ||
+    (result.unwrap().1 >= 0 && result.unwrap().1 < self.pkgs[result.unwrap().0].files.len())
+{
   for p in 0..self.pkgs.len() {
     let files = self.pkgs[p].files
     for f in 0..files.len() {

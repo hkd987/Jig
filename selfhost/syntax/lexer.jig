@@ -118,7 +118,7 @@ struct Lexer {
 }
 
 /// Global source offsets stay below 2^62, so offset arithmetic cannot overflow.
-const MAX_OFFSET: Int = 4611686018427387904
+pub const MAX_OFFSET: Int = 4611686018427387904
 
 /// Lex `src`, whose first byte is at global offset `base`. The tokens end with `Eof`.
 fn lex(src: Str, base: Int) -> Lexed

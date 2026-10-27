@@ -58,7 +58,9 @@ pub fn parse(src: Str, base: Int) -> Parsed
 }
 
 /// Can this identifier start a struct literal or a variant pattern? Types are capitalized.
-fn is_type_like(s: Str) -> Bool {
+fn is_type_like(s: Str) -> Bool
+  ensures !result || !s.is_empty()
+{
   if s.is_empty() {
     return false
   }
@@ -203,7 +205,9 @@ fn digit_value(b: Int, radix: Int) -> Int
 
 /// An integer literal's value (underscores removed), or `None` if it has a bad digit or
 /// does not fit in 64 bits.
-fn int_value(text: Str) -> Option<U64> {
+fn int_value(text: Str) -> Option<U64>
+  ensures result.is_none() || !text.is_empty()
+{
   var radix = 10
   var digits = text
   if text.len() >= 2 && text[0] as Char == '0' {
@@ -1748,7 +1752,9 @@ fn Parser.parse_unary(&mut self) -> Result<Int, ()>
   }
 }
 
-fn Parser.is_name(self, e: Int) -> Bool {
+fn Parser.is_name(self, e: Int) -> Bool
+  requires e >= 0 && e < self.ast.exprs.len()
+{
   return match self.ast.exprs[e].kind {
     Name(_) => true
     _ => false

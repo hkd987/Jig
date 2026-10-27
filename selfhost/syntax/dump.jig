@@ -110,66 +110,87 @@ fn Dump.sep(&mut self, i: Int)
   }
 }
 
-fn Dump.exprs(&mut self, xs: List<Int>) {
+fn Dump.exprs(&mut self, xs: List<Int>)
+  ensures self.out.len() >= old(self.out.len())
+{
+  let len0 = self.out.len()
   self.w("[")
-  for i in 0..xs.len() {
+  for i in 0..xs.len() invariant self.out.len() >= len0 {
     self.sep(i)
     self.expr(xs[i])
   }
   self.w("]")
 }
 
-fn Dump.types(&mut self, xs: List<Int>) {
+fn Dump.types(&mut self, xs: List<Int>)
+  ensures self.out.len() >= old(self.out.len())
+{
+  let len0 = self.out.len()
   self.w("[")
-  for i in 0..xs.len() {
+  for i in 0..xs.len() invariant self.out.len() >= len0 {
     self.sep(i)
     self.ty(xs[i])
   }
   self.w("]")
 }
 
-fn Dump.pats(&mut self, xs: List<Int>) {
+fn Dump.pats(&mut self, xs: List<Int>)
+  ensures self.out.len() >= old(self.out.len())
+{
+  let len0 = self.out.len()
   self.w("[")
-  for i in 0..xs.len() {
+  for i in 0..xs.len() invariant self.out.len() >= len0 {
     self.sep(i)
     self.pat(xs[i])
   }
   self.w("]")
 }
 
-fn Dump.names(&mut self, xs: List<Name>) {
+fn Dump.names(&mut self, xs: List<Name>)
+  ensures self.out.len() >= old(self.out.len())
+{
+  let len0 = self.out.len()
   self.w("[")
-  for i in 0..xs.len() {
+  for i in 0..xs.len() invariant self.out.len() >= len0 {
     self.sep(i)
     self.w(fmt_name(xs[i]))
   }
   self.w("]")
 }
 
-fn Dump.opt_expr(&mut self, x: Option<Int>) {
+fn Dump.opt_expr(&mut self, x: Option<Int>)
+  ensures self.out.len() >= old(self.out.len())
+{
   match x {
     Some(e) => self.expr(e)
     None => self.w("_")
   }
 }
 
-fn Dump.opt_ty(&mut self, x: Option<Int>) {
+fn Dump.opt_ty(&mut self, x: Option<Int>)
+  ensures self.out.len() >= old(self.out.len())
+{
   match x {
     Some(t) => self.ty(t)
     None => self.w("_")
   }
 }
 
-fn Dump.opt_names(&mut self, x: Option<List<Name>>) {
+fn Dump.opt_names(&mut self, x: Option<List<Name>>)
+  ensures self.out.len() >= old(self.out.len())
+{
   match x {
     Some(l) => self.names(l)
     None => self.w("_")
   }
 }
 
-fn Dump.generics(&mut self, xs: List<GenericParam>) {
+fn Dump.generics(&mut self, xs: List<GenericParam>)
+  ensures self.out.len() >= old(self.out.len())
+{
+  let len0 = self.out.len()
   self.w("[")
-  for i in 0..xs.len() {
+  for i in 0..xs.len() invariant self.out.len() >= len0 {
     self.sep(i)
     let g = xs[i]
     self.w("(gp " + fmt_name(g.name) + " ")
@@ -179,9 +200,12 @@ fn Dump.generics(&mut self, xs: List<GenericParam>) {
   self.w("]")
 }
 
-fn Dump.params(&mut self, xs: List<Param>) {
+fn Dump.params(&mut self, xs: List<Param>)
+  ensures self.out.len() >= old(self.out.len())
+{
+  let len0 = self.out.len()
   self.w("[")
-  for i in 0..xs.len() {
+  for i in 0..xs.len() invariant self.out.len() >= len0 {
     self.sep(i)
     let p = xs[i]
     self.w("(param " + fmt_name(p.name) + " ")
@@ -193,9 +217,12 @@ fn Dump.params(&mut self, xs: List<Param>) {
   self.w("]")
 }
 
-fn Dump.fields(&mut self, xs: List<FieldDecl>) {
+fn Dump.fields(&mut self, xs: List<FieldDecl>)
+  ensures self.out.len() >= old(self.out.len())
+{
+  let len0 = self.out.len()
   self.w("[")
-  for i in 0..xs.len() {
+  for i in 0..xs.len() invariant self.out.len() >= len0 {
     self.sep(i)
     let f = xs[i]
     self.w("(field " + fmt_name(f.name) + " ")
@@ -207,7 +234,10 @@ fn Dump.fields(&mut self, xs: List<FieldDecl>) {
   self.w("]")
 }
 
-fn Dump.item(&mut self, id: Int) {
+fn Dump.item(&mut self, id: Int)
+  ensures self.out.len() >= old(self.out.len())
+{
+  let len0 = self.out.len()
   let it = self.ast.items[id]
   let vis = if it.is_pub { "pub" } else { "priv" }
   let head = fmt_name(it.name) + " " + fmt_span(it.span) + " " + vis
@@ -266,7 +296,7 @@ fn Dump.item(&mut self, id: Int) {
       self.w("(enum " + head + " ")
       self.generics(generics)
       self.w(" [")
-      for i in 0..variants.len() {
+      for i in 0..variants.len() invariant self.out.len() >= len0 {
         self.sep(i)
         let v = variants[i]
         self.w("(variant " + fmt_name(v.name) + " ")
@@ -279,7 +309,7 @@ fn Dump.item(&mut self, id: Int) {
       self.w("(interface " + head + " ")
       self.generics(generics)
       self.w(" [")
-      for i in 0..methods.len() {
+      for i in 0..methods.len() invariant self.out.len() >= len0 {
         self.sep(i)
         self.item(methods[i])
       }
@@ -312,7 +342,10 @@ fn Dump.item(&mut self, id: Int) {
   }
 }
 
-fn Dump.ty(&mut self, id: Int) {
+fn Dump.ty(&mut self, id: Int)
+  ensures self.out.len() >= old(self.out.len())
+{
+  let len0 = self.out.len()
   let t = self.ast.types[id]
   match t.kind {
     Named(pkg, n, args, units) => {
@@ -327,7 +360,7 @@ fn Dump.ty(&mut self, id: Int) {
       match units {
         Some(fs) => {
           self.w("[")
-          for i in 0..fs.len() {
+          for i in 0..fs.len() invariant self.out.len() >= len0 {
             self.sep(i)
             self.w("(uf " + fmt_name(fs[i].name) + " " + fs[i].exp.str() + ")")
           }
@@ -358,7 +391,10 @@ fn Dump.ty(&mut self, id: Int) {
   self.w(" " + fmt_span(t.span) + ")")
 }
 
-fn Dump.pat(&mut self, id: Int) {
+fn Dump.pat(&mut self, id: Int)
+  requires id >= 0 && id < self.ast.pats.len()
+  ensures self.out.len() >= old(self.out.len())
+{
   let p = self.ast.pats[id]
   match p.kind {
     Wild => self.w("(wild")
@@ -384,7 +420,9 @@ fn Dump.pat(&mut self, id: Int) {
   self.w(" " + fmt_span(p.span) + ")")
 }
 
-fn Dump.stmt(&mut self, id: Int) {
+fn Dump.stmt(&mut self, id: Int)
+  ensures self.out.len() >= old(self.out.len())
+{
   let s = self.ast.stmts[id]
   match s.kind {
     Let(pat, ty, init, mutable) => {
@@ -441,7 +479,10 @@ fn Dump.stmt(&mut self, id: Int) {
   self.w(" " + fmt_span(s.span) + ")")
 }
 
-fn Dump.expr(&mut self, id: Int) {
+fn Dump.expr(&mut self, id: Int)
+  ensures self.out.len() >= old(self.out.len())
+{
+  let len0 = self.out.len()
   let e = self.ast.exprs[id]
   match e.kind {
     Int(v) => self.w("(int " + v.str())
@@ -526,7 +567,7 @@ fn Dump.expr(&mut self, id: Int) {
       self.w("(match ")
       self.expr(scrut)
       self.w(" [")
-      for i in 0..arms.len() {
+      for i in 0..arms.len() invariant self.out.len() >= len0 {
         self.sep(i)
         let a = arms[i]
         self.w("(arm ")
@@ -541,7 +582,7 @@ fn Dump.expr(&mut self, id: Int) {
     }
     Block(stmts) => {
       self.w("(block [")
-      for i in 0..stmts.len() {
+      for i in 0..stmts.len() invariant self.out.len() >= len0 {
         self.sep(i)
         self.stmt(stmts[i])
       }
@@ -551,7 +592,7 @@ fn Dump.expr(&mut self, id: Int) {
       self.w("(struct-lit ")
       self.ty(ty)
       self.w(" [")
-      for i in 0..fields.len() {
+      for i in 0..fields.len() invariant self.out.len() >= len0 {
         self.sep(i)
         self.w("(init " + fmt_name(fields[i].name) + " ")
         self.expr(fields[i].value)

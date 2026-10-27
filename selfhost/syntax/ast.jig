@@ -111,6 +111,7 @@ pub struct VariantDecl {
 pub struct UnitFactor {
   pub name: Name
   pub exp: Int
+  invariant exp >= -127 && exp <= 127
 }
 
 pub struct TypeExpr {

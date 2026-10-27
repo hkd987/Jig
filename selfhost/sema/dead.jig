@@ -335,7 +335,9 @@ fn Sema.check_dead_code(&mut self) {
 }
 
 /// Code of the project itself: not the standard library or a required module.
-fn Sema.is_user(self, pkg: Int) -> Bool {
+fn Sema.is_user(self, pkg: Int) -> Bool
+  requires pkg >= 0 && pkg < self.pkgs.len()
+{
   return !self.pkgs[pkg].is_std && !self.pkgs[pkg].external
 }
 
@@ -343,7 +345,14 @@ fn Sema.exported(self, pkg: Int, is_pub: Bool) -> Bool {
   return self.is_user(pkg) && pkg != self.root && is_pub
 }
 
-fn Sema.item_name_span(self, pkg: Int, file: Int, item: Int) -> syntax.Span {
+fn Sema.item_name_span(self, pkg: Int, file: Int, item: Int) -> syntax.Span
+  requires pkg >= 0 &&
+    pkg < self.pkgs.len() &&
+    file >= 0 &&
+    file < self.pkgs[pkg].files.len() &&
+    item >= 0 &&
+    item < self.pkgs[pkg].files[file].ast.items.len()
+{
   return self.pkgs[pkg].files[file].ast.items[item].name.span
 }
 

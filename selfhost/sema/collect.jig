@@ -332,7 +332,9 @@ fn Sema.def_is_pub(self, def: Def) -> Bool {
 }
 
 /// Look up a name in a package's scope, honoring visibility from package `from`.
-fn Sema.lookup_in(&mut self, target: Int, name: syntax.Name, from: Int) -> Option<Def> {
+fn Sema.lookup_in(&mut self, target: Int, name: syntax.Name, from: Int) -> Option<Def>
+  requires target >= 0 && target < self.pkgs.len()
+{
   let def = match self.pkgs[target].scope.get(name.text) {
     Some(d) => d
     None => {
@@ -363,7 +365,9 @@ fn Sema.lookup_name(self, pkg: Int, name: Str) -> Option<Def> {
   return None
 }
 
-fn Sema.ast_of(self, pkg: Int, file: Int) -> syntax.Ast {
+fn Sema.ast_of(self, pkg: Int, file: Int) -> syntax.Ast
+  requires pkg >= 0 && pkg < self.pkgs.len() && file >= 0 && file < self.pkgs[pkg].files.len()
+{
   return self.pkgs[pkg].files[file].ast
 }
 
@@ -776,7 +780,9 @@ fn Sema.resolve_fields(
   return out
 }
 
-fn Sema.adt_payload_tys(self, aid: Int) -> List<Int> {
+fn Sema.adt_payload_tys(self, aid: Int) -> List<Int>
+  requires aid >= 0 && aid < self.defs.adts.len()
+{
   let ad = self.defs.adts[aid]
   var out: List<Int> = []
   for f in ad.fields {
@@ -1172,7 +1178,9 @@ fn Sema.const_mismatch(&mut self, span: syntax.Span, ty: Int, found: Str) -> Opt
   return None
 }
 
-fn Sema.check_int_range(&mut self, span: syntax.Span, ty: Int, v: Int) -> Option<ConstVal> {
+fn Sema.check_int_range(&mut self, span: syntax.Span, ty: Int, v: Int) -> Option<ConstVal>
+  requires ty >= 0 && ty < self.tys.kinds.len()
+{
   match self.tys.kinds[ty] {
     Int(k, _) => {
       if v < k.min_int() || v > k.max_int() {

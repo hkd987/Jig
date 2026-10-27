@@ -240,7 +240,9 @@ fn show_model_value(v: Sexp, b: Base) -> Str {
 }
 
 /// A character as Rust's `{:?}` shows it.
-fn rust_char_debug(c: Char) -> Str {
+fn rust_char_debug(c: Char) -> Str
+  ensures result.len() >= 3
+{
   let v = c as Int
   if c == '\'' {
     return "'\\''"
@@ -1279,10 +1281,13 @@ fn report_counts(fs: List<FnReport>) -> (Int, Int, Int, Int) {
 }
 
 /// Functions with contracts, and how many of them prove completely.
-fn Sema.contract_coverage(self, fs: List<FnReport>) -> (Int, Int) {
+fn Sema.contract_coverage(self, fs: List<FnReport>) -> (Int, Int)
+  ensures result.1 >= 0 && result.1 <= result.0 && result.0 <= fs.len()
+{
   var with = 0
   var proved = 0
-  for f in fs {
+  for i in 0..fs.len() invariant proved >= 0 && proved <= with && with <= i {
+    let f = fs[i]
     if self.has_contract(f.fid) {
       with += 1
       var all = true
@@ -1297,10 +1302,12 @@ fn Sema.contract_coverage(self, fs: List<FnReport>) -> (Int, Int) {
   return (with, proved)
 }
 
-fn cached_count(fs: List<FnReport>) -> Int {
+fn cached_count(fs: List<FnReport>) -> Int
+  ensures result >= 0 && result <= fs.len()
+{
   var n = 0
-  for f in fs {
-    if f.cached {
+  for i in 0..fs.len() invariant n >= 0 && n <= i {
+    if fs[i].cached {
       n += 1
     }
   }
@@ -1563,7 +1570,9 @@ fn report_proven(fs: List<FnReport>) -> Proven {
 }
 
 /// Whether a span lies in a test or in a `*_test.jig` file (code that runs only in tests).
-fn Sema.in_test(self, p: Int, f: Int, sp: syntax.Span) -> Bool {
+fn Sema.in_test(self, p: Int, f: Int, sp: syntax.Span) -> Bool
+  requires p >= 0 && p < self.pkgs.len() && f >= 0 && f < self.pkgs[p].files.len()
+{
   let file = self.pkgs[p].files[f]
   if file.path.ends_with("_test.jig") {
     return true

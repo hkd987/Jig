@@ -612,7 +612,10 @@ fn Gen.prelude_model(
 }
 
 /// The term of argument `i`, if it is a scalar.
-fn arg_term(args: List<VArg>, i: Int) -> Option<Str> {
+fn arg_term(args: List<VArg>, i: Int) -> Option<Str>
+  requires i >= 0
+  ensures result.is_none() || i < args.len()
+{
   if i >= args.len() {
     return None
   }

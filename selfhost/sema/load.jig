@@ -279,7 +279,7 @@ fn resolve_modules(root: Str, top: ModFile) -> (List<Resolved>, List<Str>) effec
   for !pending.is_empty() {
     let (path, version) = pending.pop().unwrap_or(("", ""))
     var at = -1
-    for i in 0..chosen.len() {
+    for i in 0..chosen.len() invariant at >= -1 && at < i {
       if at < 0 && chosen[i].path == path {
         at = i
       }
@@ -341,9 +341,11 @@ fn resolve_modules(root: Str, top: ModFile) -> (List<Resolved>, List<Str>) effec
 
 /// The module an import path belongs to: the longest module path it starts with, and the
 /// rest of the import path.
-fn module_of(mods: List<Resolved>, import_path: Str) -> Option<(Int, Str)> {
+fn module_of(mods: List<Resolved>, import_path: Str) -> Option<(Int, Str)>
+  ensures result.is_none() || !mods.is_empty()
+{
   var best: Option<(Int, Str)> = None
-  for i in 0..mods.len() {
+  for i in 0..mods.len() invariant best.is_none() || (best.unwrap().0 >= 0 && best.unwrap().0 < i) {
     let mp = mods[i].path
     var rest: Option<Str> = None
     if import_path == mp {
@@ -377,11 +379,14 @@ struct Loader {
   edges: List<List<(Int, syntax.Span)>>
   diags: List<syntax.Diag>
   project_root: Option<Str>
+  /// The global offset the next file starts at.
   next_base: Int
   /// Required modules (`jig.mod`), and the module each package belongs to (`None`: the
   /// project itself or the standard library).
   modules: List<Resolved>
   pkg_module: List<Option<Int>>
+
+  invariant next_base >= 0 && next_base <= syntax.MAX_OFFSET
 }
 
 /// What loading produced: the packages, parsed, and the diagnostics.
@@ -507,8 +512,16 @@ fn Loader.new_package(&mut self, path: Str, is_std: Bool, module: Option<Int>) -
 }
 
 /// Register a file of package `p`; a `.jig` file is parsed with the next wave.
-fn Loader.add_file(&mut self, p: Int, path: Str, text: Str) {
+fn Loader.add_file(&mut self, p: Int, path: Str, text: Str)
+  requires p >= 0 && p < self.pkgs.len()
+  ensures self.pkgs.len() == old(self.pkgs.len())
+{
   let base = self.next_base
+  if text.len() >= syntax.MAX_OFFSET - base {
+    // Offsets past 2^62: more source than any machine holds.
+    self.diags.push(diag("E0902", dummy_span(), "cannot read " + path + ": too much source"))
+    return
+  }
   self.next_base = base + text.len() + 1
   let empty = syntax.Ast { items: [], exprs: [], stmts: [], types: [], pats: [], top: [] }
   let f = SrcFile { path: path, base: base, text: text, ast: empty }
@@ -568,7 +581,7 @@ fn Loader.add_dir_package(
     return None
   }
   let p = self.new_package(path, false, module)
-  for n in sources {
+  for n in sources invariant p >= 0 && p < self.pkgs.len() {
     let f = join_path(dir, n)
     match fs.read(f) {
       Ok(text) => self.add_file(p, f, text)

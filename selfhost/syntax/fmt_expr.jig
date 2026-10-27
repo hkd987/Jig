@@ -27,9 +27,11 @@ fn is_call(op: Op) -> Bool {
 }
 
 /// Indices of the ops that start a method segment: a `.name` followed by a call.
-fn segment_starts(ops: List<Op>) -> List<Int> {
+fn segment_starts(ops: List<Op>) -> List<Int>
+  ensures result.len() <= ops.len()
+{
   var v: List<Int> = []
-  for i in 0..ops.len() {
+  for i in 0..ops.len() invariant v.len() <= i {
     match ops[i] {
       Field(_) => {
         var j = i + 1
@@ -58,7 +60,9 @@ fn Printer.flat(self, e: Int) -> Option<Str> {
   return if self.flat_into(e, &mut o) { Some(o) } else { None }
 }
 
-fn Printer.flat_into(self, e: Int, o: &mut Str) -> Bool {
+fn Printer.flat_into(self, e: Int, o: &mut Str) -> Bool
+  ensures o.len() >= old(o.len())
+{
   if o.len() > FLAT_LIMIT {
     return false
   }
@@ -274,7 +278,9 @@ fn Printer.flat_into(self, e: Int, o: &mut Str) -> Bool {
 }
 
 /// A binary expression, iterating down its left spine.
-fn Printer.flat_binary_into(self, e: Int, o: &mut Str) -> Bool {
+fn Printer.flat_binary_into(self, e: Int, o: &mut Str) -> Bool
+  ensures o.len() >= old(o.len())
+{
   var spine: List<(BinOp, Int)> = []
   var cur = e
   for {
@@ -303,8 +309,11 @@ fn Printer.flat_binary_into(self, e: Int, o: &mut Str) -> Bool {
   return true
 }
 
-fn Printer.flat_list_into(self, xs: List<Int>, o: &mut Str) -> Bool {
-  for i in 0..xs.len() {
+fn Printer.flat_list_into(self, xs: List<Int>, o: &mut Str) -> Bool
+  ensures o.len() >= old(o.len())
+{
+  let start = o.len()
+  for i in 0..xs.len() invariant o.len() >= start {
     if i > 0 {
       o += ", "
     }
@@ -321,8 +330,11 @@ fn Printer.flat_joined(self, xs: List<Int>) -> Option<Str> {
   return if self.flat_list_into(xs, &mut o) { Some(o) } else { None }
 }
 
-fn Printer.flat_params_into(self, params: List<Param>, o: &mut Str) -> Bool {
-  for i in 0..params.len() {
+fn Printer.flat_params_into(self, params: List<Param>, o: &mut Str) -> Bool
+  ensures o.len() >= old(o.len())
+{
+  let start = o.len()
+  for i in 0..params.len() invariant o.len() >= start {
     if i > 0 {
       o += ", "
     }
@@ -375,7 +387,9 @@ fn Printer.only_expr(self, b: Int) -> Int {
 }
 
 /// `{}` or `{ e }`.
-fn Printer.flat_block_into(self, b: Int, o: &mut Str) -> Bool {
+fn Printer.flat_block_into(self, b: Int, o: &mut Str) -> Bool
+  ensures o.len() >= old(o.len())
+{
   let k = self.inline_kind(b)
   if k == 0 {
     o += "{}"
@@ -619,7 +633,9 @@ fn Printer.elem_span(self, el: Elem) -> (Int, Int) {
   }
 }
 
-fn Printer.elem_flat_into(self, el: Elem, o: &mut Str) -> Bool {
+fn Printer.elem_flat_into(self, el: Elem, o: &mut Str) -> Bool
+  ensures o.len() >= old(o.len())
+{
   match el {
     Expr(x) => {
       return self.flat_into(x, &mut o)
@@ -668,7 +684,9 @@ fn Printer.elem_render(self, el: Elem, ind: Int, col: Int, trail: Int) -> Str {
 }
 
 /// `name`, `name: T` or `name: &mut T`.
-fn Printer.param_head_into(self, p: Param, o: &mut Str) {
+fn Printer.param_head_into(self, p: Param, o: &mut Str)
+  ensures o.len() >= old(o.len())
+{
   o += p.name.text
   match p.ty {
     Some(t) => {
@@ -800,7 +818,9 @@ fn Printer.ops_inline(self, ops: List<Op>, ind: Int, col: Int, trail: Int) -> St
   return s
 }
 
-fn Printer.op_flat_into(self, op: Op, o: &mut Str) -> Bool {
+fn Printer.op_flat_into(self, op: Op, o: &mut Str) -> Bool
+  ensures o.len() >= old(o.len())
+{
   match op {
     Field(n) => o += "." + n.text
     TupleField(k) => o += "." + k.str()
@@ -1173,7 +1193,9 @@ fn Printer.ty(self, t: Int) -> Str {
   return o
 }
 
-fn Printer.ty_into(self, t: Int, o: &mut Str) {
+fn Printer.ty_into(self, t: Int, o: &mut Str)
+  ensures o.len() >= old(o.len())
+{
   match self.ast.types[t].kind {
     Named(pkg, name, args, units) => {
       match pkg {
@@ -1228,8 +1250,11 @@ fn Printer.ty_into(self, t: Int, o: &mut Str) {
   }
 }
 
-fn Printer.types_into(self, ts: List<Int>, o: &mut Str) {
-  for i in 0..ts.len() {
+fn Printer.types_into(self, ts: List<Int>, o: &mut Str)
+  ensures o.len() >= old(o.len())
+{
+  let start = o.len()
+  for i in 0..ts.len() invariant o.len() >= start {
     if i > 0 {
       o += ", "
     }
@@ -1239,7 +1264,7 @@ fn Printer.types_into(self, ts: List<Int>, o: &mut Str) {
 
 /// `<A, B>`, or nothing for no arguments.
 fn Printer.type_args_into(self, args: List<Int>, o: &mut Str)
-  ensures args.is_empty() || !o.is_empty()
+  ensures args.is_empty() || !o.is_empty(), o.len() >= old(o.len())
 {
   if !args.is_empty() {
     o += "<"
@@ -1249,11 +1274,14 @@ fn Printer.type_args_into(self, args: List<Int>, o: &mut Str)
 }
 
 /// A unit expression: `m`, `m/s^2`, `kg*m`, `1/s`.
-fn Printer.unit_into(self, factors: List<UnitFactor>, o: &mut Str) {
+fn Printer.unit_into(self, factors: List<UnitFactor>, o: &mut Str)
+  ensures o.len() >= old(o.len())
+{
+  let start = o.len()
   if factors.is_empty() {
     o += "1"
   }
-  for i in 0..factors.len() {
+  for i in 0..factors.len() invariant o.len() >= start {
     let f = factors[i]
     if i == 0 && f.exp < 0 {
       o += "1/"
@@ -1269,9 +1297,12 @@ fn Printer.unit_into(self, factors: List<UnitFactor>, o: &mut Str) {
 }
 
 /// `effects {io, fs}`.
-fn Printer.effects_into(self, es: List<Name>, o: &mut Str) {
+fn Printer.effects_into(self, es: List<Name>, o: &mut Str)
+  ensures o.len() >= old(o.len())
+{
+  let start = o.len()
   o += "effects {"
-  for i in 0..es.len() {
+  for i in 0..es.len() invariant o.len() >= start {
     if i > 0 {
       o += ", "
     }
@@ -1281,17 +1312,20 @@ fn Printer.effects_into(self, es: List<Name>, o: &mut Str) {
 }
 
 /// `<T: Ord + Hash, U>`, or nothing.
-fn Printer.generics_into(self, gs: List<GenericParam>, o: &mut Str) {
+fn Printer.generics_into(self, gs: List<GenericParam>, o: &mut Str)
+  ensures o.len() >= old(o.len())
+{
+  let start = o.len()
   if gs.is_empty() {
     return
   }
   o += "<"
-  for i in 0..gs.len() {
+  for i in 0..gs.len() invariant o.len() >= start {
     if i > 0 {
       o += ", "
     }
     o += gs[i].name.text
-    for j in 0..gs[i].bounds.len() {
+    for j in 0..gs[i].bounds.len() invariant o.len() >= start {
       o += if j == 0 { ": " } else { " + " }
       self.ty_into(gs[i].bounds[j], &mut o)
     }
@@ -1307,7 +1341,10 @@ fn Printer.pat(self, p: Int) -> Str {
   return o
 }
 
-fn Printer.pat_into(self, p: Int, o: &mut Str) {
+fn Printer.pat_into(self, p: Int, o: &mut Str)
+  requires p >= 0 && p < self.ast.pats.len()
+  ensures o.len() >= old(o.len())
+{
   match self.ast.pats[p].kind {
     Wild => o += "_"
     Bind(s) => o += s
@@ -1334,8 +1371,11 @@ fn Printer.pat_into(self, p: Int, o: &mut Str) {
   }
 }
 
-fn Printer.pats_into(self, ps: List<Int>, sep: Str, o: &mut Str) {
-  for i in 0..ps.len() {
+fn Printer.pats_into(self, ps: List<Int>, sep: Str, o: &mut Str)
+  ensures o.len() >= old(o.len())
+{
+  let start = o.len()
+  for i in 0..ps.len() invariant o.len() >= start {
     if i > 0 {
       o += sep
     }

@@ -83,7 +83,9 @@ fn Sema.check_block_value(&mut self, block: Int, expected: Option<Int>) -> Int {
   return value
 }
 
-fn Sema.unreachable_check(&mut self, s: Int, reported: &mut Bool) {
+fn Sema.unreachable_check(&mut self, s: Int, reported: &mut Bool)
+  requires s >= 0 && s < self.ast.stmts.len()
+{
   if self.diverges && !reported {
     reported = true
     self.push(
@@ -358,7 +360,10 @@ fn Sema.check_iterable(&mut self, iter: Int) -> Int {
   }
 }
 
-fn Sema.errors_like(self, n: Int) -> List<Int> {
+fn Sema.errors_like(self, n: Int) -> List<Int>
+  requires n >= 0
+  ensures result.len() == n
+{
   return [self.tys.error].repeat(n)
 }
 

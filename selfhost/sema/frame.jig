@@ -66,7 +66,7 @@ fn frame_add(f: MutFrame, path: List<Int>) -> MutFrame {
   }
   // Sorted insertion.
   var i = 0
-  for i < out.len() && cmp_path(out[i], path) <= 0 {
+  for i < out.len() && cmp_path(out[i], path) <= 0 invariant i >= 0 && i <= out.len() {
     i += 1
   }
   out.insert(i, path)

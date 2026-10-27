@@ -619,7 +619,9 @@ fn int_bounds(k: IntTy) -> (Str, Str)
 }
 
 /// Why a placeholder's text is not a value of type `t`, or "" if it is.
-fn Sema.convert_error(self, text: Str, t: Int) -> Str {
+fn Sema.convert_error(self, text: Str, t: Int) -> Str
+  requires t >= 0 && t < self.tys.kinds.len()
+{
   match self.tys.kinds[t] {
     Str => {
       return if is_quoted(text) { "" } else { "`" + text + "` is not a quoted string" }

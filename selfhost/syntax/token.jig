@@ -94,7 +94,9 @@ struct Token {
   invariant lo <= hi
 }
 
-fn keyword(s: Str) -> Option<Kind> {
+fn keyword(s: Str) -> Option<Kind>
+  ensures result.is_none() || s.len() >= 2
+{
   return match s {
     "as" => Some(Kind.As)
     "break" => Some(Kind.Break)

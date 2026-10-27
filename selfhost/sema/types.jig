@@ -356,7 +356,9 @@ fn TyCtx.unit_str(self, u: Int) -> Str {
 }
 
 /// The same numeric type with another unit.
-fn TyCtx.with_unit(&mut self, t: Int, u: Int) -> Int {
+fn TyCtx.with_unit(&mut self, t: Int, u: Int) -> Int
+  requires t >= 0 && t < self.kinds.len()
+{
   return match self.kinds[t] {
     Int(k, _) => self.intern(TyKind.Int(k, u))
     Float(_) => self.intern(TyKind.Float(u))
@@ -365,7 +367,9 @@ fn TyCtx.with_unit(&mut self, t: Int, u: Int) -> Int {
 }
 
 /// The unit of a numeric type (-1 for other types).
-fn TyCtx.unit_of(self, t: Int) -> Int {
+fn TyCtx.unit_of(self, t: Int) -> Int
+  requires t >= 0 && t < self.kinds.len()
+{
   return match self.kinds[t] {
     Int(_, u) => u
     Float(u) => u
@@ -375,21 +379,27 @@ fn TyCtx.unit_of(self, t: Int) -> Int {
 
 // ---- queries ----
 
-fn TyCtx.is_numeric(self, t: Int) -> Bool {
+fn TyCtx.is_numeric(self, t: Int) -> Bool
+  requires t >= 0 && t < self.kinds.len()
+{
   return match self.kinds[t] {
     Int(_, _) | Float(_) => true
     _ => false
   }
 }
 
-fn TyCtx.is_int(self, t: Int) -> Bool {
+fn TyCtx.is_int(self, t: Int) -> Bool
+  requires t >= 0 && t < self.kinds.len()
+{
   return match self.kinds[t] {
     Int(_, _) => true
     _ => false
   }
 }
 
-fn TyCtx.is_float(self, t: Int) -> Bool {
+fn TyCtx.is_float(self, t: Int) -> Bool
+  requires t >= 0 && t < self.kinds.len()
+{
   return match self.kinds[t] {
     Float(_) => true
     _ => false

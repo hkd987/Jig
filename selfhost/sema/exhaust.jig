@@ -56,10 +56,12 @@ fn Sema.exhaust(&mut self, scrut: Int, arms: List<(Int, Bool)>) -> Report {
   return Report { missing: missing, unreachable: unreachable }
 }
 
-fn Sema.lower_pats(self, ps: List<Int>) -> List<P> {
+fn Sema.lower_pats(self, ps: List<Int>) -> List<P>
+  ensures result.len() == ps.len()
+{
   var out: List<P> = []
-  for a in ps {
-    out.push(self.lower_pat(a))
+  for i in 0..ps.len() invariant out.len() == i {
+    out.push(self.lower_pat(ps[i]))
   }
   return out
 }
@@ -120,7 +122,10 @@ fn Sema.ctor_field_tys(&mut self, c: Ctor, t: Int) -> List<Int> {
   }
 }
 
-fn wilds(n: Int) -> List<P> {
+fn wilds(n: Int) -> List<P>
+  requires n >= 0
+  ensures result.len() == n
+{
   return [P.Wild].repeat(n)
 }
 
@@ -129,7 +134,9 @@ fn rest_of(xs: List<P>) -> List<P> {
 }
 
 /// Rows whose first column matches constructor `c`, with that column replaced by its fields.
-fn specialize(rows: List<List<P>>, c: Ctor, arity: Int) -> List<List<P>> {
+fn specialize(rows: List<List<P>>, c: Ctor, arity: Int) -> List<List<P>>
+  requires arity >= 0
+{
   var out: List<List<P>> = []
   for row in rows {
     specialize_row(row, c, arity, &mut out)
@@ -137,7 +144,9 @@ fn specialize(rows: List<List<P>>, c: Ctor, arity: Int) -> List<List<P>> {
   return out
 }
 
-fn specialize_row(row: List<P>, c: Ctor, arity: Int, out: &mut List<List<P>>) {
+fn specialize_row(row: List<P>, c: Ctor, arity: Int, out: &mut List<List<P>>)
+  requires arity >= 0
+{
   match row[0] {
     Wild => {
       var r = wilds(arity)
@@ -193,7 +202,10 @@ fn default_row(row: List<P>, out: &mut List<List<P>>) {
   }
 }
 
-fn rebuild(c: Ctor, arity: Int, w: List<P>) -> List<P> {
+fn rebuild(c: Ctor, arity: Int, w: List<P>) -> List<P>
+  requires arity >= 0
+  ensures result.len() == w.len() - min(arity, w.len()) + 1
+{
   let k = if arity < w.len() { arity } else { w.len() }
   var out = [P.Ctor(c, w[0..k])]
   out.extend(w[k..w.len()])

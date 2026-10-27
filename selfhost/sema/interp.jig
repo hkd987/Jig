@@ -759,7 +759,9 @@ fn Interp.rvalue(
 
 // ---------- arithmetic ----------
 
-fn Interp.int_kind(self, ty: Int) -> IntTy {
+fn Interp.int_kind(self, ty: Int) -> IntTy
+  requires ty >= 0 && ty < self.lw.s.tys.kinds.len()
+{
   return match self.lw.s.tys.kinds[ty] {
     Int(k, _) => k
     _ => IntTy.I64
@@ -778,7 +780,10 @@ fn wide_of(v: Value) -> (Bool, U64) {
 }
 
 /// The magnitude of a negative Int.
-fn neg_mag(i: Int) -> U64 {
+fn neg_mag(i: Int) -> U64
+  requires i < 0
+  ensures result > 0
+{
   return if i == -9223372036854775807 - 1 { 9223372036854775808 } else { (0 - i) as U64 }
 }
 
@@ -1229,7 +1234,9 @@ fn trunc(f: Float) -> Float {
   return if f < 0.0 { f.ceil() } else { f.floor() }
 }
 
-fn Interp.cast(self, x: Value, to: Int, span: syntax.Span) -> Result<Value, Trap> {
+fn Interp.cast(self, x: Value, to: Int, span: syntax.Span) -> Result<Value, Trap>
+  requires to >= 0 && to < self.lw.s.tys.kinds.len()
+{
   match self.lw.s.tys.kinds[to] {
     Float(_) => {
       return Ok(

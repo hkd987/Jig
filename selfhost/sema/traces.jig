@@ -27,7 +27,9 @@ fn traces_enabled(dir: Str) -> Bool effects {fs} {
 }
 
 /// A stable name for a project that does not reveal its path (FNV-1a).
-fn project_id(root: Str) -> Str {
+fn project_id(root: Str) -> Str
+  ensures result.len() == 16
+{
   var h: U64 = 14695981039346656037
   for b in root.bytes() {
     h = h ^ (b as U64)
@@ -49,7 +51,9 @@ fn append_trace(dir: Str, root: Str, fields: List<(Str, Json)>) effects {fs, ffi
 }
 
 /// `file` relative to `root`.
-fn rel_path(root: Str, file: Str) -> Str {
+fn rel_path(root: Str, file: Str) -> Str
+  ensures result.len() <= file.len()
+{
   let prefix = if root.ends_with("/") { root } else { root + "/" }
   return if file.starts_with(prefix) { file[prefix.len()..file.len()] } else { file }
 }

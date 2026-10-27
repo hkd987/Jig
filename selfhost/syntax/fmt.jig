@@ -119,7 +119,7 @@ fn tidy(s: Str) -> Str {
     out += "\n"
   }
   var end = out.len()
-  for end > 0 && out[end - 1] == 10 {
+  for end > 0 && out[end - 1] == 10 invariant end >= 0 && end <= out.len() {
     end -= 1
   }
   if end == 0 {
@@ -145,7 +145,9 @@ fn is_space_char(c: Char) -> Bool {
 }
 
 /// Bytes in `c`'s UTF-8 encoding.
-fn char_len(c: Char) -> Int {
+fn char_len(c: Char) -> Int
+  ensures result >= 1 && result <= 4
+{
   let v = c as Int
   return if v < 128 { 1 } else if v < 2048 { 2 } else if v < 65536 { 3 } else { 4 }
 }
@@ -163,9 +165,11 @@ fn trim_end_space(s: Str) -> Str {
 }
 
 /// The text after the last line break of `s` (all of it if there is none).
-fn last_line(s: Str) -> Str {
+fn last_line(s: Str) -> Str
+  ensures result.len() <= s.len()
+{
   var i = s.len()
-  for i > 0 {
+  for i > 0 invariant i >= 0 && i <= s.len() {
     i -= 1
     if s[i] == 10 {
       return s[i + 1..s.len()]
@@ -185,9 +189,11 @@ fn comment_texts(src: Str) -> List<Str> {
 }
 
 /// The width in columns of a single-line string.
-fn width(s: Str) -> Int {
+fn width(s: Str) -> Int
+  ensures result >= 0 && result <= s.len()
+{
   var n = 0
-  for i in 0..s.len() {
+  for i in 0..s.len() invariant n >= 0 && n <= i {
     let b = s[i] as Int
     if b < 128 || b >= 192 {
       n += 1
@@ -270,7 +276,9 @@ fn push_str_lit(o: &mut Str, s: Str)
   o += "\"" + escape(s, '"') + "\""
 }
 
-fn push_char_lit(o: &mut Str, c: Int) {
+fn push_char_lit(o: &mut Str, c: Int)
+  ensures o.len() >= old(o.len()) + 2
+{
   let valid = c >= 0 && c <= 1114111 && (c < 55296 || c > 57343)
   let ch = if valid { c as Char } else { '�' }
   o += "'" + escape(Str.from_chars([ch]), '\'') + "'"
@@ -295,7 +303,9 @@ fn Printer.span_text(self, s: Span) -> Str
   return self.text(s.lo, s.hi)
 }
 
-fn Printer.comment(self, ci: Int) -> Str {
+fn Printer.comment(self, ci: Int) -> Str
+  requires ci >= 0 && ci < self.comments.len()
+{
   let c = self.comments[ci]
   return self.text(c.lo, c.hi)
 }
@@ -640,7 +650,9 @@ fn Printer.walk_params(&mut self, ps: List<Param>) {
   }
 }
 
-fn Printer.walk_stmt(&mut self, s: Int) {
+fn Printer.walk_stmt(&mut self, s: Int)
+  requires s >= 0 && s < self.ast.stmts.len()
+{
   match self.ast.stmts[s].kind {
     Let(_, _, init, _) => self.walk_expr(init)
     Assign(target, _, value) => {

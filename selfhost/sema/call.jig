@@ -23,10 +23,12 @@ fn Sema.resolve_type_expr_infer(&mut self, te: Int) -> Int {
   return self.resolve_type_expr_mode(te, true)
 }
 
-fn Sema.resolve_type_exprs(&mut self, ids: List<Int>) -> List<Int> {
+fn Sema.resolve_type_exprs(&mut self, ids: List<Int>) -> List<Int>
+  ensures result.len() == ids.len()
+{
   var out: List<Int> = []
-  for x in ids {
-    out.push(self.resolve_type_expr(x))
+  for i in 0..ids.len() invariant out.len() == i {
+    out.push(self.resolve_type_expr(ids[i]))
   }
   return out
 }

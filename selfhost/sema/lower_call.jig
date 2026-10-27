@@ -373,7 +373,16 @@ fn Lw.check_alias(&mut self, al: Int, value: Place) {
 
 /// Resolve names against another file's AST and tables (for predicates written there);
 /// returns the current ones, to restore.
-fn Lw.enter_file(&mut self, pkg: Int, file: Int) -> (syntax.Ast, Tables) {
+fn Lw.enter_file(&mut self, pkg: Int, file: Int) -> (syntax.Ast, Tables)
+  requires pkg >= 0 &&
+    pkg < self.s.pkgs.len() &&
+    pkg >= 0 &&
+    pkg < self.s.tables.len() &&
+    file >= 0 &&
+    file < self.s.tables[pkg].len() &&
+    file >= 0 &&
+    file < self.s.pkgs[pkg].files.len()
+{
   let saved = (self.fb.ast, self.fb.tab)
   self.fb.ast = self.s.pkgs[pkg].files[file].ast
   self.fb.tab = self.s.tables[pkg][file]
@@ -713,7 +722,9 @@ fn Lw.lower_quant(
 
 // ---------- calls ----------
 
-fn Lw.callee_of(self, m: Int) -> Callee {
+fn Lw.callee_of(self, m: Int) -> Callee
+  requires m >= 0 && m < self.mir.fns.len()
+{
   return match self.mir.fns[m].intrinsic {
     Some(i) => Callee.Intrinsic(i)
     None => Callee.Fn(m)
@@ -721,14 +732,18 @@ fn Lw.callee_of(self, m: Int) -> Callee {
 }
 
 /// The receiver argument of a method call.
-fn Lw.recv_arg(&mut self, base: Int, f: Int) -> Arg {
+fn Lw.recv_arg(&mut self, base: Int, f: Int) -> Arg
+  requires f >= 0 && f < self.s.defs.fns.len()
+{
   if self.s.defs.fns[f].self_mode == Some(Mode.MutRef) {
     return Arg.MutRef(self.place(base))
   }
   return Arg.Value(self.expr(base))
 }
 
-fn Lw.param_modes(self, f: Int) -> List<Mode> {
+fn Lw.param_modes(self, f: Int) -> List<Mode>
+  requires f >= 0 && f < self.s.defs.fns.len()
+{
   var modes: List<Mode> = []
   for p in self.s.defs.fns[f].params {
     modes.push(p.mode)

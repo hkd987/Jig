@@ -524,7 +524,12 @@ fn Sema.instantiate(
   return inst
 }
 
-fn Sema.variant_field_tys(self, adt: Int, v: Int) -> List<Int> {
+fn Sema.variant_field_tys(self, adt: Int, v: Int) -> List<Int>
+  requires adt >= 0 &&
+    adt < self.defs.adts.len() &&
+    v >= 0 &&
+    v < self.defs.adts[adt].variants.len()
+{
   var out: List<Int> = []
   for f in self.defs.adts[adt].variants[v].fields {
     out.push(f.ty)

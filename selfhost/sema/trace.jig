@@ -160,7 +160,8 @@ fn Sema.trace_query(self, q: TraceQuery, cwd: Str) -> (Str, Str) {
   }
   var uncovered: List<Int> = []
   var reachable = 0
-  for f in t.all {
+  for k in 0..t.all.len() invariant reachable >= 0 && reachable <= k {
+    let f = t.all[k]
     if t.from_entry.contains(f) {
       reachable += 1
       if !covered.contains(f) {
@@ -228,7 +229,9 @@ fn Sema.trace_query(self, q: TraceQuery, cwd: Str) -> (Str, Str) {
     }
     Scenario(name) => {
       var i = 0
-      for i < t.scenarios.len() && !t.scenarios[i].0.contains(name) {
+      for i < t.scenarios.len() && !t.scenarios[i].0.contains(name)
+        invariant i >= 0 && i <= t.scenarios.len()
+      {
         i += 1
       }
       if i == t.scenarios.len() {

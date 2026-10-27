@@ -38,6 +38,7 @@ struct JsonParser {
   s: Str
   b: List<U8>
   i: Int
+  invariant b.len() == s.len() && i >= 0 && i <= b.len()
 }
 
 /// Parse a whole JSON text, or say what is wrong where.
@@ -52,9 +53,14 @@ fn parse_json_result(src: Str) -> Result<Json, Str> {
   return Ok(v)
 }
 
-fn JsonParser.ws(&mut self) {
+fn JsonParser.ws(&mut self)
+  ensures self.i >= old(self.i)
+{
+  let start = self.i
   for self.i < self.b.len() &&
-    (self.b[self.i] == 32 || self.b[self.i] == 9 || self.b[self.i] == 10 || self.b[self.i] == 13) {
+    (self.b[self.i] == 32 || self.b[self.i] == 9 || self.b[self.i] == 10 || self.b[self.i] == 13)
+    invariant self.i >= start && self.i <= self.b.len()
+  {
     self.i += 1
   }
 }
@@ -65,22 +71,29 @@ fn JsonParser.err(self, msg: Str) -> Str
   return msg + " at offset " + self.i.str()
 }
 
-fn JsonParser.at(self, c: U8) -> Bool {
+fn JsonParser.at(self, c: U8) -> Bool
+  ensures !result || self.i < self.b.len()
+{
   return self.i < self.b.len() && self.b[self.i] == c
 }
 
-fn JsonParser.lit(&mut self, word: Str, v: Json) -> Result<Json, Str> {
-  if self.s[self.i..self.s.len()].starts_with(word) {
+fn JsonParser.lit(&mut self, word: Str, v: Json) -> Result<Json, Str>
+  ensures self.i >= old(self.i)
+{
+  if word.len() <= self.s.len() - self.i && self.s[self.i..self.s.len()].starts_with(word) {
     self.i += word.len()
     return Ok(v)
   }
   return Err(self.err("invalid literal"))
 }
 
-fn JsonParser.value(&mut self) -> Result<Json, Str> {
+fn JsonParser.value(&mut self) -> Result<Json, Str>
+  ensures self.i >= old(self.i)
+{
   if self.i >= self.b.len() {
     return Err(self.err("unexpected end of input"))
   }
+  let i0 = self.i
   let c = self.b[self.i]
   if c == 110 {
     return self.lit("null", Json.Null)
@@ -102,7 +115,7 @@ fn JsonParser.value(&mut self) -> Result<Json, Str> {
       self.i += 1
       return Ok(Json.Arr(items))
     }
-    for {
+    for invariant self.i > i0 && self.i <= self.b.len() {
       self.ws()
       items.push(self.value()?)
       self.ws()
@@ -124,7 +137,7 @@ fn JsonParser.value(&mut self) -> Result<Json, Str> {
       self.i += 1
       return Ok(Json.Obj(fields))
     }
-    for {
+    for invariant self.i > i0 && self.i <= self.b.len() {
       self.ws()
       if !self.at(34) {
         return Err(self.err("expected object key"))
@@ -152,7 +165,9 @@ fn JsonParser.value(&mut self) -> Result<Json, Str> {
   if c == 45 || (c >= 48 && c <= 57) {
     let start = self.i
     self.i += 1
-    for self.i < self.b.len() && is_number_byte(self.b[self.i]) {
+    for self.i < self.b.len() && is_number_byte(self.b[self.i])
+      invariant self.i > start && self.i <= self.b.len()
+    {
       self.i += 1
     }
     return match number_value(self.s[start..self.i]) {
@@ -222,12 +237,25 @@ fn number_value(text: Str) -> Option<Json>
   return Some(Json.Real(text.to_float()?))
 }
 
-fn JsonParser.hex4(&mut self) -> Result<Int, Str> {
-  if self.i + 4 > self.b.len() {
+fn JsonParser.hex4(&mut self) -> Result<Int, Str>
+  ensures self.i >= old(self.i)
+  ensures result.is_err() || (result.unwrap() >= 0 && result.unwrap() < 65536)
+{
+  if 4 > self.b.len() - self.i {
     return Err(self.err("truncated escape"))
   }
+  let i0 = self.i
   var v = 0
-  for k in 0..4 {
+  // `v` has `k` hex digits.
+  for k in 0..4
+    invariant v >= 0 &&
+      v < 65536 &&
+      (k > 0 || v == 0) &&
+      (k > 1 || v < 16) &&
+      (k > 2 || v < 256) &&
+      (k > 3 || v < 4096) &&
+      self.i == i0
+  {
     let h = hex_val(self.b[self.i + k] as Char)
     if h < 0 {
       self.i += 4
@@ -239,13 +267,19 @@ fn JsonParser.hex4(&mut self) -> Result<Int, Str> {
   return Ok(v)
 }
 
-fn JsonParser.string(&mut self) -> Result<Str, Str> {
+fn JsonParser.string(&mut self) -> Result<Str, Str>
+  requires self.i < self.b.len()
+  ensures self.i >= old(self.i)
+{
+  let i0 = self.i
   // The opening quote.
   self.i += 1
   var out = ""
-  for {
+  for invariant self.i > i0 && self.i <= self.b.len() {
     let start = self.i
-    for self.i < self.b.len() && self.b[self.i] != 34 && self.b[self.i] != 92 {
+    for self.i < self.b.len() && self.b[self.i] != 34 && self.b[self.i] != 92
+      invariant self.i >= start && self.i <= self.b.len()
+    {
       self.i += 1
     }
     out += self.s[start..self.i]
@@ -267,7 +301,7 @@ fn JsonParser.string(&mut self) -> Result<Str, Str> {
       if cp >= 55296 && cp < 56320 && self.s[self.i..self.s.len()].starts_with("\\u") {
         self.i += 2
         let lo = self.hex4()?
-        cp = 65536 + ((cp - 55296) << 10) + ((lo - 56320) & 1023)
+        cp = 65536 + (cp - 55296) * 1024 + lo % 1024
       }
       // Not a character (a lone surrogate): the replacement character.
       let ch = if (cp >= 55296 && cp < 57344) || cp > 1114111 { 65533 } else { cp }

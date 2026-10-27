@@ -25,7 +25,9 @@ enum BuiltinTy {
   Never
 }
 
-fn builtin_type(s: Str) -> Option<BuiltinTy> {
+fn builtin_type(s: Str) -> Option<BuiltinTy>
+  ensures result.is_none() || s.len() >= 2
+{
   return match s {
     "Int" => Some(BuiltinTy.Int(IntTy.I64))
     "I32" => Some(BuiltinTy.Int(IntTy.I32))
@@ -68,7 +70,9 @@ enum TyKey {
   Set
 }
 
-fn ty_key(tys: TyCtx, t: Int) -> Option<TyKey> {
+fn ty_key(tys: TyCtx, t: Int) -> Option<TyKey>
+  requires t >= 0 && t < tys.kinds.len()
+{
   return match tys.kinds[t] {
     Adt(a, _) => Some(TyKey.Adt(a))
     Int(k, _) => Some(TyKey.Int(k))
@@ -378,6 +382,8 @@ struct SrcFile {
   base: Int
   text: Str
   ast: syntax.Ast
+
+  invariant base >= 0 && base <= syntax.MAX_OFFSET - text.len()
 }
 
 struct Package {

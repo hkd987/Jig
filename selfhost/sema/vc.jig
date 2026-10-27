@@ -849,7 +849,9 @@ fn Gen.variant_tys(&mut self, t: Int) -> List<List<Int>> {
   }
 }
 
-fn Gen.elem_ty(self, t: Int) -> Int {
+fn Gen.elem_ty(self, t: Int) -> Int
+  requires t >= 0 && t < self.s.tys.kinds.len()
+{
   return match self.s.tys.kinds[t] {
     List(e) => e
     _ => self.s.tys.error
@@ -1246,7 +1248,9 @@ fn Gen.pred_named(
   return sv_term(v)
 }
 
-fn Gen.ast_of(self, pkg: Int, file: Int) -> syntax.Ast {
+fn Gen.ast_of(self, pkg: Int, file: Int) -> syntax.Ast
+  requires pkg >= 0 && pkg < self.s.pkgs.len() && file >= 0 && file < self.s.pkgs[pkg].files.len()
+{
   return self.s.pkgs[pkg].files[file].ast
 }
 
@@ -1368,7 +1372,9 @@ fn Gen.assume_type_preds(&mut self, st: &mut St, t: Int, v: Sv, depth: Int) {
   }
 }
 
-fn Gen.oblige_struct_preds(&mut self, fr: VFrame, st: &mut St, t: Int, v: Sv, span: syntax.Span) {
+fn Gen.oblige_struct_preds(&mut self, fr: VFrame, st: &mut St, t: Int, v: Sv, span: syntax.Span)
+  requires t >= 0 && t < self.s.tys.kinds.len()
+{
   let adt = match self.s.tys.kinds[t] {
     Adt(a, _) => a
     _ => {
