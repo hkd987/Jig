@@ -8,8 +8,9 @@ agent-first workflow; the language may still change (see `docs/decisions.md`).
 **Language.** Go-shaped syntax with structs, enums with exhaustive `match`, structural
 interfaces, simple generics, closures, units of measure, refinement types
 (`x: Int where x > 0`), contracts (`requires`, `ensures`, `invariant`, `old`, quantifiers),
-declared effects, `Option` and `Result` with `?`, and mutable value semantics with `&mut`
-only on parameters. No nil, no zero values, no implicit conversions, no GC.
+declared effects, `Option` and `Result` with `?`, mutable value semantics with `&mut`
+only on parameters, and calls to C libraries behind the `ffi` effect. No nil, no zero
+values, no implicit conversions, no GC.
 
 **Verification.** Contracts and safety (overflow, bounds, division) proved per function by
 Z3 against callees' contracts (and, read off their bodies, what they write and, for pure
@@ -41,6 +42,12 @@ trace collection.
 (`bootstrap/suites.py`, in CI without Rust), and for the same input each command prints what
 the Rust compiler that bootstrapped it prints, which is now frozen as the reference the
 tests compare with (D6).
+
+**Examples.** Seventeen small projects under `examples/`, listed in `docs/examples.md`: a
+web server in 30 lines, a key-value store over HTTP, notes in Postgres through libpq, a
+to-do list on files, a stack and a vending machine whose contracts prove, Gherkin-first
+shopping-cart rules, units of measure and parallel prime counting among them. CI checks and
+tests each one with both compilers.
 
 **Not yet.** Fewer agent turns than Rust and TypeScript (the first runs solved every task
 in all three, in 7.3, 6.8 and 6.2 turns on average), contracts on most of the compiler (475

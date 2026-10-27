@@ -1,0 +1,141 @@
+import "std/io"
+import "std/os"
+
+// `postgres add TEXT...`, `postgres list`, `postgres find WORD`: notes kept in a Postgres
+// table, through libpq, Postgres's C client library (linked in `jig.mod`). The connection
+// string comes from DATABASE_URL, or libpq's defaults (PGHOST, PGUSER, ...) without it.
+// Building the SQL and showing the rows are pure, and tested without a database; `exec`
+// is the only function that talks to it.
+
+// libpq's functions, behind the `ffi` effect. A connection and a result are pointers,
+// held as `Int`.
+fn PQconnectdb(conninfo: Str) -> Int effects {ffi}
+fn PQstatus(conn: Int) -> I32 effects {ffi}
+fn PQerrorMessage(conn: Int) -> Str effects {ffi}
+fn PQfinish(conn: Int) effects {ffi}
+fn PQexec(conn: Int, sql: Str) -> Int effects {ffi}
+fn PQresultStatus(res: Int) -> I32 effects {ffi}
+fn PQresultErrorMessage(res: Int) -> Str effects {ffi}
+
+fn PQntuples(res: Int) -> I32
+  ensures result >= 0
+  effects {ffi}
+
+fn PQnfields(res: Int) -> I32
+  ensures result >= 0
+  effects {ffi}
+
+fn PQgetvalue(res: Int, row: I32, col: I32) -> Str effects {ffi}
+fn PQclear(res: Int) effects {ffi}
+
+const CONNECTION_OK: I32 = 0
+const PGRES_COMMAND_OK: I32 = 1
+const PGRES_TUPLES_OK: I32 = 2
+
+/// Run first on every connection: backslashes are plain text in string literals (what
+/// `quote` relies on), notices ("already exists, skipping") stay quiet, and the table is
+/// made on first use.
+const SETUP: Str = "SET standard_conforming_strings TO on; SET client_min_messages TO warning; " +
+  "CREATE TABLE IF NOT EXISTS notes (id serial PRIMARY KEY, body text NOT NULL)"
+
+enum Command {
+  Add(text: Str)
+  List
+  Find(word: Str)
+}
+
+fn parse(args: List<Str>) -> Result<Command, Str> {
+  let usage = "usage: postgres add TEXT... | postgres list | postgres find WORD"
+  if args.len() < 2 {
+    return Err(usage)
+  }
+  let rest = args[2..args.len()].join(" ")
+  return match args[1] {
+    "add" => if rest.trim().is_empty() { Err("nothing to add") } else { Ok(Command.Add(rest)) }
+    "list" => Ok(Command.List)
+    "find" => if rest.is_empty() { Err("find what?") } else { Ok(Command.Find(rest)) }
+    _ => Err(usage)
+  }
+}
+
+/// `s` as an SQL string literal: in single quotes, with each quote in it doubled, so no
+/// text can end the literal early (`SETUP` makes backslashes plain text).
+fn quote(s: Str) -> Str {
+  return "'" + s.replace("'", "''") + "'"
+}
+
+/// The statement that carries out `c`.
+fn sql(c: Command) -> Str {
+  return match c {
+    Add(text) => "INSERT INTO notes (body) VALUES (" + quote(text) + ") RETURNING id"
+    List => "SELECT id, body FROM notes ORDER BY id"
+    Find(word) => "SELECT id, body FROM notes WHERE strpos(body, " +
+      quote(word) +
+      ") > 0 ORDER BY id"
+  }
+}
+
+/// What `c` prints, given the rows its statement returned: one a line, its columns (the
+/// id, then the text) joined by ". ".
+fn show(c: Command, rows: List<List<Str>>) -> Str {
+  var out = ""
+  for row in rows {
+    out += row.join(". ") + "\n"
+  }
+  return match c {
+    Add(_) => "added note " + out
+    List => if out.is_empty() { "no notes\n" } else { out }
+    Find(word) => if out.is_empty() { "no notes with \"" + word + "\"\n" } else { out }
+  }
+}
+
+/// Run one statement on `conn`: its rows, each a list of its columns as text.
+fn exec(conn: Int, statement: Str) -> Result<List<List<Str>>, Str> effects {ffi} {
+  let res = PQexec(conn, statement)
+  let status = PQresultStatus(res)
+  if status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK {
+    let e = PQresultErrorMessage(res)
+    PQclear(res)
+    return Err(if e.is_empty() { PQerrorMessage(conn) } else { e }.trim())
+  }
+  let n = PQntuples(res)
+  let m = PQnfields(res)
+  var rows: List<List<Str>> = []
+  for r in 0..n as Int {
+    var row: List<Str> = []
+    for c in 0..m as Int {
+      row.push(PQgetvalue(res, r as I32, c as I32))
+    }
+    rows.push(row)
+  }
+  PQclear(res)
+  return Ok(rows)
+}
+
+fn main() effects {io, env, ffi} {
+  let cmd = match parse(os.args()) {
+    Ok(c) => c
+    Err(e) => {
+      io.eprintln(e)
+      os.exit(2)
+    }
+  }
+  let conn = PQconnectdb(os.env("DATABASE_URL").unwrap_or(""))
+  if PQstatus(conn) != CONNECTION_OK {
+    io.eprintln(PQerrorMessage(conn).trim())
+    PQfinish(conn)
+    os.exit(1)
+  }
+  let out = match exec(conn, SETUP) {
+    Ok(_) => exec(conn, sql(cmd))
+    Err(e) => Err(e)
+  }
+  PQfinish(conn)
+  match out {
+    Ok(rows) => io.print(show(cmd, rows))
+    Err(e) => {
+      io.eprintln(e)
+      os.exit(1)
+    }
+  }
+}

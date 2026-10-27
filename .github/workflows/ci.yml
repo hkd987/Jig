@@ -18,6 +18,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install the pinned Z3 solver
         run: pip install --user z3-solver==5.3.2.0 && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Install libpq (examples/postgres links it)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libpq-dev
       - name: Build
         run: cargo build --locked
       - name: Test
@@ -56,6 +58,37 @@ jobs:
         run: pip install --user z3-solver==5.3.2.0 && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: The test suites, with jigc as the only compiler (${{ matrix.cc }})
         run: CC=${{ matrix.cc }} python3 bootstrap/suites.py
+
+  postgres:
+    # examples/postgres against a real database, with the jig that bootstrap/install.sh
+    # installs: on the interpreter and built natively.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install libpq and jig
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq libpq-dev
+          sh bootstrap/install.sh "$HOME/.local" && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Notes in and out, quotes and backslashes kept as text
+        run: |
+          set -e
+          ex=examples/postgres
+          test "$(jig run $ex -- add "it's done")" = "added note 1"
+          test "$(jig run --native $ex -- add "x'); DROP TABLE notes; --")" = "added note 2"
+          test "$(jig run $ex -- add "\\' OR true --")" = "added note 3"
+          test "$(jig run --native $ex -- find "\\'")" = "3. \\' OR true --"
+          test "$(jig run --native $ex -- find "it's")" = "1. it's done"
+          test "$(jig run $ex -- list | wc -l)" = 3
+          test "$(jig run --native $ex -- find tea)" = 'no notes with "tea"'
 
   memcheck:
     runs-on: ubuntu-latest

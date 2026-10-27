@@ -61,6 +61,20 @@ C compiler (`cc`, or `clang` for release builds). `jig help` lists every command
 `jig explain E0314` explains a diagnostic. `check`, `test`, `prove` and `trace` take `--json`
 for agents.
 
+## Examples
+
+[Seventeen small projects](docs/examples.md), each checked and tested in CI with both
+compilers, show what Jig code looks like:
+
+- [http](examples/http): a web server in 30 lines, tested on simulated requests
+- [kv](examples/kv): a key-value store over HTTP
+- [postgres](examples/postgres): notes in a Postgres table, through libpq behind the `ffi` effect
+- [todo](examples/todo): a command-line app on files, every effect in its signatures
+- [stack](examples/stack) and [vending](examples/vending): contracts that all prove
+- [cart](examples/cart) and [bank](examples/bank): behaviour written first as `.feature` scenarios
+- [units](examples/units), [primes](examples/primes), [calc](examples/calc): units of
+  measure, fork-join parallelism, a parser and evaluator
+
 ## For agents
 
 The [plugin](plugin/README.md) gives Claude Code the reference as a skill, runs `jig check`

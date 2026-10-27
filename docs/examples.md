@@ -17,6 +17,7 @@ jig run examples/http -- :8080 # run it (then: curl localhost:8080)
 | [hello](../examples/hello) | The smallest program | `jig run examples/hello` |
 | [http](../examples/http) | A web server in 30 lines: `net.serve_http`, simulated requests in tests | `jig run examples/http -- :8080` |
 | [kv](../examples/kv) | A key-value store over HTTP; the store is the server's state | `jig run examples/kv -- :8080` |
+| [postgres](../examples/postgres) | Notes in a Postgres table, through libpq behind the `ffi` effect; SQL built and tested as pure code | `jig run examples/postgres -- list` |
 | [greet](../examples/greet) | TCP client and server with `net.request` and `net.serve` | `jig test examples/greet` |
 | [wordfreq](../examples/wordfreq) | Reading standard input, maps, sorting | `echo "a b a" \| jig run examples/wordfreq` |
 | [calc](../examples/calc) | A tokenizer, a recursive-descent parser and an evaluator | `echo "2 * (3 + 4)" \| jig run examples/calc` |
@@ -176,6 +177,31 @@ fn main() effects {io} {
 $ jig prove examples/stack
 proved 14 of 14 contract obligations and 4 of 4 safety obligations in 4 functions
 3 of 4 functions have contracts; 3 of those prove completely
+```
+
+## A database
+
+`examples/postgres` keeps notes in a Postgres table. It declares the eleven libpq functions
+it calls (`PQconnectdb`, `PQexec`, `PQgetvalue`, ...) as Jig functions without a body,
+behind the `ffi` effect, and its `jig.mod` says `link pq`; a connection and a result are
+pointers, held as `Int`. Only `exec` and `main` touch the database. Parsing the command,
+building the SQL (each quote in the text doubled, so no text can end a string literal
+early) and showing the rows are pure functions, tested without a database, and a property
+test checks the quoting on generated text. CI runs it against a Postgres server, on the
+interpreter and built natively.
+
+It needs libpq's development files (`apt install libpq-dev` on Debian and Ubuntu) and a
+server; the connection string comes from `DATABASE_URL`, or libpq's defaults without it.
+
+```
+$ export DATABASE_URL=postgresql://localhost/notes
+$ jig run examples/postgres -- add "it's done"
+added note 1
+$ jig run examples/postgres -- add "x'); DROP TABLE notes; --"
+added note 2
+$ jig run examples/postgres -- list
+1. it's done
+2. x'); DROP TABLE notes; --
 ```
 
 ## What the checks catch

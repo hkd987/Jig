@@ -1149,7 +1149,10 @@ impl<'a> Cx<'a> {
         self.declared_effects = fd.effects;
         let ItemKind::Fn(f) = item.kind else { unreachable!() };
         self.item_span = item.span;
-        check_snake(self, item.name.sym, item.name.span, "function");
+        // A C function keeps its C name.
+        if f.body.is_some() {
+            check_snake(self, item.name.sym, item.name.span, "function");
+        }
         for g in &fd.generics {
             if g.name.as_str() != "Self" {
                 check_camel(self, g.name, g.span, "type parameter");

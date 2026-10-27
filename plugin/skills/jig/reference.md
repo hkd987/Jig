@@ -211,7 +211,7 @@ Function types carry effects: `fn(Int) -> Int effects {io}`. A pure function val
 perform effects. Tests run effects against deterministic fakes.
 
 C functions are declared without a body and with the `ffi` effect; calls go to the C symbol
-of the same name. Parameters and results are `Int`, `I32`, `U8`, `U32`, `U64`, `Float`,
+of the same name (which need not be snake_case). Parameters and results are `Int`, `I32`, `U8`, `U32`, `U64`, `Float`,
 `Bool` or `Str` (a NUL-terminated `const char *`; a returned one is copied, `NULL` is `""`),
 at most 6 integer and 8 `Float` arguments. Their contracts are checked at run time. Link
 libraries with `link NAME` lines in `jig.mod` (`libc` and `libm` are always there).

@@ -12,6 +12,7 @@
 
 use jig::codegen::build::{build, BuildOpts};
 use jig::sema::load::Sources;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -19,6 +20,22 @@ use std::sync::OnceLock;
 fn have_cc() -> bool {
     let cc = jig::codegen::build::c_compiler(false);
     Command::new(cc).arg("--version").output().is_ok_and(|o| o.status.success())
+}
+
+/// Whether the C compiler can link every library `dir`'s `jig.mod` names (`link NAME`).
+fn have_links(dir: &Path) -> bool {
+    let Ok(m) = std::fs::read_to_string(dir.join("jig.mod")) else { return true };
+    let cc = jig::codegen::build::c_compiler(false);
+    m.lines().filter_map(|l| l.trim().strip_prefix("link ")).all(|lib| {
+        let mut c = Command::new(&cc);
+        c.args(["-x", "c", "-", "-o", "/dev/null", &format!("-l{}", lib.trim())]);
+        c.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        let Ok(mut child) = c.spawn() else { return false };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(b"int main(void) { return 0; }\n");
+        }
+        child.wait().is_ok_and(|s| s.success())
+    })
 }
 
 fn jig_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -1632,7 +1649,11 @@ fn jigc_run_matches_bootstrap() {
     }
     for d in &natives {
         failures.extend(compare_run(exe, &std_dir, &work, d, false));
-        failures.extend(compare_run(exe, &std_dir, &work, d, true));
+        if have_links(d) {
+            failures.extend(compare_run(exe, &std_dir, &work, d, true));
+        } else {
+            eprintln!("skipping the native run of {}: a library it links is not installed", d.display());
+        }
     }
     assert!(failures.is_empty(), "{} runs differ:\n{}", failures.len(), failures.join("\n"));
 }

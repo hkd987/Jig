@@ -237,7 +237,8 @@ codes! {
         "The variable is declared with `var` but never mutated. Use `let`.";
     E0504 = 504, "naming", "naming convention",
         "Types, variants and interfaces are `UpperCamel`; functions, variables, fields and \
-         packages are `snake_case`; constants are `UPPER_SNAKE`. Units are lower case.";
+         packages are `snake_case`; constants are `UPPER_SNAKE`. Units are lower case. A C \
+         function keeps its C name.";
     E0505 = 505, "shadowing", "name shadows another binding",
         "A local binding reuses the name of another local in an enclosing scope of the same \
          function. Choose a different name.";

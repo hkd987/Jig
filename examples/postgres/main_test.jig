@@ -1,0 +1,46 @@
+test "commands come from the arguments" {
+  assert(parse(["postgres", "add", "buy", "milk"]) == Ok(Command.Add("buy milk")))
+  assert(parse(["postgres", "list"]) == Ok(Command.List))
+  assert(parse(["postgres", "find", "milk"]) == Ok(Command.Find("milk")))
+  assert(parse(["postgres", "add"]) == Err("nothing to add"))
+  assert(parse(["postgres"]).is_err())
+}
+
+test "a quote in the text is doubled, so the text stays text" {
+  assert(quote("it's") == "'it''s'")
+  assert(quote("\\'") == "'\\'''")
+  let evil = "x'); DROP TABLE notes; --"
+  assert(
+    sql(Command.Add(evil)) ==
+      "INSERT INTO notes (body) VALUES ('x''); DROP TABLE notes; --') RETURNING id",
+  )
+}
+
+test "rows show one note a line" {
+  assert(show(Command.List, [["1", "buy milk"], ["2", "call Ada"]]) == "1. buy milk\n2. call Ada\n")
+  assert(show(Command.List, []) == "no notes\n")
+  assert(show(Command.Find("tea"), []) == "no notes with \"tea\"\n")
+  assert(show(Command.Add("tea"), [["7"]]) == "added note 7\n")
+}
+
+/// Where Postgres ends the string literal that starts `lit`: the index of its closing
+/// quote (a doubled quote is a quote in the text), or -1.
+fn literal_end(lit: Str) -> Int {
+  let b = lit.bytes()
+  var i = 1
+  for i < b.len() {
+    if b[i] != 39 {
+      i += 1
+    } else if i + 1 < b.len() && b[i + 1] == 39 {
+      i += 2
+    } else {
+      return i
+    }
+  }
+  return -1
+}
+
+test "no text ends its literal early"(s: Str) {
+  let lit = quote(s)
+  assert(literal_end(lit) == lit.len() - 1)
+}

@@ -1134,7 +1134,10 @@ fn Sema.check_fn(&mut self, fid: Int) {
     }
   }
   self.item_span = item.span
-  self.check_snake(item.name.text, item.name.span, "function")
+  // A C function keeps its C name.
+  if f.body.is_some() {
+    self.check_snake(item.name.text, item.name.span, "function")
+  }
   for g in fd.generics {
     if g.name != "Self" {
       self.check_camel(g.name, g.span, "type parameter")
