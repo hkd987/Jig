@@ -203,6 +203,10 @@ codes! {
          copied), it cannot be generic or a method or take `&mut`, and it takes at most 6 \
          integer and 8 `Float` arguments. Libraries are linked with `link NAME` lines in \
          `jig.mod`.";
+    E0332 = 332, "refined-variant-value", "refined variant used as a function",
+        "A variant whose fields are refined (a refinement alias or a `where` clause) checks \
+         them where it is built, so it can only be called, not passed as a function. Wrap it \
+         in a closure: `xs.map(fn(c) { State.Paying(c) })`.";
 
     // ---- E04: effects ----
     E0401 = 401, "undeclared-effect", "effect not declared",

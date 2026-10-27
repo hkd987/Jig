@@ -984,6 +984,40 @@ impl<'a> Gen<'a> {
         out
     }
 
+    /// The predicates a variant's fields satisfy: their refinement aliases and `where`
+    /// clauses (which name the variant's fields). Returns (message, term) pairs.
+    fn variant_preds(&mut self, st: &mut St, adt: AdtId, v: u32, fields: &[Sv]) -> Vec<(String, String)> {
+        let ad = &self.defs.adts[adt];
+        let Some(vdef) = ad.variants().get(v as usize) else { return vec![] };
+        if !vdef.refined {
+            return vec![];
+        }
+        let pkg = ad.pkg;
+        let item = self.pkgs[pkg].ast.items[ad.item];
+        let ast::ItemKind::Enum { variants, .. } = item.kind else { return vec![] };
+        let ast: &'a Ast = &self.pkgs[pkg].ast;
+        let Some(vd) = ast.variants.get(variants).get(v as usize).copied() else { return vec![] };
+        let fdecls: Vec<ast::FieldDecl> = ast.fields.get(vd.fields).to_vec();
+        let aliases: Vec<Option<AliasId>> = vdef.fields.iter().map(|f| f.refine).collect();
+        let name = format!("{}.{}", ad.name, vd.name.sym);
+        let names: Vec<(Symbol, Sv)> = fdecls.iter().map(|f| f.name.sym).zip(fields.iter().cloned()).collect();
+        let mut out = Vec::new();
+        for (i, al) in aliases.iter().enumerate() {
+            if let (Some(al), Some(f)) = (al, fields.get(i)) {
+                if let Some(t) = self.alias_pred(st, *al, f) {
+                    out.push((format!("`{name}` field `{}`: {}", fdecls[i].name.sym, t.0), t.1));
+                }
+            }
+        }
+        for p in fdecls.iter().filter_map(|f| f.refine) {
+            let text = self.src(ast.exprs[p].span);
+            if let Some(t) = self.pred_named(st, pkg, p, names.clone()) {
+                out.push((format!("`{name}` requires {text}"), t));
+            }
+        }
+        out
+    }
+
     /// (text, term) of a refinement alias's predicate applied to `v`.
     fn alias_pred(&mut self, st: &mut St, al: AliasId, v: &Sv) -> Option<(String, String)> {
         let ad = &self.defs.aliases[al];
@@ -1019,6 +1053,13 @@ impl<'a> Gen<'a> {
                         let fact = format!("(=> (= {} {vi}) {})", tag.t, and(&inner.pc));
                         self.assume(st, fact);
                     }
+                }
+                // Its fields' refinements, checked wherever the variant is built.
+                let mut inner = St { env: FxHashMap::default(), pc: Vec::new() };
+                let terms: Vec<String> =
+                    self.variant_preds(&mut inner, adt, vi as u32, fs).into_iter().map(|(_, t)| t).collect();
+                if !terms.is_empty() {
+                    self.assume(st, format!("(=> (= {} {vi}) {})", tag.t, and(&terms)));
                 }
             }
             return;
@@ -2724,6 +2765,11 @@ impl<'a> Gen<'a> {
                 let mut fields = Vec::new();
                 for a in arg_ids {
                     fields.push(self.expr(fr, st, a)?);
+                }
+                // Mirror the runtime: the fields' refinements, where the variant is built.
+                for (msg, term) in self.variant_preds(st, adt, v, &fields) {
+                    self.oblige(fr, st, ObKind::Refinement, span, msg, term.clone());
+                    self.assume(st, term);
                 }
                 Some(self.construct(st, t, adt, v, fields))
             }

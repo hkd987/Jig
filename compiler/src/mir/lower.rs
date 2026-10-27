@@ -1730,6 +1730,10 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                     self.lw.tys.subst(ft, &args)
                 }
                 (PlaceElem::Field(i), TyKind::Tuple(ts)) => ts[*i as usize],
+                (PlaceElem::VariantField(v, i), TyKind::Adt(adt, args)) => {
+                    let ft = self.lw.defs.adts[adt].variants()[*v as usize].fields[*i as usize].ty;
+                    self.lw.tys.subst(ft, &args)
+                }
                 (PlaceElem::Index(..), TyKind::List(e)) => e,
                 _ => return self.lw.tys.error,
             };
@@ -1774,6 +1778,41 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
             }
         }
         self.in_package(pkg, |b| b.check_struct_predicates_here(adt, value, changed));
+    }
+
+    /// A variant's field refinements, where it is built: refinement aliases, then `where`
+    /// clauses (which name the variant's fields), as for a struct's fields.
+    fn check_variant_predicates(&mut self, adt: AdtId, v: u32, value: Place) {
+        let ad = &self.lw.defs.adts[adt];
+        let pkg = ad.pkg;
+        let aliases: Vec<(u32, AliasId)> = ad.variants()[v as usize]
+            .fields
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| f.refine.map(|al| (i as u32, al)))
+            .collect();
+        for (i, al) in aliases {
+            self.check_alias(al, value.variant_field(v, i));
+        }
+        self.in_package(pkg, |b| b.check_variant_where(adt, v, value));
+    }
+
+    fn check_variant_where(&mut self, adt: AdtId, v: u32, value: Place) {
+        let ad = &self.lw.defs.adts[adt];
+        let item = self.ast.items[ad.item];
+        let ItemKind::Enum { variants, .. } = item.kind else { return };
+        let Some(vd) = self.ast.variants.get(variants).get(v as usize).copied() else { return };
+        let fdecls: Vec<ast::FieldDecl> = self.ast.fields.get(vd.fields).to_vec();
+        // A field's `where` clause names only that field.
+        for (i, f) in fdecls.iter().enumerate() {
+            let Some(pred) = f.refine else { continue };
+            let ft = self.lw.defs.adts[adt].variants()[v as usize].fields[i].ty;
+            let l = self.temp(ft);
+            self.assign(Place::local(l), Rvalue::Use(Operand::Copy(value.variant_field(v, i as u32))));
+            let owner = self.lw.defs.adts[adt].name;
+            self.check_with_names(pred, &[(f.name.sym, l)], CheckKind::Invariant, owner);
+            self.push(Stmt::Drop(l));
+        }
     }
 
     fn check_struct_predicates_here(&mut self, adt: AdtId, value: Place, changed: Option<&[u32]>) {
@@ -2070,7 +2109,10 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
             }
             Res::Variant(adt, v) => {
                 let ops: Vec<Operand> = arg_ids.iter().map(|&a| self.expr(a)).collect();
-                self.assign(dest, Rvalue::Aggregate(AggKind::Variant(adt, v), ret, ops));
+                self.assign(dest.clone(), Rvalue::Aggregate(AggKind::Variant(adt, v), ret, ops));
+                if self.lw.mir.opts.check_contracts && self.lw.defs.adts[adt].variants()[v as usize].refined {
+                    self.check_variant_predicates(adt, v, dest);
+                }
             }
             Res::Fn(f) | Res::Method(f) => {
                 // assert(cond) becomes a check that reports operand values; the condition is

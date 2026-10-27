@@ -1,0 +1,37 @@
+import "std/io"
+
+// A variant's refined fields are obligations where it is built, and facts where it is
+// matched.
+
+type Credit = Int where self > 0 && self < 150
+
+enum State {
+  Idle
+  Paying(credit: Credit)
+  Owing(amount: Int where amount > 0)
+}
+
+/// Fails: nothing says `n` is a credit.
+fn pay(n: Int) -> State {
+  return State.Paying(n)
+}
+
+/// Proves: the branch establishes the refinement.
+fn pay_checked(n: Int) -> State {
+  return if n > 0 && n < 150 { State.Paying(n) } else { State.Idle }
+}
+
+/// Proves without a check: a credit is below 150 and an amount is positive.
+fn left(s: State) -> Int {
+  return match s {
+    Idle => 0
+    Paying(c) => 150 - c
+    Owing(a) => a - 1
+  }
+}
+
+fn main() effects {io} {
+  io.println(left(pay(40)).str())
+  io.println(left(pay_checked(200)).str())
+  io.println(left(State.Owing(7)).str())
+}

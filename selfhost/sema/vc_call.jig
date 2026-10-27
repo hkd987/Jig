@@ -36,6 +36,11 @@ fn Gen.call(
       for a in arg_ids {
         fields.push(self.expr(fr, &mut st, a)?)
       }
+      // Mirror the runtime: the fields' refinements, where the variant is built.
+      for (msg, term) in self.variant_preds(&mut st, adt, v, fields) {
+        self.oblige(fr, st, ObKind.Refinement, span, msg, term)
+        self.assume(&mut st, term)
+      }
       return Some(self.construct(t, adt, v, fields))
     }
     Fn(f) | Method(f) => {

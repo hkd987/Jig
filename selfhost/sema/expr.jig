@@ -566,6 +566,17 @@ fn Sema.variant_value(
     return ty
   }
   let ps = self.tys.subst_all(fts, args)
+  let vd = self.defs.adts[adt].variants[v]
+  if vd.refined {
+    let name = self.defs.adts[adt].name + "." + vd.name
+    self.err(
+      "E0332",
+      self.ast.exprs[e].span,
+      "`" +
+        name +
+        "` checks its fields' refinements where it is built, so it cannot be a function value",
+    )
+  }
   return self.tys.func(ps, ty, 0)
 }
 

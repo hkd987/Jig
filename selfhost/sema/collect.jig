@@ -743,7 +743,14 @@ fn Sema.resolve_adts(&mut self) {
             continue
           }
           let fs = self.resolve_fields(sc, v.fields, "variant field")
-          out.push(VariantDef { name: v.name.text, fields: fs, span: v.span })
+          var refined = false
+          for f in fs {
+            refined = refined || f.refine.is_some()
+          }
+          for f in v.fields {
+            refined = refined || f.refine.is_some()
+          }
+          out.push(VariantDef { name: v.name.text, fields: fs, span: v.span, refined: refined })
         }
         self.defs.adts[aid].variants = out
       }

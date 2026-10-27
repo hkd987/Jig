@@ -1,0 +1,27 @@
+import "std/io"
+
+// A variant's refined fields are checked where the variant is built: a refinement alias,
+// and a field's own `where` clause.
+
+type Credit = Int where self > 0 && self < 150
+
+enum State {
+  Idle
+  Paying(credit: Credit)
+  Owing(amount: Int where amount > 0)
+}
+
+fn show(s: State) -> Str {
+  return match s {
+    Idle => "idle"
+    Paying(c) => "paying " + c.str()
+    Owing(a) => "owing " + a.str()
+  }
+}
+
+fn main() effects {io} {
+  io.println(show(State.Idle))
+  io.println(show(State.Paying(40)))
+  io.println(show(State.Owing(3)))
+  io.println(show(State.Paying(500)))
+}

@@ -199,6 +199,9 @@ pub struct VariantDef {
     pub name: Symbol,
     pub fields: Vec<FieldDef>,
     pub span: Span,
+    /// Whether a field is refined (a refinement alias or a `where` clause), checked where
+    /// the variant is built.
+    pub refined: bool,
 }
 
 pub enum AdtKind {

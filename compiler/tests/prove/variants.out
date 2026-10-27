@@ -1,0 +1,5 @@
+FAILED refinement in `pay` at tests/prove/variants/main.jig:16:10: `State.Paying` field `credit`: `Credit` requires self > 0 && self < 150
+  counterexample: n = 0
+  confirmed: running it with n = 0 fails this check
+  hint: Show the new value satisfies the predicate: check it first, or require it of the inputs it is computed from.
+proved 2 of 3 contract obligations and 2 of 2 safety obligations in 4 functions (0 from cache)

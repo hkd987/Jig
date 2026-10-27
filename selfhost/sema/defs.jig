@@ -170,6 +170,9 @@ struct VariantDef {
   name: Str
   fields: List<FieldDef>
   span: syntax.Span
+  /// Whether a field is refined (a refinement alias or a `where` clause), checked where
+  /// the variant is built.
+  refined: Bool
 }
 
 struct AdtDef {

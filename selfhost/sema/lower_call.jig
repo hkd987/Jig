@@ -342,6 +342,10 @@ fn Lw.place_ty(&mut self, p: Place) -> Int {
     t = match (el, self.s.tys.kinds[t]) {
       (Field(i), Adt(adt, args)) => self.s.tys.subst(self.s.defs.adts[adt].fields[i].ty, args)
       (Field(i), Tuple(ts)) => ts[i]
+      (VariantField(v, i), Adt(adt, args)) => self.s.tys.subst(
+        self.s.defs.adts[adt].variants[v].fields[i].ty,
+        args,
+      )
       (Index(_, _), List(e)) => e
       _ => {
         return self.s.tys.error
@@ -403,6 +407,50 @@ fn Lw.check_struct_predicates(&mut self, adt: Int, value: Place, changed: Option
   self.check_struct_predicates_here(adt, value, changed)
   self.fb.ast = ast
   self.fb.tab = tab
+}
+
+/// A variant's field refinements, where it is built: refinement aliases, then `where`
+/// clauses (which name the variant's fields), as for a struct's fields.
+fn Lw.check_variant_predicates(&mut self, adt: Int, v: Int, value: Place) {
+  let ad = self.s.defs.adts[adt]
+  let fields = ad.variants[v].fields
+  for i in 0..fields.len() {
+    match fields[i].refine {
+      Some(al) => self.check_alias(al, value.variant_field(v, i))
+      None => {}
+    }
+  }
+  let (ast, tab) = self.enter_file(ad.pkg, ad.file)
+  self.check_variant_where(adt, v, value)
+  self.fb.ast = ast
+  self.fb.tab = tab
+}
+
+fn Lw.check_variant_where(&mut self, adt: Int, v: Int, value: Place) {
+  let ad = self.s.defs.adts[adt]
+  let vdecls = match self.fb.ast.items[ad.item].kind {
+    Enum(_, variants) => variants
+    _ => {
+      return
+    }
+  }
+  if v >= vdecls.len() {
+    return
+  }
+  let fdecls = vdecls[v].fields
+  // A field's `where` clause names only that field.
+  for i in 0..fdecls.len() {
+    let pred = match fdecls[i].refine {
+      Some(p) => p
+      None => {
+        continue
+      }
+    }
+    let l = self.temp(ad.variants[v].fields[i].ty)
+    self.assign(place_of(l), Rvalue.Use(Operand.Copy(value.variant_field(v, i))))
+    self.check_with_names(pred, [(fdecls[i].name.text, l)], CheckKind.Invariant, ad.name)
+    self.push(Stmt.Drop(l))
+  }
 }
 
 fn Lw.check_struct_predicates_here(&mut self, adt: Int, value: Place, changed: Option<List<Int>>) {
@@ -764,6 +812,9 @@ fn Lw.lower_call(&mut self, e: Int, callee: Int, arg_ids: List<Int>, dest: Place
     Variant(adt, v) => {
       let ops = self.exprs_of(arg_ids)
       self.assign(dest, Rvalue.Aggregate(AggKind.Variant(adt, v), ret, ops))
+      if self.s.defs.adts[adt].variants[v].refined {
+        self.check_variant_predicates(adt, v, dest)
+      }
     }
     Fn(f) | Method(f) => {
       // `assert(cond)` becomes a check that reports operand values; the condition is

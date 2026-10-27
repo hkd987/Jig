@@ -15,7 +15,7 @@ what to do, not what went wrong.
 
 ## Rules
 
-- After changing `selfhost/`, `compiler/std/`, `compiler/runtime/`, `compiler/src/codes.rs` or
+- After changing `selfhost/`, `compiler/std/`, `compiler/runtime/`, `compiler/src/diag/codes.rs` or
   `docs/reference.md`, run `sh bootstrap/update.sh` and commit the new `bootstrap/jigc.c`. If
   the old `jigc.c` cannot compile the new sources, regenerate in two steps: first without the
   code it cannot compile, then with it.

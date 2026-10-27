@@ -664,7 +664,9 @@ impl Collector<'_> {
                         }
                         let fs: Vec<ast::FieldDecl> = self.ast(pid).fields.get(v.fields).to_vec();
                         let fields = self.resolve_fields(&sc, &fs, "variant field");
-                        out.push(VariantDef { name: v.name.sym, fields, span: v.span });
+                        let refined =
+                            fields.iter().any(|f| f.refine.is_some()) || fs.iter().any(|f| f.refine.is_some());
+                        out.push(VariantDef { name: v.name.sym, fields, span: v.span, refined });
                     }
                     self.defs.adts[aid].kind = AdtKind::Enum { variants: out };
                 }

@@ -1,0 +1,14 @@
+type Credit = Int where self > 0
+
+pub enum State {
+  Paying(credit: Credit)
+  Owing(amount: Int where amount > 0)
+}
+
+pub fn all_paying(xs: List<Int>) -> List<State> {
+  return xs.map(State.Paying) //~ E0332
+}
+
+pub fn owing(n: Int) -> State {
+  return State.Owing(n)
+}

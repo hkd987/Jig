@@ -1293,11 +1293,26 @@ impl<'a> Cx<'a> {
             }
             ItemKind::Enum { variants, .. } => {
                 let vs: Vec<ast::VariantDecl> = self.ast.variants.get(variants).to_vec();
-                for v in vs {
+                for (vi, v) in vs.iter().enumerate() {
                     check_camel(self, v.name.sym, v.name.span, "variant");
-                    for f in self.ast.fields.get(v.fields).to_vec() {
+                    let ftys: Vec<Ty> = self.defs.adts[aid]
+                        .variants()
+                        .get(vi)
+                        .map(|vd| vd.fields.iter().map(|f| f.ty).collect())
+                        .unwrap_or_default();
+                    for (i, f) in self.ast.fields.get(v.fields).to_vec().into_iter().enumerate() {
                         if !f.name.sym.as_str().starts_with('_') {
                             check_snake(self, f.name.sym, f.name.span, "field");
+                        }
+                        // A field's `where` clause names the field, as a struct field's does.
+                        if let Some(pred) = f.refine {
+                            self.push_scope();
+                            let t = ftys.get(i).copied().unwrap_or(self.tys.error);
+                            let id = self.declare_local(f.name.sym, t, LocalKind::Param, f.name.span);
+                            self.body.locals[id].used = true;
+                            let b = self.tys.bool;
+                            self.check_expr(pred, Some(b));
+                            self.pop_scope();
                         }
                     }
                 }

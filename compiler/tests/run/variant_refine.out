@@ -1,0 +1,5 @@
+idle
+paying 40
+owing 3
+<panic: refinement failed: `Credit` requires self > 0 && self < 150
+  self = 500>

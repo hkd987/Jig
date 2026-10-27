@@ -1309,6 +1309,65 @@ fn Gen.struct_preds(&mut self, st: &mut St, adt: Int, v: Sv) -> List<(Str, Str)>
 }
 
 /// (text, term) of a refinement alias's predicate applied to `v`.
+/// The predicates a variant's fields satisfy: their refinement aliases and `where` clauses
+/// (which name the variant's fields). Returns (message, term) pairs.
+fn Gen.variant_preds(
+  &mut self,
+  st: &mut St,
+  adt: Int,
+  v: Int,
+  fields: List<Sv>,
+) -> List<(Str, Str)> {
+  let ad = self.s.defs.adts[adt]
+  if v < 0 || v >= ad.variants.len() || !ad.variants[v].refined {
+    return []
+  }
+  let vdef = ad.variants[v]
+  let ast = self.ast_of(ad.pkg, ad.file)
+  let vdecls = match ast.items[ad.item].kind {
+    Enum(_, variants) => variants
+    _ => {
+      return []
+    }
+  }
+  if v >= vdecls.len() {
+    return []
+  }
+  let fdecls = vdecls[v].fields
+  let name = ad.name + "." + vdecls[v].name.text
+  var names: List<(Str, Sv)> = []
+  for i in 0..min(fdecls.len(), fields.len()) {
+    names.push((fdecls[i].name.text, fields[i]))
+  }
+  var out: List<(Str, Str)> = []
+  for i in 0..vdef.fields.len() {
+    match vdef.fields[i].refine {
+      Some(al) => if i < fields.len() {
+        match self.alias_pred(&mut st, al, fields[i]) {
+          Some((text, term)) => out.push(
+            ("`" + name + "` field `" + fdecls[i].name.text + "`: " + text, term),
+          )
+          None => {}
+        }
+      }
+      None => {}
+    }
+  }
+  for f in fdecls {
+    match f.refine {
+      Some(p) => {
+        let text = self.src(ast.exprs[p].span)
+        match self.pred_named(&mut st, ad.pkg, ad.file, p, names) {
+          Some(t) => out.push(("`" + name + "` requires " + text, t))
+          None => {}
+        }
+      }
+      None => {}
+    }
+  }
+  return out
+}
+
 fn Gen.alias_pred(&mut self, st: &mut St, al: Int, v: Sv) -> Option<(Str, Str)> {
   let ad = self.s.defs.aliases[al]
   let pred = ad.refine?
@@ -1354,6 +1413,15 @@ fn Gen.assume_type_preds(&mut self, st: &mut St, t: Int, v: Sv, depth: Int) {
           let fact = "(=> (= " + tag.t + " " + vi.str() + ") " + smt_and(inner.pc) + ")"
           self.assume(&mut st, fact)
         }
+      }
+      // Its fields' refinements, checked wherever the variant is built.
+      var inner = empty_st()
+      var terms: List<Str> = []
+      for (_, term) in self.variant_preds(&mut inner, adt, vi, vars[vi]) {
+        terms.push(term)
+      }
+      if !terms.is_empty() {
+        self.assume(&mut st, "(=> (= " + tag.t + " " + vi.str() + ") " + smt_and(terms) + ")")
       }
     }
     return

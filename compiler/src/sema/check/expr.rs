@@ -437,6 +437,15 @@ impl Cx<'_> {
         }
         let ps: Vec<Ty> = field_tys.into_iter().map(|t| self.tys.subst(t, &args)).collect();
         self.note_variant_built(adt, v);
+        let vd = &self.defs.adts[adt].variants()[v as usize];
+        if vd.refined {
+            let name = format!("{}.{}", self.defs.adts[adt].name, vd.name);
+            self.err(
+                codes::E0332,
+                self.ast.exprs[e].span,
+                format!("`{name}` checks its fields' refinements where it is built, so it cannot be a function value"),
+            );
+        }
         self.tys.func(ps, ty, EffectSet::PURE)
     }
 

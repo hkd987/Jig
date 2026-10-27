@@ -1279,11 +1279,27 @@ fn Sema.check_adt_predicates(&mut self, aid: Int) {
       }
     }
     Enum(_, variants) => {
-      for v in variants {
+      for vi in 0..variants.len() {
+        let v = variants[vi]
         self.check_camel(v.name.text, v.name.span, "variant")
-        for f in v.fields {
+        let none: List<FieldDef> = []
+        let fdefs = if vi < ad.variants.len() { ad.variants[vi].fields } else { none }
+        for i in 0..v.fields.len() {
+          let f = v.fields[i]
           if !f.name.text.starts_with("_") {
             self.check_snake(f.name.text, f.name.span, "field")
+          }
+          // A field's `where` clause names the field, as a struct field's does.
+          match f.refine {
+            Some(pred) => {
+              self.push_scope()
+              let t = if i < fdefs.len() { fdefs[i].ty } else { self.tys.error }
+              let id = self.declare_local(f.name.text, t, LocalKind.Param, f.name.span)
+              self.body.locals[id].used = true
+              self.check_bool(pred)
+              self.pop_scope()
+            }
+            None => {}
           }
         }
       }

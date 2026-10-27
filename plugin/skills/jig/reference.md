@@ -294,10 +294,12 @@ fn parse_port(s: Str) -> Result<Int, Str> {
 - `ensures` lists postconditions; `result` is the return value and `old(e)` is `e` on entry.
 - `invariant` on a `for` loop must hold before each iteration; on a struct, whenever a
   value is constructed or mutated.
-- `T where pred` refines a parameter (`amt: Int where amt > 0`), a struct field, an alias
-  (`self` names the value) or the return type (`-> Int where result >= 0`, the same as
-  `ensures result >= 0`). It is checked wherever a value enters the type: arguments,
-  returns, construction and assignment. For a local, use `assert`.
+- `T where pred` refines a parameter (`amt: Int where amt > 0`), a struct or variant field,
+  an alias (`self` names the value) or the return type (`-> Int where result >= 0`, the same
+  as `ensures result >= 0`). It is checked wherever a value enters the type: arguments,
+  returns, construction and assignment; the prover assumes it wherever the value is used
+  (a variant's, in the arm that matches it). A variant with refined fields is called, not
+  passed as a function. For a local, use `assert`.
 - Contract expressions are pure. They may call pure functions, and use
   `forall i in a..b: pred` and `exists i in a..b: pred`.
 
