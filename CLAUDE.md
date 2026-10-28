@@ -37,6 +37,8 @@ what to do, not what went wrong.
   and `jig check` and `jig test` on each of `examples/*/`, `selfhost/`, `site/` and `compiler/tests/stdlib/`.
 - Format with `cargo fmt` and `jig fmt selfhost` (and any other Jig directory you touched).
 - Never put a model name or identifier in a commit, comment or document.
+- `step` is a keyword (it declares a feature step): never name a variable, parameter or
+  function `step`.
 
 ## Contracts and `jig prove`
 

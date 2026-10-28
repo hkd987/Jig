@@ -249,8 +249,10 @@ keeping the standard library over 80%):
 - [x] `std/hash`: SHA-256 and HMAC-SHA-256, checked against the published test vectors
       (FIPS 180-4, RFC 4231), with hex and a constant-time `equal`. Every obligation proves;
       the site names its stylesheet by its hash.
-- [ ] `std/regex`: literals, `.`, classes, anchors, `* + ? {m,n}`, groups, alternation and
-      captures, matched in time linear in the input.
+- [x] `std/regex`: literals, `.`, classes, anchors, `* + ? {m,n}`, groups, alternation and
+      captures, matched in time linear in the input (a Pike VM, so no pattern backtracks).
+      Every contract proves; tests cover each piece of the syntax, Perl's choice among
+      matches, UTF-8 offsets and patterns that are exponential for a backtracking matcher.
 
 Changes to both compilers:
 

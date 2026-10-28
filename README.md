@@ -98,7 +98,7 @@ so far (see `bench/` and `docs/gates/`):
 | Runtime vs Rust, 8 benchmarks (instructions) | within 10% | 0.79 (slowest: nbody 1.44, wordfreq 1.13, fannkuch 1.12) |
 | Hello-world release binary | under 100 KB | 84 KB |
 | Self-hosted compiler vs bootstrap (instructions) | equal or faster | 0.94 |
-| Standard library functions with proven contracts | over 80% | 91% |
+| Standard library functions with proven contracts | over 80% | 83% (117 of 141) |
 | Compiler functions with proven contracts | over 80% | 39% (477 of 1,225; 78% have no unproven obligation but a table index) |
 | Agent tasks reaching a verified build, vs Rust | equal or better | 6 of 6 (Rust 6 of 6) |
 | Agent turns per task, vs Rust and TypeScript | equal or fewer | 7.3 (Rust 6.8, TypeScript 6.2) |
@@ -108,9 +108,9 @@ so far (see `bench/` and `docs/gates/`):
 Jig is an alpha. What it does not do yet (phase 5 of [the plan](docs/plan.md) closes these;
 [`docs/gates/phase5.md`](docs/gates/phase5.md) tracks each one):
 
-- **Libraries.** The standard library has files, TCP and HTTP serving, time, randomness,
-  tasks and text helpers, but no JSON, regular expressions, hashing, date formatting or TLS
-  (so no HTTPS). A server answers one connection at a time.
+- **Libraries.** The standard library has files, TCP and HTTP serving, HTML, JSON, regular
+  expressions, hashing, dates, randomness, tasks and text helpers, but no HTTP client and no
+  TLS (so no HTTPS). A server answers one connection at a time.
 - **C interop** passes numbers and strings only: no structs, buffers or callbacks, so a
   library that needs them (or a parameterized SQL query) needs a small C wrapper.
 - **Built-in methods** (`map`, `filter`, `fold`, ...) take pure functions; a loop does what

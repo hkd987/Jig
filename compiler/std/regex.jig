@@ -1,0 +1,749 @@
+// Regular expressions, matched in time linear in the text: a Pike VM runs every possible
+// match in step, so no pattern backtracks. Patterns have literals, `.` (any character but
+// a line break), classes (`[a-z_]`, `[^0-9]`, and `\d \w \s` with their negations `\D \W
+// \S`), anchors (`^` and `$` for the start and end of the text, `\b` and `\B` for word
+// edges), repetition (`* + ? {m} {m,} {m,n}`, greedy, or lazy with a `?` after), groups
+// (`( )` capture, `(?: )` do not) and alternation (`|`). `\` makes any other punctuation
+// literal. Matches are leftmost, and among those the one Perl would choose; positions are
+// byte offsets, as everywhere for `Str`.
+
+/// The largest count `{m,n}` may give, the most groups a pattern may have, and the most
+/// instructions it may compile to.
+pub const MAX_REPEAT: Int = 1000
+pub const MAX_GROUPS: Int = 1000
+const MAX_PROGRAM: Int = 100000
+
+/// A pattern, parsed.
+enum Node {
+  Empty
+  Lit(c: Char)
+  Any
+  Class(ranges: List<(Char, Char)>, negated: Bool)
+  Start
+  End
+  Edge(negated: Bool)
+  Group(index: Int where index >= 1 && index <= MAX_GROUPS, inner: Node)
+  Cat(items: List<Node>)
+  Alt(options: List<Node>)
+  Repeat(inner: Node, min: Int, max: Int, greedy: Bool)
+}
+
+/// An instruction of the matching program.
+enum Inst {
+  Char(c: Char)
+  Any
+  Class(ranges: List<(Char, Char)>, negated: Bool)
+  /// Go on at `x`, and also at `y`, which matches only if `x` does not.
+  Split(x: Int, y: Int)
+  Jump(x: Int)
+  /// Record the position in capture slot `slot`.
+  Save(slot: Int)
+  Start
+  End
+  Edge(negated: Bool)
+  Done
+}
+
+/// A compiled pattern.
+pub struct Regex {
+  prog: List<Inst>
+  /// Capture groups, not counting the whole match (group 0).
+  groups: Int
+  invariant groups >= 0 && groups <= MAX_GROUPS
+}
+
+/// Where a pattern matched: the whole match, and each group's span if it took part.
+pub struct Match {
+  pub start: Int
+  pub end: Int
+  pub groups: List<Option<(Int, Int)>>
+}
+
+/// A pattern being parsed: its characters, the position reached and the groups so far.
+struct Parser {
+  cs: List<Char>
+  i: Int
+  groups: Int
+  invariant i >= 0 && i <= cs.len() && groups >= 0 && groups <= MAX_GROUPS
+}
+
+fn Parser.peek(self, c: Char) -> Bool
+  ensures !result || self.i < self.cs.len()
+{
+  return self.i < self.cs.len() && self.cs[self.i] == c
+}
+
+fn Parser.alt(&mut self) -> Result<Node, Str>
+  ensures self.i >= old(self.i)
+{
+  let start = self.i
+  var options = [self.cat()?]
+  for self.peek('|') invariant self.i >= start && self.i <= self.cs.len() {
+    self.i += 1
+    options.push(self.cat()?)
+  }
+  return Ok(if options.len() == 1 { options[0] } else { Node.Alt(options) })
+}
+
+fn Parser.cat(&mut self) -> Result<Node, Str>
+  ensures self.i >= old(self.i)
+{
+  var items: List<Node> = []
+  let start = self.i
+  for self.i < self.cs.len() && !self.peek('|') && !self.peek(')')
+    invariant self.i >= start && self.i <= self.cs.len()
+  {
+    let before = self.i
+    let atom = self.atom()?
+    if self.i == before {
+      return Err("nothing to match at " + before.str())
+    }
+    items.push(self.quantified(atom)?)
+  }
+  return Ok(
+    if items.is_empty() {
+      Node.Empty
+    } else if items.len() == 1 {
+      items[0]
+    } else {
+      Node.Cat(items)
+    },
+  )
+}
+
+/// A number in `{m,n}`, if digits follow.
+fn Parser.count(&mut self) -> Option<Int>
+  ensures self.i >= old(self.i)
+  ensures result.is_none() || result.unwrap() >= 0 && result.unwrap() <= MAX_REPEAT + 1
+{
+  let start = self.i
+  var n = -1
+  for self.i < self.cs.len() && self.cs[self.i].is_digit()
+    invariant n >= -1 && n <= MAX_REPEAT + 1 && self.i >= start && self.i <= self.cs.len()
+  {
+    let d = self.cs[self.i].str().to_int().unwrap_or(0)
+    n = min(max(n, 0) * 10 + max(min(d, 9), 0), MAX_REPEAT + 1)
+    self.i += 1
+  }
+  return if n < 0 { None } else { Some(n) }
+}
+
+fn Parser.quantified(&mut self, atom: Node) -> Result<Node, Str>
+  ensures self.i >= old(self.i)
+{
+  var lo = 0
+  var hi = -1
+  if self.peek('*') {
+    self.i += 1
+  } else if self.peek('+') {
+    self.i += 1
+    lo = 1
+  } else if self.peek('?') {
+    self.i += 1
+    hi = 1
+  } else if self.peek('{') {
+    let back = self.i
+    self.i += 1
+    match self.count() {
+      Some(m) => {
+        lo = m
+        hi = m
+        if self.peek(',') {
+          self.i += 1
+          hi = match self.count() {
+            Some(n) => n
+            None => -1
+          }
+        }
+        if !self.peek('}') {
+          return Err("`{` needs `}` at " + self.i.str())
+        }
+        self.i += 1
+        if lo > MAX_REPEAT || hi > MAX_REPEAT || hi >= 0 && hi < lo {
+          return Err("a count must be at most " + MAX_REPEAT.str() + ", and `{m,n}` needs m <= n")
+        }
+      }
+      None => {
+        // Not a count: a literal `{`.
+        self.i = back
+        return Ok(atom)
+      }
+    }
+  } else {
+    return Ok(atom)
+  }
+  var greedy = true
+  if self.peek('?') {
+    self.i += 1
+    greedy = false
+  }
+  return match atom {
+    Start | End | Edge(_) => Err("an anchor cannot repeat")
+    _ => Ok(Node.Repeat(atom, lo, hi, greedy))
+  }
+}
+
+/// The character class an escape like `\d` names, if it names one.
+fn class_escape(c: Char) -> Option<Node>
+  ensures result.is_some() == (c == 'd' || c == 'D' || c == 'w' || c == 'W' || c == 's' || c == 'S')
+{
+  let digits = [('0', '9')]
+  let word = [('0', '9'), ('A', 'Z'), ('a', 'z'), ('_', '_')]
+  let space = [(' ', ' '), ('\t', '\r')]
+  return if c == 'd' {
+    Some(Node.Class(digits, false))
+  } else if c == 'D' {
+    Some(Node.Class(digits, true))
+  } else if c == 'w' {
+    Some(Node.Class(word, false))
+  } else if c == 'W' {
+    Some(Node.Class(word, true))
+  } else if c == 's' {
+    Some(Node.Class(space, false))
+  } else if c == 'S' {
+    Some(Node.Class(space, true))
+  } else {
+    None
+  }
+}
+
+/// The character an escape stands for, other than a class: `\n`, `\t`, `\r`, or itself.
+fn escaped(c: Char) -> Char
+  ensures result == c || c == 'n' || c == 't' || c == 'r'
+{
+  return if c == 'n' { '\n' } else if c == 't' { '\t' } else if c == 'r' { '\r' } else { c }
+}
+
+fn Parser.atom(&mut self) -> Result<Node, Str>
+  requires self.i < self.cs.len()
+  ensures self.i >= old(self.i)
+{
+  let c = self.cs[self.i]
+  self.i += 1
+  if c == '.' {
+    return Ok(Node.Any)
+  }
+  if c == '^' {
+    return Ok(Node.Start)
+  }
+  if c == '$' {
+    return Ok(Node.End)
+  }
+  if c == '*' || c == '+' || c == '?' {
+    return Err("`" + c.str() + "` at " + (self.i - 1).str() + " repeats nothing")
+  }
+  if c == '(' {
+    var index = -1
+    if self.i + 1 < self.cs.len() && self.cs[self.i] == '?' && self.cs[self.i + 1] == ':' {
+      self.i += 2
+    } else {
+      if self.groups >= MAX_GROUPS {
+        return Err("more than " + MAX_GROUPS.str() + " groups")
+      }
+      self.groups += 1
+      index = self.groups
+    }
+    let inner = self.alt()?
+    if !self.peek(')') {
+      return Err("`(` needs `)`")
+    }
+    self.i += 1
+    if index < 1 || index > MAX_GROUPS {
+      return Ok(inner)
+    }
+    return Ok(Node.Group(index, inner))
+  }
+  if c == ')' {
+    return Err("`)` at " + (self.i - 1).str() + " closes nothing")
+  }
+  if c == '[' {
+    return self.class()
+  }
+  if c == '\\' {
+    if self.i >= self.cs.len() {
+      return Err("the pattern ends in `\\`")
+    }
+    let e = self.cs[self.i]
+    self.i += 1
+    if e == 'b' || e == 'B' {
+      return Ok(Node.Edge(e == 'B'))
+    }
+    return match class_escape(e) {
+      Some(n) => Ok(n)
+      None => if e.is_alpha() && e != 'n' && e != 't' && e != 'r' {
+        Err("unknown escape `\\" + e.str() + "`")
+      } else {
+        Ok(Node.Lit(escaped(e)))
+      }
+    }
+  }
+  return Ok(Node.Lit(c))
+}
+
+/// A bracketed class, after its `[`.
+fn Parser.class(&mut self) -> Result<Node, Str>
+  ensures self.i >= old(self.i)
+{
+  let start = self.i
+  var negated = false
+  if self.peek('^') {
+    self.i += 1
+    negated = true
+  }
+  var ranges: List<(Char, Char)> = []
+  var first = true
+  for self.i < self.cs.len() && (first || !self.peek(']'))
+    invariant self.i >= start && self.i <= self.cs.len()
+  {
+    first = false
+    var lo = self.cs[self.i]
+    self.i += 1
+    if lo == '\\' && self.i < self.cs.len() {
+      let e = self.cs[self.i]
+      self.i += 1
+      match class_escape(e) {
+        Some(Class(rs, false)) => {
+          ranges.extend(rs)
+          continue
+        }
+        Some(_) => {
+          return Err("`\\" + e.str() + "` cannot be in a class")
+        }
+        None => lo = escaped(e)
+      }
+    }
+    var hi = lo
+    if self.i + 1 < self.cs.len() && self.cs[self.i] == '-' && self.cs[self.i + 1] != ']' {
+      hi = self.cs[self.i + 1]
+      self.i += 2
+      if hi == '\\' && self.i < self.cs.len() {
+        hi = escaped(self.cs[self.i])
+        self.i += 1
+      }
+      if hi < lo {
+        return Err("a class range runs backwards")
+      }
+    }
+    ranges.push((lo, hi))
+  }
+  if !self.peek(']') {
+    return Err("`[` needs `]`")
+  }
+  self.i += 1
+  return Ok(Node.Class(ranges, negated))
+}
+
+/// Instructions for `n`, appended to `prog`.
+fn emit(n: Node, prog: &mut List<Inst>) -> Result<(), Str>
+  ensures prog.len() >= old(prog.len())
+{
+  let len0 = prog.len()
+  if prog.len() > MAX_PROGRAM {
+    return Err("the pattern is too large")
+  }
+  match n {
+    Empty => {}
+    Lit(c) => prog.push(Inst.Char(c))
+    Any => prog.push(Inst.Any)
+    Class(rs, neg) => prog.push(Inst.Class(rs, neg))
+    Start => prog.push(Inst.Start)
+    End => prog.push(Inst.End)
+    Edge(neg) => prog.push(Inst.Edge(neg))
+    Group(index, inner) => {
+      if index < 1 || index > MAX_GROUPS {
+        return Err("a group number is out of range")
+      }
+      prog.push(Inst.Save(2 * index))
+      emit(inner, &mut prog)?
+      prog.push(Inst.Save(2 * index + 1))
+    }
+    Cat(items) => {
+      for it in items invariant prog.len() >= len0 {
+        emit(it, &mut prog)?
+      }
+    }
+    Alt(options) => {
+      var jumps: List<Int> = []
+      for k in 0..options.len() invariant prog.len() >= len0 {
+        if k + 1 < options.len() {
+          let split = prog.len()
+          prog.push(Inst.Split(split + 1, -1))
+          emit(options[k], &mut prog)?
+          jumps.push(prog.len())
+          prog.push(Inst.Jump(-1))
+          prog[split] = Inst.Split(split + 1, prog.len())
+        } else {
+          emit(options[k], &mut prog)?
+        }
+      }
+      for j in jumps invariant prog.len() >= len0 {
+        if j >= 0 && j < prog.len() {
+          prog[j] = Inst.Jump(prog.len())
+        }
+      }
+    }
+    Repeat(inner, lo, hi, greedy) => {
+      for _ in 0..lo invariant prog.len() >= len0 {
+        emit(inner, &mut prog)?
+      }
+      if hi < 0 {
+        let top = prog.len()
+        prog.push(Inst.Split(-1, -1))
+        emit(inner, &mut prog)?
+        prog.push(Inst.Jump(top))
+        let out = prog.len()
+        prog[top] = if greedy { Inst.Split(top + 1, out) } else { Inst.Split(out, top + 1) }
+      } else {
+        var splits: List<Int> = []
+        for _ in lo..hi invariant prog.len() >= len0 {
+          splits.push(prog.len())
+          prog.push(Inst.Split(-1, -1))
+          emit(inner, &mut prog)?
+        }
+        let out = prog.len()
+        for s in splits invariant prog.len() >= len0 {
+          if s >= 0 && s < prog.len() {
+            prog[s] = if greedy { Inst.Split(s + 1, out) } else { Inst.Split(out, s + 1) }
+          }
+        }
+      }
+    }
+  }
+  return Ok(())
+}
+
+/// Whether byte `b` means something in a pattern.
+fn is_special(b: U8) -> Bool {
+  return b == 92 ||
+    b == 46 ||
+    b == 94 ||
+    b == 36 ||
+    b == 42 ||
+    b == 43 ||
+    b == 63 ||
+    b == 40 ||
+    b == 41 ||
+    b == 91 ||
+    b == 93 ||
+    b == 123 ||
+    b == 125 ||
+    b == 124
+}
+
+/// A pattern that matches exactly `s`: its special characters escaped with `\`.
+pub fn escape(s: Str) -> Str
+  ensures result.len() >= s.len()
+{
+  var out = ""
+  var start = 0
+  for i in 0..s.len() invariant start >= 0 && start <= i && out.len() >= start {
+    if is_special(s[i]) {
+      out += s[start..i] + "\\"
+      start = i
+    }
+  }
+  return out + s[start..s.len()]
+}
+
+/// `pattern`, compiled, or what is wrong with it.
+pub fn compile(pattern: Str) -> Result<Regex, Str>
+  ensures result.is_err() || result.unwrap().prog.len() >= 3
+{
+  var p = Parser { cs: pattern.chars(), i: 0, groups: 0 }
+  let tree = p.alt()?
+  if p.i < p.cs.len() {
+    return Err("`)` at " + p.i.str() + " closes nothing")
+  }
+  var prog = [Inst.Save(0)]
+  emit(tree, &mut prog)?
+  prog.push(Inst.Save(1))
+  prog.push(Inst.Done)
+  return Ok(Regex { prog: prog, groups: p.groups })
+}
+
+fn is_word(c: Char) -> Bool {
+  return c.is_alpha() || c.is_digit() || c == '_'
+}
+
+/// Whether `c` is in the class.
+fn in_class(c: Char, ranges: List<(Char, Char)>, negated: Bool) -> Bool
+  ensures !ranges.is_empty() || result == negated
+{
+  for r in ranges {
+    if c >= r.0 && c <= r.1 {
+      return !negated
+    }
+  }
+  return negated
+}
+
+/// A thread of the VM: where it is in the program, and what it has captured.
+struct Thread {
+  pc: Int
+  slots: List<Int>
+}
+
+/// The threads reached from `pc` at character `i` without reading a character, in
+/// priority order, added to `list` (`seen` marks the instructions reached at position `mark`).
+fn Regex.add(
+  self,
+  list: &mut List<Thread>,
+  seen: &mut List<Int>,
+  mark: Int,
+  pc0: Int,
+  slots0: List<Int>,
+  cs: List<Char>,
+  i: Int,
+)
+  ensures list.len() >= old(list.len())
+{
+  let len0 = list.len()
+  var stack = [Thread { pc: pc0, slots: slots0 }]
+  for !stack.is_empty() invariant list.len() >= len0 {
+    let t = match stack.pop() {
+      Some(x) => x
+      None => {
+        return
+      }
+    }
+    let pc = t.pc
+    if pc < 0 || pc >= self.prog.len() || pc >= seen.len() || seen[pc] == mark {
+      continue
+    }
+    seen[pc] = mark
+    match self.prog[pc] {
+      Jump(x) => stack.push(Thread { pc: x, slots: t.slots })
+      Split(x, y) => {
+        stack.push(Thread { pc: y, slots: t.slots })
+        stack.push(Thread { pc: x, slots: t.slots })
+      }
+      Save(k) => {
+        var s = t.slots
+        if k >= 0 && k < s.len() {
+          s[k] = i
+        }
+        stack.push(Thread { pc: pc + 1, slots: s })
+      }
+      Start => if i == 0 { stack.push(Thread { pc: pc + 1, slots: t.slots }) }
+      End => if i == cs.len() { stack.push(Thread { pc: pc + 1, slots: t.slots }) }
+      Edge(neg) => {
+        let before = i > 0 && i <= cs.len() && is_word(cs[i - 1])
+        let after = i >= 0 && i < cs.len() && is_word(cs[i])
+        if (before != after) != neg {
+          stack.push(Thread { pc: pc + 1, slots: t.slots })
+        }
+      }
+      _ => list.push(t)
+    }
+  }
+}
+
+/// The capture slots (character indices) of the first match starting at or after
+/// character `from`; with `whole`, only a match of all of `cs` from `from`.
+fn Regex.run(self, cs: List<Char>, from: Int, whole: Bool) -> Option<List<Int>> {
+  let nslots = 2 * self.groups + 2
+  // Each instruction is reached at most once per position: `seen` holds the last position.
+  var seen = [-1].repeat(self.prog.len())
+  var clist: List<Thread> = []
+  var found: Option<List<Int>> = None
+  for i in max(from, 0)..cs.len() + 1 {
+    if found.is_none() && (i == from || !whole) {
+      self.add(&mut clist, &mut seen, i, 0, [-1].repeat(nslots), cs, i)
+    }
+    if clist.is_empty() {
+      if found.is_some() || whole {
+        break
+      }
+      continue
+    }
+    var nlist: List<Thread> = []
+    for t in clist {
+      let pc = t.pc
+      if pc < 0 || pc >= self.prog.len() {
+        continue
+      }
+      let inst = self.prog[pc]
+      if inst == Inst.Done {
+        if !whole || i == cs.len() {
+          found = Some(t.slots)
+          // The threads after this one have lower priority.
+          break
+        }
+        continue
+      }
+      let ok = match inst {
+        Char(c) => i < cs.len() && cs[i] == c
+        Any => i < cs.len() && cs[i] != '\n'
+        Class(rs, neg) => i < cs.len() && in_class(cs[i], rs, neg)
+        _ => false
+      }
+      if ok {
+        self.add(&mut nlist, &mut seen, i + 1, pc + 1, t.slots, cs, i + 1)
+      }
+    }
+    clist = nlist
+  }
+  return found
+}
+
+/// Byte offsets of each character of `s`, and `s.len()` after the last.
+fn offsets(s: Str) -> List<Int>
+  ensures !result.is_empty()
+{
+  var out: List<Int> = []
+  for i in 0..s.len() {
+    if s[i] < 128 || s[i] >= 192 {
+      out.push(i)
+    }
+  }
+  out.push(s.len())
+  return out
+}
+
+/// The byte offset of character `k`, kept in `0..=s.len()`.
+fn offset_of(offs: List<Int>, k: Int, n: Int) -> Int
+  requires n >= 0
+  ensures result >= 0 && result <= n
+{
+  if k < 0 || k >= offs.len() {
+    return n
+  }
+  return min(max(offs[k], 0), n)
+}
+
+fn Regex.to_match(self, slots: List<Int>, offs: List<Int>, n: Int) -> Match
+  requires n >= 0
+  ensures result.start >= 0 && result.start <= result.end && result.end <= n
+{
+  let a = if slots.len() > 0 { offset_of(offs, slots[0], n) } else { 0 }
+  let b = if slots.len() > 1 { offset_of(offs, slots[1], n) } else { 0 }
+  var groups: List<Option<(Int, Int)>> = []
+  for g in 1..self.groups + 1 {
+    if 2 * g + 1 < slots.len() && slots[2 * g] >= 0 && slots[2 * g + 1] >= 0 {
+      groups.push(Some((offset_of(offs, slots[2 * g], n), offset_of(offs, slots[2 * g + 1], n))))
+    } else {
+      groups.push(None)
+    }
+  }
+  return Match { start: min(a, b), end: max(a, b), groups: groups }
+}
+
+/// The first match in `s`.
+pub fn Regex.find(self, s: Str) -> Option<Match>
+  ensures result.is_none() ||
+    result.unwrap().start <= result.unwrap().end && result.unwrap().end <= s.len()
+{
+  return match self.run(s.chars(), 0, false) {
+    Some(slots) => Some(self.to_match(slots, offsets(s), s.len()))
+    None => None
+  }
+}
+
+/// Whether the pattern matches somewhere in `s`.
+pub fn Regex.is_match(self, s: Str) -> Bool {
+  return self.run(s.chars(), 0, false).is_some()
+}
+
+/// Whether the pattern matches all of `s`.
+pub fn Regex.full_match(self, s: Str) -> Bool {
+  return self.run(s.chars(), 0, true).is_some()
+}
+
+/// Every match in `s`, from the left, none overlapping (after an empty match the search
+/// moves on a character).
+pub fn Regex.find_all(self, s: Str) -> List<Match> {
+  let cs = s.chars()
+  let offs = offsets(s)
+  var out: List<Match> = []
+  var from = 0
+  for from <= cs.len() invariant from >= 0 {
+    match self.run(cs, from, false) {
+      Some(slots) => {
+        out.push(self.to_match(slots, offs, s.len()))
+        let end = if slots.len() > 1 { slots[1] } else { cs.len() }
+        from = if end > from { end } else { from + 1 }
+      }
+      None => {
+        break
+      }
+    }
+  }
+  return out
+}
+
+/// The text a match covers.
+pub fn Match.text(self, s: Str) -> Str
+  ensures result.len() <= s.len()
+{
+  let a = min(max(self.start, 0), s.len())
+  return s[a..min(max(self.end, a), s.len())]
+}
+
+/// The text group `g` matched (group 0 is the whole match), if it took part.
+pub fn Match.group(self, s: Str, g: Int) -> Option<Str>
+  ensures result.is_none() || result.unwrap().len() <= s.len()
+{
+  if g == 0 {
+    return Some(self.text(s))
+  }
+  if g < 0 {
+    return None
+  }
+  return match self.groups.get(g - 1) {
+    Some(Some((a, b))) => if a >= 0 && a <= b && b <= s.len() { Some(s[a..b]) } else { None }
+    _ => None
+  }
+}
+
+/// `with` for match `m` of `s`: `$0` to `$9` replaced by the groups, `$$` by `$`.
+fn expand(with: Str, m: Match, s: Str) -> Str {
+  var out = ""
+  var start = 0
+  var i = 0
+  for i < with.len() invariant i >= 0 && start >= 0 && start <= i && i <= with.len() {
+    if with[i] == 36 &&
+      i + 1 < with.len() &&
+      (with[i + 1] == 36 || with[i + 1] >= 48 && with[i + 1] <= 57) {
+      out += with[start..i]
+      let next = with[i + 1]
+      out += if next == 36 { "$" } else { m.group(s, next as Int - 48).unwrap_or("") }
+      i += 2
+      start = i
+    } else {
+      i += 1
+    }
+  }
+  return out + with[start..with.len()]
+}
+
+/// `s` with every match replaced by `with`, in which `$0` to `$9` stand for the groups and
+/// `$$` for `$`.
+pub fn Regex.replace_all(self, s: Str, with: Str) -> Str {
+  var out = ""
+  var last = 0
+  for m in self.find_all(s) invariant last >= 0 && last <= s.len() {
+    if m.start < last || m.end < m.start || m.end > s.len() {
+      continue
+    }
+    out += s[last..m.start] + expand(with, m, s)
+    last = m.end
+  }
+  return out + s[last..s.len()]
+}
+
+/// The pieces of `s` between matches.
+pub fn Regex.split(self, s: Str) -> List<Str>
+  ensures !result.is_empty()
+{
+  var out: List<Str> = []
+  var last = 0
+  for m in self.find_all(s) invariant last >= 0 && last <= s.len() {
+    if m.start < last || m.end <= m.start || m.end > s.len() {
+      continue
+    }
+    out.push(s[last..m.start])
+    last = m.end
+  }
+  out.push(s[last..s.len()])
+  return out
+}

@@ -400,6 +400,7 @@ fn prove_cmd(dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> Output
       "html",
       "json",
       "hash",
+      "regex",
     ] {
       src += "import \"std/" + p + "\"\n"
     }

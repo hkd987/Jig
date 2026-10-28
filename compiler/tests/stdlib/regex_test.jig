@@ -1,0 +1,159 @@
+import "std/regex"
+
+// Regular expressions: each piece of the syntax, which match wins, captures, replacing and
+// splitting, byte offsets in UTF-8 text, errors, and time linear in the text.
+
+/// The first match of `pattern` in `s`, as text, or `"-"` for none.
+fn first(pattern: Str, s: Str) -> Str {
+  let re = regex.compile(pattern).unwrap()
+  return match re.find(s) {
+    Some(m) => m.text(s)
+    None => "-"
+  }
+}
+
+/// Every match of `pattern` in `s`, as text.
+fn all(pattern: Str, s: Str) -> List<Str> {
+  let re = regex.compile(pattern).unwrap()
+  var out: List<Str> = []
+  for m in re.find_all(s) {
+    out.push(m.text(s))
+  }
+  return out
+}
+
+test "literals, any character and where a match lies" {
+  let re = regex.compile("abc").unwrap()
+  let m = re.find("xxabcx").unwrap()
+  assert(m.start == 2 && m.end == 5 && m.text("xxabcx") == "abc")
+  assert(re.find("ab") == None && !re.is_match("acb"))
+  assert(first("a.c", "abc a\nc") == "abc" && first("a.c", "a\nc") == "-")
+  assert(first("", "xyz") == "" && regex.compile("").unwrap().find("xyz").unwrap().start == 0)
+}
+
+test "classes, ranges and the shorthand classes" {
+  assert(first("[a-c]+", "xxcabz") == "cab" && first("[^a-c ]+", "ab xyz") == "xyz")
+  assert(first("\\d+", "id 4521!") == "4521" && first("\\D+", "42ab7") == "ab")
+  assert(first("\\w+", "  hi_there9 ") == "hi_there9" && first("\\W+", "ab, cd") == ", ")
+  assert(first("\\s+", "a \t\nb") == " \t\n" && first("\\S+", "  x1 ") == "x1")
+  assert(first("[\\d_]+", "ab_12c") == "_12" && first("[a\\-z]+", "b-az") == "-az")
+  assert(first("[]a]+", "x]a]") == "]a]" && first("[a-]+", "b-a") == "-a")
+  assert(first("[.*+]+", "a+*.b") == "+*.")
+}
+
+test "anchors and word edges" {
+  assert(first("^ab", "abab") == "ab" && first("^b", "ab") == "-")
+  assert(
+    first("b$", "abab") == "b" && regex.compile("b$").unwrap().find("abab").unwrap().start == 3,
+  )
+  assert(first("^$", "") == "" && first("^$", "a") == "-")
+  assert(all("\\bcat\\b", "cat concat cat.") == ["cat", "cat"])
+  assert(all("\\Bcat", "cat concat") == ["cat"] && first("\\b", "") == "-")
+}
+
+test "repetition, greedy and lazy" {
+  assert(first("ab*", "abbbc") == "abbb" && first("ab+", "ac abb") == "abb")
+  assert(first("colou?r", "color") == "color" && first("colou?r", "colour") == "colour")
+  assert(first("a{3}", "aaaaa") == "aaa" && first("a{2,}", "aaaaa") == "aaaaa")
+  assert(first("a{2,3}", "aaaaa") == "aaa" && first("a{2,3}", "a") == "-")
+  assert(first("a{0}b", "ab") == "b")
+  assert(first("a.*b", "aXbYb") == "aXbYb" && first("a.*?b", "aXbYb") == "aXb")
+  assert(
+    first("a+?", "aaa") == "a" && first("a??b", "ab") == "ab" && first("a{2,3}?", "aaaa") == "aa",
+  )
+  // A `{` that does not start a count is itself.
+  assert(first("a{x", "a{x") == "a{x" && first("a{", "a{") == "a{")
+}
+
+test "alternation takes the first option that matches" {
+  assert(first("a|ab", "ab") == "a" && first("ab|a", "ab") == "ab")
+  assert(first("cat|dog", "hotdog") == "dog" && first("x(a|b|c)+y", "xcabay") == "xcabay")
+  assert(first("|a", "a") == "" && first("(?:ab)+", "ababa") == "abab")
+}
+
+test "groups capture what they matched last" {
+  let s = "date: 2026-10-28"
+  let re = regex.compile("(\\d+)-(\\d+)-(\\d+)").unwrap()
+  let m = re.find(s).unwrap()
+  assert(m.group(s, 0) == Some("2026-10-28") && m.group(s, 1) == Some("2026"))
+  assert(m.group(s, 2) == Some("10") && m.group(s, 3) == Some("28"))
+  assert(m.group(s, 4) == None && m.group(s, -1) == None && m.groups.len() == 3)
+  // A group that took no part has no text; a repeated group keeps its last pass.
+  let alt = regex.compile("(a)|(b)").unwrap()
+  let mb = alt.find("b").unwrap()
+  assert(mb.group("b", 1) == None && mb.group("b", 2) == Some("b"))
+  let rep = regex.compile("(\\w)+").unwrap()
+  assert(rep.find("abc").unwrap().group("abc", 1) == Some("c"))
+  assert(regex.compile("(?:a)(b)").unwrap().find("ab").unwrap().group("ab", 1) == Some("b"))
+}
+
+test "full_match needs all of the text" {
+  let re = regex.compile("\\d{3}-\\d{4}").unwrap()
+  assert(re.full_match("555-1234") && !re.full_match("555-12345") && !re.full_match("x555-1234"))
+  assert(re.is_match("call 555-1234 now"))
+  assert(regex.compile("a|ab").unwrap().full_match("ab"))
+  assert(
+    regex.compile("a*").unwrap().full_match("") && !regex.compile("a+").unwrap().full_match(""),
+  )
+}
+
+test "find_all, replace_all and split" {
+  assert(all("\\d+", "a1b22c333") == ["1", "22", "333"] && all("x", "abc") == [])
+  assert(all("a*", "baaa") == ["", "aaa", ""])
+  let words = regex.compile("(\\w+)@(\\w+)").unwrap()
+  assert(words.replace_all("ann@ex, bo@why", "$2:$1") == "ex:ann, why:bo")
+  assert(words.replace_all("ann@ex", "[$0] $$1 $9") == "[ann@ex] $1 ")
+  assert(regex.compile("\\s*,\\s*").unwrap().split("a , b,c ,  d") == ["a", "b", "c", "d"])
+  assert(regex.compile(",").unwrap().split("") == [""])
+  assert(regex.compile(",").unwrap().split(",a,") == ["", "a", ""])
+  assert(regex.compile("x*").unwrap().split("abc") == ["abc"])
+  assert(regex.compile("o").unwrap().replace_all("foo", "0") == "f00")
+}
+
+test "positions are byte offsets in UTF-8 text" {
+  let s = "café, 中文!"
+  let m = regex.compile("é.").unwrap().find(s).unwrap()
+  assert(m.start == 3 && m.end == 6 && m.text(s) == "é,")
+  assert(first("[一-龥]+", s) == "中文" && all(".", "aé中") == ["a", "é", "中"])
+  assert(regex.compile("\\w+").unwrap().split("ab中cd") == ["", "中", ""])
+}
+
+test "a bad pattern says what is wrong" {
+  assert(regex.compile("(ab") == Err("`(` needs `)`"))
+  assert(regex.compile("ab)") == Err("`)` at 2 closes nothing"))
+  assert(regex.compile("*a") == Err("`*` at 0 repeats nothing"))
+  assert(regex.compile("a**").is_err() && regex.compile("^*").is_err())
+  assert(regex.compile("[ab") == Err("`[` needs `]`"))
+  assert(regex.compile("[z-a]") == Err("a class range runs backwards"))
+  assert(regex.compile("\\q") == Err("unknown escape `\\q`"))
+  assert(regex.compile("a\\") == Err("the pattern ends in `\\`"))
+  assert(regex.compile("a{3,2}").is_err() && regex.compile("a{1001}").is_err())
+  assert(regex.compile("a{2,1000}").is_ok() && regex.compile("[\\D]").is_err())
+}
+
+test "escape makes any text literal" {
+  assert(regex.escape("a.b*c") == "a\\.b\\*c" && regex.escape("plain") == "plain")
+  assert(first(regex.escape("1+1=2?"), "is 1+1=2?") == "1+1=2?")
+}
+
+test "no pattern takes more than linear time" {
+  // Each of these takes exponential time in a backtracking matcher.
+  let long = "a".repeat(5000)
+  assert(!regex.compile("(a*)*b").unwrap().is_match(long))
+  assert(!regex.compile("(a|a)*b").unwrap().is_match(long))
+  assert(!regex.compile("(a+a+)+b").unwrap().is_match(long))
+  assert(regex.compile("(a|aa)*").unwrap().full_match(long))
+  assert(regex.compile("(x+x+)+y").unwrap().find("x".repeat(3000) + "y").unwrap().end == 3001)
+}
+
+test "any text matches itself escaped"(s: Str) {
+  let re = regex.compile(regex.escape(s)).unwrap()
+  assert(re.full_match(s))
+  let m = re.find("<" + s + ">").unwrap()
+  assert(m.text("<" + s + ">") == s && m.start <= 1)
+}
+
+test "split and join give the text back"(s: Str) {
+  let pieces = regex.compile(";").unwrap().split(s)
+  assert(pieces.join(";") == s)
+}
