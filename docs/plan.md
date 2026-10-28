@@ -271,8 +271,11 @@ Changes to both compilers:
       with both compilers, and ThreadSanitizer finds no race in it.
 - [ ] C interop beyond numbers and strings (D35): byte buffers in and out, opaque pointers,
       structs passed by pointer, and callbacks.
-- [ ] The prover models `starts_with`, `ends_with`, `join` and bit operations on
-      non-negative integers.
+- [x] The prover models `starts_with`, `ends_with`, `join` and bit operations on
+      non-negative integers. Shifts by a constant, masks `2^k - 1` and `~` are exact in both
+      provers, the other bit operations bounded (`tests/prove/bits`, with functions that must
+      not prove); `starts_with`, `ends_with` and `contains` give length facts. String
+      contents, and so `join`, stay unmodeled: strings are lengths to the prover.
 - [ ] Table invariants (D29): invariants over every element of a list, checked where an
       element changes and assumed by the prover, applied to the compiler's arenas.
 - [ ] Checker speed: `jig check` on 100k lines under 100 ms with jigc.

@@ -1,0 +1,14 @@
+FAILED postcondition in `or_shrinks` at tests/prove/bits/main.jig:61:11: result <= x
+  counterexample: x = 0
+  confirmed: running it with x = 0 fails this check
+  hint: If the counterexample can happen, fix the code or the contract. Otherwise the prover is missing a fact (it sees only this body, its `requires` and its callees' contracts): add it as a `requires`, an `ensures` on a callee, or a loop `invariant`.
+FAILED postcondition in `shl_multiplies` at tests/prove/bits/main.jig:68:11: result == x as Int * 2
+  counterexample: x = 128
+  confirmed: running it with x = 128 fails this check
+  hint: If the counterexample can happen, fix the code or the contract. Otherwise the prover is missing a fact (it sees only this body, its `requires` and its callees' contracts): add it as a `requires`, an `ensures` on a callee, or a loop `invariant`.
+FAILED postcondition in `not_a_remainder` at tests/prove/bits/main.jig:76:11: result == x % 6
+  counterexample: x = 6
+  confirmed: running it with x = 6 fails this check
+  hint: If the counterexample can happen, fix the code or the contract. Otherwise the prover is missing a fact (it sees only this body, its `requires` and its callees' contracts): add it as a `requires`, an `ensures` on a callee, or a loop `invariant`.
+proved 11 of 14 contract obligations and 22 of 22 safety obligations in 11 functions (0 from cache)
+9 of 11 functions have contracts; 6 of those prove completely

@@ -308,6 +308,14 @@ fn or2(a: &str, b: &str) -> String {
     format!("(or {a} {b})")
 }
 
+/// The value of a numeral term (`5`, `(- 5)`).
+fn numeral(t: &str) -> Option<i128> {
+    match t.strip_prefix("(- ").and_then(|r| r.strip_suffix(')')) {
+        Some(n) => n.parse::<i128>().ok().map(|v| -v),
+        None => t.parse::<i128>().ok(),
+    }
+}
+
 fn range_fact(t: &str, lo: i128, hi: i128) -> String {
     format!("(and (<= {} {t}) (<= {t} {}))", int_lit(lo), int_lit(hi))
 }
@@ -2258,6 +2266,11 @@ impl<'a> Gen<'a> {
                 self.arith_result(fr, st, &r, k, span, "-");
                 Sv::int(r, k)
             }
+            // Two's complement: `~x` is `-x - 1`; unsigned, `max - x`.
+            (UnOp::BitNot, TyKind::Int(k, _)) => {
+                let r = if k.signed() { format!("(- (- {x}) 1)") } else { format!("(- {} {x})", int_lit(k.max())) };
+                Sv::int(self.define_int(r), k)
+            }
             (UnOp::Neg, TyKind::Float(_)) => {
                 let s = self.opaque_sort("JFloat");
                 let f = self.fun("fneg", std::slice::from_ref(&s), &s);
@@ -2396,8 +2409,9 @@ impl<'a> Gen<'a> {
                         let msg = format!("shift amount in range: {}", self.src(span));
                         self.oblige(fr, st, ObKind::Shift, span, msg, ok.clone());
                         self.assume(st, ok);
-                        return Some(self.fresh(t, "shift"));
+                        return Some(self.shift(st, op == Shl, &x, &y, ik, t));
                     }
+                    BitAnd | BitOr | BitXor => return Some(self.bitwise(st, op, &x, &y, ik, t)),
                     _ => return Some(self.fresh(t, "bits")),
                 };
                 let r = self.define_int(r);
@@ -2418,6 +2432,60 @@ impl<'a> Gen<'a> {
             }
             _ => Some(self.fresh(t, "bin")),
         }
+    }
+
+    /// A shift. By a constant it is exact: `>>` divides by the power of two, rounding down, and
+    /// `<<` multiplies by it, wrapping within the type's bits. By a variable, `>>` keeps the
+    /// sign and does not move the value away from zero.
+    fn shift(&mut self, st: &mut St, left: bool, x: &str, y: &str, ik: IntTy, t: Ty) -> Sv {
+        if let Some(n) = numeral(y).filter(|n| *n >= 0 && *n < ik.bits() as i128) {
+            let p = int_lit(1i128 << n);
+            let r = if !left {
+                format!("(div {x} {p})")
+            } else {
+                let m = 1i128 << ik.bits();
+                if ik.signed() {
+                    let h = int_lit(m / 2);
+                    format!("(- (mod (+ (* {x} {p}) {h}) {}) {h})", int_lit(m))
+                } else {
+                    format!("(mod (* {x} {p}) {})", int_lit(m))
+                }
+            };
+            return Sv::int(self.define_int(r), ik);
+        }
+        let r = self.fresh(t, "shift");
+        if let (false, Some(rt)) = (left, r.term().map(|s| s.to_string())) {
+            self.assume(st, format!("(=> (>= {x} 0) (and (>= {rt} 0) (<= {rt} {x})))"));
+            self.assume(st, format!("(=> (< {x} 0) (and (>= {rt} {x}) (< {rt} 0)))"));
+        }
+        r
+    }
+
+    /// `&`, `|` and `^`. `x & m` with `m` a constant `2^k - 1` is `x` modulo `2^k` (in two's
+    /// complement, whatever the sign of `x`); otherwise the result is bounded by what the
+    /// operands' signs imply.
+    fn bitwise(&mut self, st: &mut St, op: BinOp, x: &str, y: &str, ik: IntTy, t: Ty) -> Sv {
+        if op == BinOp::BitAnd {
+            for (v, m) in [(x, y), (y, x)] {
+                if let Some(m) = numeral(m).filter(|m| *m >= 0 && *m < 1 << 62 && (*m + 1) & *m == 0) {
+                    return Sv::int(self.define_int(format!("(mod {v} {})", int_lit(m + 1))), ik);
+                }
+            }
+        }
+        let r = self.fresh(t, "bits");
+        let Some(rt) = r.term().map(|s| s.to_string()) else { return r };
+        let both = format!("(and (>= {x} 0) (>= {y} 0))");
+        let fact = match op {
+            BinOp::BitAnd => format!(
+                "(and (=> (>= {x} 0) (and (>= {rt} 0) (<= {rt} {x}))) (=> (>= {y} 0) (and (>= {rt} 0) (<= {rt} {y}))))"
+            ),
+            BinOp::BitOr => format!(
+                "(and (=> {both} (and (>= {rt} {x}) (>= {rt} {y}) (<= {rt} (+ {x} {y})))) (=> (or (< {x} 0) (< {y} 0)) (< {rt} 0)))"
+            ),
+            _ => format!("(=> {both} (and (>= {rt} 0) (<= {rt} (+ {x} {y}))))"),
+        };
+        self.assume(st, fact);
+        r
     }
 
     fn cast(&mut self, fr: &Frame, st: &mut St, v: &Sv, from: Ty, to: Ty, span: Span) -> Option<Sv> {

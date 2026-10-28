@@ -54,8 +54,10 @@ function counts as proved only if it states a contract and every obligation in i
 - Contract arithmetic is checked for overflow: write `result == self.xs.len() - 1`, not
   `result + 1 == ...`, and `pos - f.base <= n`, not `pos <= f.base + n`.
 - No `match` in contracts, and a parameter named `result` hides the return value.
-- Bit operations, shifts, `starts_with` and `join` are not modeled: use `%` and `*` where the
-  values allow it, or check lengths explicitly.
+- The prover knows shifts by a constant, masks `x & (2^k - 1)` and `~` exactly, but other
+  `&`, `|`, `^` and shifts by a variable only by bounds. Strings are lengths to it:
+  `starts_with`, `ends_with` and `contains` give `part.len() <= s.len()`, nothing about the
+  contents, and `join` nothing. Check lengths explicitly.
 - A struct invariant is checked after every write to a field, so every intermediate state
   must satisfy it.
 - An arena index that comes in as a parameter can be required (`requires e >= 0 && e <

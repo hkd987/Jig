@@ -62,6 +62,6 @@ CI checks and tests each one with both compilers.
 
 **Not yet.** Fewer agent turns than Rust and TypeScript (the first runs solved every task
 in all three, in 7.3, 6.8 and 6.2 turns on average), contracts on most of the compiler (477
-of its 1,225 functions prove completely, the lexer and nearly all of the parser among them),
+of its 1,229 functions prove completely, the lexer and nearly all of the parser among them),
 self-hosted speed parity, and checking 100k lines in under 100 ms with jigc (209 ms on one
 thread; the Rust compiler's 70 ms uses four) are open (`docs/gates/phase4.md`).

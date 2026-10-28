@@ -588,7 +588,7 @@ fn prove_program(
 // ---------- the proof cache ----------
 
 /// Bump when the encoding changes, so stale cached proofs are not reused (the bootstrap's).
-const VC_VERSION: Str = "vc-9"
+const VC_VERSION: Str = "vc-10"
 
 /// The bootstrap compiler's version (its `CARGO_PKG_VERSION`), part of every key.
 const JIG_VERSION: Str = "0.1.0-alpha"

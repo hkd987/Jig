@@ -16,7 +16,7 @@ Some rows are research rather than implementation; they say so.
 | No HTTP client, no TLS | `std/net` requests over http and https, OpenSSL (D33) | done: `net.get`, `post`, `send` over `net.fetch`; TLS through OpenSSL opened at run time, certificates and names checked; `examples/fetch` against a local HTTPS server in CI, natively and on both interpreters |
 | One connection at a time | concurrent serving (D34) | done: `net.serve_http_parallel` answers on a pool of threads natively; `examples/api` answers eight 400 ms requests at once in CI with both compilers |
 | C interop: numbers and strings only | buffers, pointers, structs, callbacks (D35) | open; callbacks into the interpreter need a trampoline per signature |
-| Prover: `starts_with`, `join`, bit operations | models in both provers | open |
+| Prover: `starts_with`, `join`, bit operations | models in both provers | done for bit operations (exact for constant shifts, masks and `~`, bounded otherwise) and the length facts of `starts_with`/`ends_with`/`contains`; string contents and `join` stay out, as strings are lengths to the prover |
 | Prover: invariants over a table's every element (D29) | quantified invariants checked incrementally | open; research: the design is not settled |
 | Checker speed | 100k lines under 100 ms with jigc | open |
 | Float-heavy code behind Rust | nbody within 10% | open |

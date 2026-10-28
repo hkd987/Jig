@@ -116,7 +116,7 @@ cannot overflow, and literal decoding stays in range. The parser's cursor is alw
 token, no parsing function moves it back, and node constructors return the new index; all
 of the parser proves but the six functions that index the tree by a node id or slice the
 source by a token's offsets, which would need facts about every node or token. Across the
-whole compiler, 493 of its 1,225 functions state contracts and 477 of them prove completely
+whole compiler, 493 of its 1,229 functions state contracts and 477 of them prove completely
 (39%): helpers in every pass, among them those that index an arena by a parameter, which
 require the index. Most of the rest read an index out of a tree node or a table
 (`docs/gates/phase4.md`).

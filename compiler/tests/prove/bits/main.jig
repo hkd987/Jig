@@ -1,0 +1,100 @@
+import "std/io"
+
+// Bit operations: shifts by a constant and masks of the form 2^k - 1 are exact, `~` is
+// exact, and `&`, `|` and `^` are bounded by their operands' signs. The last functions must
+// not prove: each has a counterexample.
+
+/// Proves: a mask keeps the low byte.
+fn low_byte(x: Int) -> Int
+  ensures result >= 0 && result <= 255
+{
+  return x & 255
+}
+
+/// Proves: shifting a 32-bit word right by 24 leaves its top byte.
+fn top_byte(w: U32) -> U8 {
+  return (w >> 24) as U8
+}
+
+/// Proves: two bytes packed into a 16-bit value.
+fn pack(hi: U8, lo: U8) -> Int
+  ensures result >= 0 && result <= 65535
+{
+  return ((hi as U32) << 8 | lo as U32) as Int
+}
+
+/// Proves: `~` on a byte is 255 minus it, and on an Int is `-x - 1`.
+fn complement(b: U8, x: Int) -> (U8, Int)
+  ensures result.0 as Int == 255 - b as Int && result.1 == -1 - x
+{
+  return (~b, ~x)
+}
+
+/// Proves: or-ing flags keeps every flag.
+fn set_flags(flags: Int, add: Int) -> Int
+  requires flags >= 0 && add >= 0
+  ensures result >= flags && result >= add
+{
+  return flags | add
+}
+
+/// Proves: an arithmetic shift of a negative number stays negative, and a shift by a
+/// variable amount never grows a non-negative one.
+fn shifts(neg: Int, pos: Int, n: Int) -> (Int, Int)
+  requires neg < 0 && pos >= 0 && n >= 0 && n < 64
+  ensures result.0 < 0 && result.1 <= pos
+{
+  return (neg >> 3, pos >> n)
+}
+
+/// Proves: `<<` by a constant is a multiplication when nothing is shifted out.
+fn double(x: U32) -> U32
+  requires x < 1000
+  ensures result == x * 2
+{
+  return x << 1
+}
+
+/// Fails: an odd bit can make `x | 1` bigger than `x`.
+fn or_shrinks(x: Int) -> Int
+  requires x >= 0
+  ensures result <= x
+{
+  return x | 1
+}
+
+/// Fails: `<<` wraps, so it is not always a multiplication.
+fn shl_multiplies(x: U8) -> Int
+  ensures result == x as Int * 2
+{
+  return (x << 1) as Int
+}
+
+/// Fails: `&` with a mask that is not 2^k - 1 is not a remainder.
+fn not_a_remainder(x: Int) -> Int
+  requires x >= 0
+  ensures result == x % 6
+{
+  return x & 5
+}
+
+fn main() effects {io} {
+  let (c, d) = complement(1, 2)
+  let (e, f) = shifts(-8, 8, 1)
+  io.println(
+    [
+      low_byte(300),
+      top_byte(4278190080) as Int,
+      pack(1, 2),
+      c as Int,
+      d,
+      set_flags(1, 2),
+      e,
+      f,
+      double(3) as Int,
+      or_shrinks(1),
+      shl_multiplies(3),
+      not_a_remainder(5),
+    ].str(),
+  )
+}

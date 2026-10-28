@@ -417,6 +417,11 @@ fn Gen.unary(
       self.arith_result(fr, &mut st, r, k, span)
       return Some(sv_int(r, k))
     }
+    // Two's complement: `~x` is `-x - 1`; unsigned, `max - x`.
+    (BitNot, Int(k, _)) => {
+      let r = if k.signed() { "(- (- " + x + ") 1)" } else { "(- " + k.max_text() + " " + x + ")" }
+      return Some(sv_int(self.define_int(r), k))
+    }
     (Neg, Float(_)) => {
       let s = self.opaque_sort("JFloat")
       let f = self.fun("fneg", [s], s)
@@ -496,6 +501,136 @@ fn Gen.binary(
 }
 
 /// `op` on two values whose operand type is `t`.
+/// The value of a numeral term (`5`, `(- 5)`), if it is one and fits in an `Int`.
+fn numeral(t: Str) -> Option<Int> {
+  if t.len() > 4 && t[0..3] == "(- " && t[t.len() - 1] == 41 {
+    return match t[3..t.len() - 1].to_int() {
+      Some(v) => if v >= 0 { Some(0 - v) } else { None }
+      None => None
+    }
+  }
+  return t.to_int()
+}
+
+/// 2^n in decimal, for n from 0 to 64.
+fn pow2_text(n: Int) -> Str {
+  if n >= 64 {
+    return "18446744073709551616"
+  }
+  var p: U64 = 1
+  for _ in 0..n {
+    p = p * 2
+  }
+  return p.str()
+}
+
+/// A shift. By a constant it is exact: `>>` divides by the power of two, rounding down, and
+/// `<<` multiplies by it, wrapping within the type's bits. By a variable, `>>` keeps the
+/// sign and does not move the value away from zero.
+fn Gen.shift(&mut self, st: &mut St, left: Bool, x: Str, y: Str, ik: IntTy, t: Int) -> Sv {
+  let n = numeral(y).unwrap_or(-1)
+  if n >= 0 && n < int_bits(ik) {
+    let p = pow2_text(n)
+    var r = "(div " + x + " " + p + ")"
+    if left {
+      let m = pow2_text(int_bits(ik))
+      if ik.signed() {
+        let h = pow2_text(int_bits(ik) - 1)
+        r = "(- (mod (+ (* " + x + " " + p + ") " + h + ") " + m + ") " + h + ")"
+      } else {
+        r = "(mod (* " + x + " " + p + ") " + m + ")"
+      }
+    }
+    return sv_int(self.define_int(r), ik)
+  }
+  let r = self.fresh(t, "shift")
+  if !left {
+    match sv_term(r) {
+      Some(rt) => {
+        self.assume(
+          &mut st,
+          "(=> (>= " + x + " 0) (and (>= " + rt + " 0) (<= " + rt + " " + x + ")))",
+        )
+        self.assume(
+          &mut st,
+          "(=> (< " + x + " 0) (and (>= " + rt + " " + x + ") (< " + rt + " 0)))",
+        )
+      }
+      None => {}
+    }
+  }
+  return r
+}
+
+/// `&`, `|` and `^`. `x & m` with `m` a constant `2^k - 1` is `x` modulo `2^k` (in two's
+/// complement, whatever the sign of `x`); otherwise the result is bounded by what the
+/// operands' signs imply.
+fn Gen.bitwise(&mut self, st: &mut St, op: syntax.BinOp, x: Str, y: Str, ik: IntTy, t: Int) -> Sv {
+  if op == syntax.BinOp.BitAnd {
+    for (v, m) in [(x, y), (y, x)] {
+      let mv = numeral(m).unwrap_or(-1)
+      if mv >= 0 && mv < 4611686018427387904 && ((mv + 1) & mv) == 0 {
+        return sv_int(self.define_int("(mod " + v + " " + smt_int(mv + 1) + ")"), ik)
+      }
+    }
+  }
+  let r = self.fresh(t, "bits")
+  let rt = match sv_term(r) {
+    Some(term) => term
+    None => {
+      return r
+    }
+  }
+  let both = "(and (>= " + x + " 0) (>= " + y + " 0))"
+  let fact = if op == syntax.BinOp.BitAnd {
+    "(and (=> (>= " +
+      x +
+      " 0) (and (>= " +
+      rt +
+      " 0) (<= " +
+      rt +
+      " " +
+      x +
+      "))) (=> (>= " +
+      y +
+      " 0) (and (>= " +
+      rt +
+      " 0) (<= " +
+      rt +
+      " " +
+      y +
+      "))))"
+  } else if op == syntax.BinOp.BitOr {
+    "(and (=> " +
+      both +
+      " (and (>= " +
+      rt +
+      " " +
+      x +
+      ") (>= " +
+      rt +
+      " " +
+      y +
+      ") (<= " +
+      rt +
+      " (+ " +
+      x +
+      " " +
+      y +
+      ")))) (=> (or (< " +
+      x +
+      " 0) (< " +
+      y +
+      " 0)) (< " +
+      rt +
+      " 0)))"
+  } else {
+    "(=> " + both + " (and (>= " + rt + " 0) (<= " + rt + " (+ " + x + " " + y + "))))"
+  }
+  self.assume(&mut st, fact)
+  return r
+}
+
 fn Gen.binary_vals(
   &mut self,
   fr: VFrame,
@@ -604,7 +739,10 @@ fn Gen.binary_vals(
           let msg = "shift amount in range: " + self.src(span)
           self.oblige(fr, st, ObKind.Shift, span, msg, ok)
           self.assume(&mut st, ok)
-          return Some(self.fresh(t, "shift"))
+          return Some(self.shift(&mut st, op == syntax.BinOp.Shl, x, y, ik, t))
+        }
+        BitAnd | BitOr | BitXor => {
+          return Some(self.bitwise(&mut st, op, x, y, ik, t))
         }
         _ => {
           return Some(self.fresh(t, "bits"))

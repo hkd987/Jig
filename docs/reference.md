@@ -319,7 +319,12 @@ fn parse_port(s: Str) -> Result<Int, Str> {
 `jig prove` checks each function against its own contract and its callees' contracts, never
 their bodies, and also proves the absence of traps (overflow, division by zero, bounds,
 `unwrap`, reachable `panic`); it knows a list or string holds at most 2^60 items, so `i + 1`
-cannot overflow for an index `i`. Two things are read off a callee's body. What it can write:
+cannot overflow for an index `i`. Integer arithmetic is exact, and so are shifts by a
+constant (`x >> 3` divides by 8 rounding down; `x << 3` multiplies by 8, wrapping within the
+type), masks of the form `x & (2^k - 1)` (`x` modulo `2^k`) and `~x`; other bit operations are
+known by bounds (`x & y` is between 0 and `x` when `x >= 0`, `x | y` at least both when both
+are non-negative). Strings are known by their length: `s.starts_with(p)`, `ends_with` and
+`contains` imply `p.len() <= s.len()`. Two things are read off a callee's body. What it can write:
 after `f(&mut x)` or `x.m()` with `&mut self`, fields `f` never assigns keep their values.
 And what a pure function reads: a call to one that reads only scalars (not lists) is a
 function of them, so `self.at(i)` twice on the same fields gives the same result, even if
