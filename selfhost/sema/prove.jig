@@ -1691,6 +1691,110 @@ fn Sema.proven_entries(self, fs: List<FnReport>) -> Set<Int> {
 }
 
 /// The proofs `jig prove` (or `jigc prove`) cached for the program, as a build uses them.
+// ---------- the proofs the bootstrap carries ----------
+//
+// `bootstrap/jigc.c` is built with the checks its proofs remove, without a solver: the
+// proofs are kept in `bootstrap/proofs.txt`, a line `solver VERSION` and then, for each
+// proved function, its cache key and its obligations, `kind,lo,hi,PE` (P: proved, E: that
+// removes the check; offsets from the function's start) separated by `|`. A function whose
+// key no longer matches (it, or what its proof depends on, changed) keeps its checks.
+
+/// `proofs.txt` for the program, from its proof cache.
+fn Sema.export_proofs(self, std_dir: Str, cache_dir: Str) -> Str effects {fs, env, ffi, clock} {
+  let solver = solver_version().unwrap_or("")
+  let global = self.global_key(std_dir, solver)
+  let frames = compute_frames(self)
+  let reads = compute_reads(self)
+  var out = "solver " + solver + "\n"
+  for f in self.prove_targets(false) {
+    let key = self.cache_key(f, global, frames, reads)
+    let fd = self.defs.fns[f]
+    let base = self.pkgs[fd.pkg].files[fd.file].ast.items[fd.item].span.lo
+    match load_cached(join_path(cache_dir, key + ".json"), base) {
+      Some(obs) => {
+        var parts: List<Str> = []
+        for o in obs {
+          let flags = (if o.status == Status.Proved { "1" } else { "0" }) +
+            (if o.elidable { "1" } else { "0" })
+          parts.push(
+            o.kind.name() +
+              "," +
+              (o.span.lo - base).str() +
+              "," +
+              (o.span.hi - base).str() +
+              "," +
+              flags,
+          )
+        }
+        out += key + " " + parts.join("|") + "\n"
+      }
+      None => {}
+    }
+  }
+  return out
+}
+
+/// The checks `proofs` (as `export_proofs` writes them) remove from the program as it is.
+fn Sema.proofs_from(self, std_dir: Str, proofs: Str) -> Proven effects {fs} {
+  let lines = proofs.lines()
+  if lines.is_empty() || !lines[0].starts_with("solver ") {
+    return no_proofs()
+  }
+  let global = self.global_key(std_dir, lines[0][7..lines[0].len()])
+  let frames = compute_frames(self)
+  let reads = compute_reads(self)
+  var by_key: Map<Str, Str> = Map.new()
+  for line in lines[1..lines.len()] {
+    match line.find(" ") {
+      Some(i) => by_key.insert(line[0..i], line[i + 1..line.len()])
+      None => {}
+    }
+  }
+  var reports: List<FnReport> = []
+  for f in self.prove_targets(false) {
+    let fd = self.defs.fns[f]
+    let base = self.pkgs[fd.pkg].files[fd.file].ast.items[fd.item].span.lo
+    match by_key.get(self.cache_key(f, global, frames, reads)) {
+      Some(text) => match obligations_from(text, base) {
+        Some(obs) => reports.push(FnReport { fid: f, name: "", obligations: obs, cached: true })
+        None => {}
+      }
+      None => {}
+    }
+  }
+  var p = report_proven(reports)
+  p.entries = self.proven_entries(reports)
+  return p
+}
+
+/// The obligations of one line of `proofs.txt`, at offsets from `base`.
+fn obligations_from(text: Str, base: Int) -> Option<List<ObResult>> {
+  var out: List<ObResult> = []
+  if text.is_empty() {
+    return Some(out)
+  }
+  for part in text.split("|") {
+    let f = part.split(",")
+    if f.len() != 4 || f[3].len() != 2 {
+      return None
+    }
+    let lo = f[1].to_int()?
+    let hi = f[2].to_int()?
+    out.push(
+      ObResult {
+        kind: ob_kind_named(f[0])?
+        span: syntax.Span { lo: base + lo, hi: base + hi }
+        msg: ""
+        status: if f[3][0] == '1' { Status.Proved } else { Status.Unknown("") }
+        elidable: f[3][1] == '1'
+        replay: None
+        model: None
+      },
+    )
+  }
+  return Some(out)
+}
+
 fn Sema.cached_proven(self, std_dir: Str, cache_dir: Str) -> Proven effects {fs, env, ffi, clock} {
   let solver = solver_version().unwrap_or("")
   let global = self.global_key(std_dir, solver)

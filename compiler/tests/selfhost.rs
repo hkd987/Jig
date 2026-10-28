@@ -559,8 +559,8 @@ fn jigc_back_end_matches_bootstrap() {
     assert!(failures.is_empty(), "{} programs differ:\n{}", failures.len(), failures.join("\n"));
 }
 
-/// `bootstrap/jigc.c` is what `jigc cc selfhost compiler/std` prints, run from the
-/// repository root (D6). `bootstrap/update.sh` regenerates it.
+/// `bootstrap/jigc.c` is what `jigc cc selfhost compiler/std bootstrap/proofs.txt` prints,
+/// run from the repository root (D6). `bootstrap/update.sh` regenerates it.
 #[test]
 fn bootstrap_is_current() {
     if !have_cc() {
@@ -569,7 +569,7 @@ fn bootstrap_is_current() {
     }
     let root = std::fs::canonicalize(repo_root()).unwrap();
     let out = Command::new(jigc())
-        .args(["cc", "selfhost", "compiler/std"])
+        .args(["cc", "selfhost", "compiler/std", "bootstrap/proofs.txt"])
         .current_dir(&root)
         .env("PWD", &root)
         .output()

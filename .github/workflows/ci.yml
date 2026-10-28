@@ -100,7 +100,7 @@ jobs:
       - name: Build jig.exe from bootstrap/jigc.c
         run: gcc -O2 -fno-math-errno -std=gnu11 -w -pthread bootstrap/jigc.c -lm -lws2_32 -static -o jig.exe
       - name: bootstrap/jigc.c is a fixed point
-        run: ./jig.exe cc selfhost compiler/std > jigc1.c && cmp bootstrap/jigc.c jigc1.c
+        run: ./jig.exe cc selfhost compiler/std bootstrap/proofs.txt > jigc1.c && cmp bootstrap/jigc.c jigc1.c
       - name: Install the pinned Z3 solver
         run: |
           pip install -q z3-solver==5.3.2.0

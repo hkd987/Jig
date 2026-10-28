@@ -5,18 +5,24 @@ self-contained file, runtime included, that any C11 compiler builds (decision D6
 
 ```
 cc -O2 -std=gnu11 -pthread bootstrap/jigc.c -lm -o jigc
-./jigc cc selfhost compiler/std > jigc.c    # the same bytes as bootstrap/jigc.c
+./jigc cc selfhost compiler/std bootstrap/proofs.txt > jigc.c    # the same bytes as bootstrap/jigc.c
 ```
 
-`jigc cc DIR STD` prints the C program for the package in DIR (STD is the standard library,
-`compiler/std`), run from the repository root so the source locations it embeds are
+`jigc cc DIR STD [PROOFS]` prints the C program for the package in DIR (STD is the standard
+library, `compiler/std`), run from the repository root so the source locations it embeds are
 relative. The file is a fixed point: the compiler it builds regenerates it exactly, with gcc
 or clang.
 
+`proofs.txt` holds jigc's proofs of its own code (D39): for each function, its proof cache key
+and which of its obligations proved. With it, `jigc cc` leaves out the checks those proofs
+remove, as `jig build` does, without running a solver, so the file stays a fixed point on a
+machine without Z3. A function whose key no longer matches keeps its checks.
+
 Change anything under `selfhost/`, `compiler/std/` or `compiler/runtime/` and the file goes
 stale; `bootstrap/update.sh` rewrites `selfhost/sema/stdlib.jig` (the standard library and
-runtime jigc carries, with `stdlib.py`), rebuilds the file with only a C compiler (twice, so a
-changed back end compiles itself) and checks the fixed point. `cargo test` fails while it is
+runtime jigc carries, with `stdlib.py`), proves `selfhost/` again and rewrites `proofs.txt`
+when Z3 is installed, rebuilds the file with only a C compiler (twice, so a changed back end
+compiles itself) and checks the fixed point. `cargo test` fails while it is
 stale, and CI checks the fixed point with `bootstrap/update.sh --check` without Rust
 installed.
 

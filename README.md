@@ -60,7 +60,9 @@ jig fmt examples                            # the one formatting
 ```
 
 `jig prove` needs Z3 on the `PATH` (`pip install z3-solver==5.3.2.0`); native builds need a
-C compiler (`cc`, or `clang` for release builds). `jig help` lists every command, and
+C compiler (`cc`, or `clang` for release builds). On Windows, build it with MinGW-w64's gcc
+(from MSYS2, which `jig build` then uses too):
+`gcc -O2 -std=gnu11 -pthread bootstrap/jigc.c -lm -lws2_32 -static -o jig.exe`. `jig help` lists every command, and
 `jig explain E0314` explains a diagnostic. `check`, `test`, `prove` and `trace` take `--json`
 for agents.
 
@@ -126,9 +128,9 @@ Jig is an alpha. What it does not do yet (phase 5 of [the plan](docs/plan.md) cl
   thread against four), and float-heavy code runs behind Rust (nbody, 1.44).
 - **Agents** took about half a turn more in Jig than in Rust and TypeScript (three runs per
   task and language).
-- **Platforms and tools.** CI and the release cover Linux (x86-64) and macOS (Apple
-  silicon); other POSIX systems should build it with `bootstrap/install.sh` but are untested,
-  and there is no Windows port. The language server (`jig lsp`, and the VS Code extension in
+- **Platforms and tools.** CI and the release cover Linux (x86-64), macOS (Apple silicon)
+  and Windows (x86-64, through MinGW-w64's gcc; not MSVC or ARM64); other POSIX systems
+  should build it with `bootstrap/install.sh` but are untested. The language server (`jig lsp`, and the VS Code extension in
   `editors/vscode`) has diagnostics, hover, definitions and formatting but no completion
   or rename yet, and modules come from git (`jig get`) with [an index](docs/packages.md)
   but no hosted registry.

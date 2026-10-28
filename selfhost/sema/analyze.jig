@@ -243,10 +243,30 @@ fn c_dump_proved(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str>
   return generate_c(lw, cwd)
 }
 
+/// `jigc debug proofs DIR`: the proofs in DIR's cache as `bootstrap/proofs.txt` keeps them.
+fn proofs_dump(dir: Str, std_dir: Str) -> Result<Str, Str> effects {fs, env, ffi, clock, spawn} {
+  let (s, _) = analyze(dir, std_dir)
+  if !s.diags.is_empty() {
+    return Err(dir + " has errors")
+  }
+  let cache = join_path(join_path(find_project_root(dir).unwrap_or(dir), ".jig"), "proofs")
+  return Ok(s.export_proofs(std_dir, cache))
+}
+
 /// A release build of DIR as one self-contained C file: `c_dump`'s program with the runtime
-/// (`STD/../runtime`) inlined, so a C compiler alone builds it (`cc FILE -pthread -lm`).
-fn c_unit(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs, env, spawn} {
-  let c = c_dump(dir, std_dir, cwd)?
+/// (`STD/../runtime`) inlined, so a C compiler alone builds it (`cc FILE -pthread -lm`); with
+/// the checks `proofs` (a `bootstrap/proofs.txt`, if not empty) remove.
+fn c_unit(dir: Str, std_dir: Str, cwd: Str, proofs: Str) -> Result<Str, Str>
+  effects {fs, env, spawn}
+{
+  let (s, _) = analyze(dir, std_dir)
+  if !s.diags.is_empty() {
+    return Err(dir + " has errors")
+  }
+  let proven = if proofs.is_empty() { no_proofs() } else { s.proofs_from(std_dir, proofs) }
+  var lw = new_lw(s)
+  lw.mir.elide = proven
+  let c = generate_c(lw, cwd)?
   let header = read_runtime(std_dir, "jig_rt.h")?
   let runtime = read_runtime(std_dir, "jig_rt.c")?
   let include = "#include \"jig_rt.h\"\n"

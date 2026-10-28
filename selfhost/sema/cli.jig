@@ -445,10 +445,21 @@ pub fn run_cli(args: List<Str>, cwd: Str, std_dir: Str) -> Output
       None => output("", "usage: jig explain <code>\n", 2)
     }
   }
-  if cmd == "cc" && (rest.len() == 1 || rest.len() == 2) {
-    // The standard library may follow (the form bootstrap/update.sh has always used).
-    let std = if rest.len() == 2 { rest[1] } else { std_dir }
-    return result_output(c_unit(absolute_path(rest[0], cwd), std, cwd))
+  if cmd == "cc" && rest.len() >= 1 && rest.len() <= 3 {
+    // The standard library may follow (the form bootstrap/update.sh has always used), and
+    // then the proofs the build may use (`bootstrap/proofs.txt`).
+    let std = if rest.len() >= 2 { rest[1] } else { std_dir }
+    let proofs = if rest.len() == 3 {
+      match fs.read(absolute_path(rest[2], cwd)) {
+        Ok(t) => t
+        Err(e) => {
+          return output("", e + "\n", 1)
+        }
+      }
+    } else {
+      ""
+    }
+    return result_output(c_unit(absolute_path(rest[0], cwd), std, cwd, proofs))
   }
   if cmd == "debug" && rest.len() >= 2 {
     let sub = rest[0]
@@ -487,6 +498,9 @@ pub fn run_cli(args: List<Str>, cwd: Str, std_dir: Str) -> Output
     }
     if sub == "vc" {
       return result_output(vc_dump(dir, std_dir, flag == "std"))
+    }
+    if sub == "proofs" {
+      return result_output(proofs_dump(dir, std_dir))
     }
     if sub == "sim" {
       return result_output(sim_main(dir, std_dir, cwd))
