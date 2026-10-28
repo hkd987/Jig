@@ -573,7 +573,8 @@ fn Sema.unify_inner(&mut self, a0: Int, b0: Int, coerce: Bool) -> Bool {
     (List(x), List(y)) | (Set(x), Set(y)) => self.unify_inner(x, y, false)
     (Map(k1, v1), Map(k2, v2)) => self.unify_inner(k1, k2, false) && self.unify_inner(v1, v2, false)
     (Fn(p1, r1, e1), Fn(p2, r2, e2)) => {
-      let eff_ok = if coerce { effects_contain(e2, e1) } else { e1 == e2 }
+      // An effect parameter's argument may have any effects.
+      let eff_ok = if coerce { effects_open(e2) || effects_contain(e2, e1) } else { e1 == e2 }
       eff_ok && p1.len() == p2.len() && self.unify_lists(p1, p2) && self.unify_inner(r1, r2, coerce)
     }
     _ => false
@@ -700,7 +701,10 @@ fn Sema.use_effects(&mut self, eff: Int, span: syntax.Span, what: Str)
     self.err(
       "E0321",
       span,
-      "contracts must be pure, but " + what + " has effects " + effects_render(eff),
+      "contracts must be pure, but " +
+        what +
+        " has effects " +
+        effects_render_in(eff, self.tys.effect_vars),
     )
     return
   }
@@ -715,9 +719,9 @@ fn Sema.use_effects(&mut self, eff: Int, span: syntax.Span, what: Str)
           self.body.used_effects = self.body.used_effects | missing
           let msg = what +
             " performs " +
-            effects_render(missing) +
+            effects_render_in(missing, self.tys.effect_vars) +
             " but the closure's type allows only " +
-            effects_render(allowed)
+            effects_render_in(allowed, self.tys.effect_vars)
           self.push(
             diag("E0401", span, msg).note("a function value's effects are part of its type"),
           )
@@ -730,14 +734,14 @@ fn Sema.use_effects(&mut self, eff: Int, span: syntax.Span, what: Str)
   self.body.used_effects = self.body.used_effects | eff
   let missing = effects_minus(eff, self.declared_effects)
   if missing != 0 {
-    let names = effect_list(missing)
+    let names = effect_names_in(missing, self.tys.effect_vars)
     let msg = what +
       " needs effect" +
       (if names.len() > 1 { "s" } else { "" }) +
       " `" +
       names.join("`, `") +
       "`, which this function does not declare"
-    let want = effect_list(self.declared_effects | missing)
+    let want = effect_names_in(self.declared_effects | missing, self.tys.effect_vars)
     self.push(diag("E0401", span, msg).note("declare it: `effects {" + want.join(", ") + "}`"))
   }
 }
@@ -1127,6 +1131,11 @@ fn Sema.check_fn(&mut self, fid: Int) {
   self.generics = fd.generics
   self.ret_ty = fd.ret
   self.declared_effects = fd.eff
+  var vars: List<Str> = []
+  for p in fd.params {
+    vars.push(p.name)
+  }
+  self.tys.effect_vars = vars
   let f = match item.kind {
     Fn(decl) => decl
     _ => {
@@ -1205,7 +1214,7 @@ fn Sema.check_fn(&mut self, fid: Int) {
         f.effects_span
       }
       var quoted: List<Str> = []
-      for n in effect_list(unused) {
+      for n in effect_names_in(unused, self.tys.effect_vars) {
         quoted.push("`" + n + "`")
       }
       let msg = "declared effect" + plural(quoted.len()) + " " + quoted.join(", ") + " never used"
@@ -1216,6 +1225,7 @@ fn Sema.check_fn(&mut self, fid: Int) {
       )
     }
   }
+  self.tys.effect_vars = []
 }
 
 fn Sema.check_test(&mut self, tid: Int) {

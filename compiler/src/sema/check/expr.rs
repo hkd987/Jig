@@ -351,6 +351,15 @@ impl Cx<'_> {
         self.set_res(e, Res::Fn(f));
         self.set_inst(e, inst.into_boxed_slice());
         self.add_ref(f);
+        if !eff.params().is_empty() {
+            let n = self.defs.fns[f].name;
+            self.err(
+                codes::E0404,
+                span,
+                format!("`{n}` takes its effects from its arguments, so it cannot be used as a function value"),
+            );
+            return self.tys.error;
+        }
         self.tys.func(ptys, ret, eff)
     }
 
@@ -1099,7 +1108,8 @@ impl Cx<'_> {
                 None => self.fresh(),
             },
         };
-        let allowed = exp_fn.as_ref().map(|(_, _, eff)| *eff);
+        // Against an effect parameter (`OPEN`), the closure may have any effects: its own.
+        let allowed = exp_fn.as_ref().map(|(_, _, eff)| *eff).filter(|eff| !eff.is_open());
         self.closures.push(super::ClosureFrame {
             ret: ret_ty,
             allowed,

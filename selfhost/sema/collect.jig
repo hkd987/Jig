@@ -640,6 +640,72 @@ fn Sema.resolve_effects(&mut self, names: List<syntax.Name>) -> Int {
   return set
 }
 
+/// A function's `effects` clause: the eight effects, and parameters of function type
+/// (effect parameters: a call performs the effects of the function passed for one).
+fn Sema.resolve_fn_effects(&mut self, names: List<syntax.Name>, fid: Int, is_iface: Bool) -> Int {
+  var set = 0
+  for n in names {
+    var e = effect_bit(n.text)
+    if e == 0 {
+      let params = self.defs.fns[fid].params
+      var k = -1
+      for i in 0..params.len() {
+        if params[i].name == n.text {
+          k = i
+          break
+        }
+      }
+      if k < 0 {
+        self.push(
+          diag("E0402", n.span, "unknown effect `" + n.text + "`").note(
+            "effects are io, fs, net, clock, rand, env, spawn and ffi, or a parameter of function type",
+          ),
+        )
+        continue
+      }
+      let pt = params[k].ty
+      match self.tys.kinds[pt] {
+        Fn(ps, r, pe) => {
+          if is_iface {
+            self.err(
+              "E0402",
+              n.span,
+              "an interface method cannot take its effects from a parameter",
+            )
+            continue
+          }
+          if k >= MAX_EFFECT_PARAMS {
+            self.err(
+              "E0402",
+              n.span,
+              "only the first " + MAX_EFFECT_PARAMS.str() + " parameters can lend their effects",
+            )
+            continue
+          }
+          e = effect_param(k)
+          self.defs.fns[fid].params[k].ty = self.tys.func(ps, r, pe | e)
+        }
+        Error => {
+          continue
+        }
+        _ => {
+          self.err(
+            "E0402",
+            n.span,
+            "parameter `" + n.text + "` is not a function, so it has no effects to take",
+          )
+          continue
+        }
+      }
+    }
+    if effects_contain(set, e) {
+      self.err("E0402", n.span, "effect `" + n.text + "` is listed twice")
+    }
+    set = set | e
+  }
+  return set
+}
+
 fn Sema.resolve_bounds(&mut self, sc: TyScope, bounds: List<Int>) -> List<Bound> {
   let ast = self.ast_of(sc.pkg, sc.file)
   var out: List<Bound> = []
@@ -1056,7 +1122,7 @@ fn Sema.resolve_fn(&mut self, fid: Int) {
   }
 
   self.defs.fns[fid].eff = match f.effect_names {
-    Some(names) => self.resolve_effects(names)
+    Some(names) => self.resolve_fn_effects(names, fid, is_iface)
     None => 0
   }
   if !fd.has_body && !self.pkgs[pid].is_std && !is_iface {

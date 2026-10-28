@@ -127,15 +127,17 @@ fn show_sig(prog: &Program, f: &FnDef) -> String {
     if let (Some(m), Some(st)) = (f.self_mode, f.self_ty) {
         parts.push(format!("{}self: {}", if m == Mode::MutRef { "&mut " } else { "" }, tys.display(st)));
     }
-    for p in &f.params {
-        parts.push(format!("{}: {}{}", p.name, if p.mode == Mode::MutRef { "&mut " } else { "" }, tys.display(p.ty)));
+    let vars: Vec<Symbol> = f.params.iter().map(|p| p.name).collect();
+    for (k, p) in f.params.iter().enumerate() {
+        let t = tys.display_in(p.ty, &vars, Some(k));
+        parts.push(format!("{}: {}{t}", p.name, if p.mode == Mode::MutRef { "&mut " } else { "" }));
     }
     let mut s = format!("({})", parts.join(", "));
     if !tys.is_unit(f.ret) {
-        s.push_str(&format!(" -> {}", tys.display(f.ret)));
+        s.push_str(&format!(" -> {}", tys.display_in(f.ret, &vars, None)));
     }
     if !f.effects.is_pure() {
-        s.push_str(&format!(" effects {}", f.effects.render()));
+        s.push_str(&format!(" effects {{{}}}", effect_names_in(f.effects, &vars).join(", ")));
     }
     s
 }

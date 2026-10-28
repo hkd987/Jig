@@ -568,6 +568,68 @@ impl Collector<'_> {
         set
     }
 
+    /// A function's `effects` clause: the eight effects, and parameters of function type
+    /// (effect parameters: a call performs the effects of the function passed for one).
+    fn resolve_fn_effects(
+        &mut self,
+        pid: PkgId,
+        list: crate::util::List<ast::Name>,
+        fid: FnId,
+        is_iface: bool,
+    ) -> EffectSet {
+        let names: Vec<ast::Name> = self.ast(pid).names.get(list).to_vec();
+        let mut set = EffectSet::PURE;
+        for n in names {
+            let e = match EffectSet::from_name(n.sym.as_str()) {
+                Some(e) => e,
+                None => {
+                    let Some(k) = self.defs.fns[fid].params.iter().position(|p| p.name == n.sym) else {
+                        self.diags.push(
+                            Diagnostic::error(codes::E0402, n.span, format!("unknown effect `{}`", n.sym)).note(
+                                "effects are io, fs, net, clock, rand, env, spawn and ffi, or a parameter of \
+                                 function type",
+                            ),
+                        );
+                        continue;
+                    };
+                    let pt = self.defs.fns[fid].params[k].ty;
+                    let (ps, r, pe) = match self.tys.kind(pt).clone() {
+                        TyKind::Fn(ps, r, pe) => (ps, r, pe),
+                        TyKind::Error => continue,
+                        _ => {
+                            self.err(
+                                codes::E0402,
+                                n.span,
+                                format!("parameter `{}` is not a function, so it has no effects to take", n.sym),
+                            );
+                            continue;
+                        }
+                    };
+                    if is_iface {
+                        self.err(codes::E0402, n.span, "an interface method cannot take its effects from a parameter");
+                        continue;
+                    }
+                    if k >= MAX_EFFECT_PARAMS {
+                        self.err(
+                            codes::E0402,
+                            n.span,
+                            format!("only the first {MAX_EFFECT_PARAMS} parameters can lend their effects"),
+                        );
+                        continue;
+                    }
+                    let e = EffectSet::param(k);
+                    self.defs.fns[fid].params[k].ty = self.tys.func(ps.to_vec(), r, pe.union(e));
+                    e
+                }
+            };
+            if set.contains(e) {
+                self.err(codes::E0402, n.span, format!("effect `{}` is listed twice", n.sym));
+            }
+            set = set.union(e);
+        }
+        set
+    }
+
     fn resolve_bounds(&mut self, sc: &TyScope, bounds: crate::util::List<TypeExprId>) -> Vec<Bound> {
         let ids: Vec<TypeExprId> = self.ast(sc.pkg).type_lists.get(bounds).to_vec();
         let mut out = Vec::new();
@@ -916,7 +978,7 @@ impl Collector<'_> {
         };
         self.defs.fns[fid].ret_refine = f.ret.and_then(|t| self.refinement_alias(&sc, t));
         self.defs.fns[fid].effects = match f.effects {
-            Some(list) => self.resolve_effects(pid, list),
+            Some(list) => self.resolve_fn_effects(pid, list, fid, is_iface),
             None => EffectSet::PURE,
         };
         let ffi_effect = EffectSet::from_name("ffi").unwrap_or(EffectSet::PURE);

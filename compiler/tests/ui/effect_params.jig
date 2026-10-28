@@ -1,0 +1,55 @@
+import "std/io"
+
+pub fn twice(f: fn() -> Int) -> Int effects {f} {
+  return f() + f()
+}
+
+fn loud() -> Int effects {io} {
+  io.println("loud")
+  return 1
+}
+
+pub fn quiet_caller() -> Int {
+  return twice(fn() { 2 }) + twice(loud) //~ E0401
+}
+
+pub fn loud_caller() -> Int effects {io} {
+  return twice(loud) +
+    twice(fn() {
+      io.println("closure")
+      3
+    })
+}
+
+pub fn passes_on(g: fn() -> Int) -> Int effects {g} {
+  return twice(g)
+}
+
+pub fn as_value() -> Int {
+  let _ = twice //~ E0404
+  return 0
+}
+
+pub fn keeps(f: fn() -> Int) -> Int effects {f} {
+  let g: fn() -> Int = f //~ E0301
+  return g() + f()
+}
+
+pub fn closure_keeps(f: fn() -> Int) -> Int effects {f, io} {
+  let h: fn() -> Int effects {io} = fn() {
+    f() //~ E0401
+  }
+  return h()
+}
+
+pub fn ignores(_f: fn() -> Int) -> Int effects {_f} { //~ E0403
+  return 1
+}
+
+pub fn not_a_function(n: Int, g: fn() -> Int) -> Int effects {n, m, g, g} { //~ E0402 E0402 E0402
+  return n + g()
+}
+
+pub interface Runner {
+  fn run(self, f: fn()) effects {f} //~ E0402
+}

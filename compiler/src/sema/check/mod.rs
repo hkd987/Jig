@@ -692,7 +692,8 @@ impl<'a> Cx<'a> {
                 self.unify_inner(*k1, *k2, false) && self.unify_inner(*v1, *v2, false)
             }
             (TyKind::Fn(p1, r1, e1), TyKind::Fn(p2, r2, e2)) => {
-                let eff_ok = if coerce { e2.contains(*e1) } else { e1 == e2 };
+                // An effect parameter's argument may have any effects.
+                let eff_ok = if coerce { e2.is_open() || e2.contains(*e1) } else { e1 == e2 };
                 eff_ok
                     && p1.len() == p2.len()
                     && p1.iter().zip(p2.iter()).all(|(&x, &y)| self.unify_inner(x, y, false))
@@ -800,7 +801,7 @@ impl<'a> Cx<'a> {
             self.push(Diagnostic::error(
                 codes::E0321,
                 span,
-                format!("contracts must be pure, but {what} has effects {}", eff.render()),
+                format!("contracts must be pure, but {what} has effects {}", self.tys.effects_str(eff)),
             ));
             return;
         }
@@ -818,8 +819,8 @@ impl<'a> Cx<'a> {
                             span,
                             format!(
                                 "{what} performs {} but the closure's type allows only {}",
-                                missing.render(),
-                                allowed.render()
+                                self.tys.effects_str(missing),
+                                self.tys.effects_str(allowed)
                             ),
                         )
                         .note("a function value's effects are part of its type"),
@@ -831,9 +832,8 @@ impl<'a> Cx<'a> {
         self.body.used_effects = self.body.used_effects.union(eff);
         let missing = eff.minus(self.declared_effects);
         if !missing.is_pure() {
-            let names = missing.names();
-            let mut want = self.declared_effects.union(missing).names();
-            want.sort_by_key(|n| super::ty::EFFECT_NAMES.iter().position(|x| x == n));
+            let names = self.tys.effect_names(missing);
+            let want = self.tys.effect_names(self.declared_effects.union(missing));
             self.push(
                 Diagnostic::error(
                     codes::E0401,
@@ -1147,6 +1147,7 @@ impl<'a> Cx<'a> {
         self.generics = fd.generics.clone();
         self.ret_ty = fd.ret;
         self.declared_effects = fd.effects;
+        self.tys.effect_vars = fd.params.iter().map(|p| p.name).collect();
         let ItemKind::Fn(f) = item.kind else { unreachable!() };
         self.item_span = item.span;
         // A C function keeps its C name.
@@ -1212,20 +1213,22 @@ impl<'a> Cx<'a> {
             let unused = self.declared_effects.minus(self.body.used_effects);
             if !unused.is_pure() && fd.iface.is_none() {
                 let span = if f.effects_span.is_dummy() { item.name.span } else { f.effects_span };
+                let names = self.tys.effect_names(unused);
                 self.push(
                     Diagnostic::error(
                         codes::E0403,
                         span,
                         format!(
                             "declared effect{} {} never used",
-                            if unused.names().len() > 1 { "s" } else { "" },
-                            unused.names().iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")
+                            if names.len() > 1 { "s" } else { "" },
+                            names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")
                         ),
                     )
                     .note("remove unused effects so callers do not have to declare them"),
                 );
             }
         }
+        self.tys.effect_vars.clear();
         std::mem::take(&mut self.body)
     }
 

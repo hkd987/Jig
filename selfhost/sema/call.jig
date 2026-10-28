@@ -1035,8 +1035,56 @@ fn Sema.call_sig(&mut self, f: Int, recv: List<Int>, args: List<Int>, span: synt
     self.check_arg(args[i], pt, fd.params[i].mode, &mut places)
   }
   self.check_disjoint(places)
-  self.use_effects(fd.eff, span, "`" + fd.name + "`")
+  let eff = self.call_effects(fd.eff, args)
+  self.use_effects(eff, span, "`" + fd.name + "`")
   return self.tys.subst(fd.ret, recv)
+}
+
+/// The type a call expects for argument `i`: for an effect parameter, its function type
+/// admitting any effects.
+fn Sema.arg_expectation(&mut self, pt: Int, i: Int, eff: Int) -> Int {
+  if !effects_contain(eff, effect_param(i)) {
+    return pt
+  }
+  return match self.tys.kinds[pt] {
+    Fn(ps, r, pe) => self.tys.func(ps, r, effects_minus(pe, effect_param(i)) | EFFECT_OPEN)
+    _ => pt
+  }
+}
+
+/// Check the argument for an effect parameter: a closure against `pt`, which gives its
+/// parameters their types; anything else on its own, so that its type keeps its effects.
+fn Sema.check_effect_arg(&mut self, a: Int, pt: Int, mode: Mode, places: &mut List<Int>) {
+  let plain = match self.ast.exprs[a].kind {
+    Closure(_, _, _) | MutArg(_) => false
+    _ => true
+  }
+  if mode == Mode.MutRef || !plain {
+    self.check_arg(a, pt, mode, &mut places)
+    return
+  }
+  let t = self.check_expr(a, None)
+  if !self.coerce(t, pt) {
+    self.mismatch(self.expr_span(a), pt, t)
+  }
+}
+
+/// A call's effects: the callee's own, and for each effect parameter those of the function
+/// passed for it.
+fn Sema.call_effects(self, eff: Int, args: List<Int>) -> Int {
+  var out = eff & 255
+  for k in effect_params(eff) {
+    if k >= args.len() {
+      continue
+    }
+    match self.kind_of(self.tab.expr_ty[args[k]]) {
+      Fn(_, _, ae) => {
+        out = out | effects_minus(ae, EFFECT_OPEN)
+      }
+      _ => {}
+    }
+  }
+  return out
 }
 
 fn Sema.check_arg(&mut self, a: Int, pt: Int, mode: Mode, places: &mut List<Int>) {
@@ -1173,18 +1221,30 @@ fn Sema.call_fn(
       continue
     }
     let pt = self.tys.subst(fd.params[i].ty, inst)
-    self.check_arg(args[i], pt, fd.params[i].mode, &mut places)
+    if effects_contain(fd.eff, effect_param(i)) {
+      let open = self.arg_expectation(pt, i, fd.eff)
+      self.check_effect_arg(args[i], open, fd.params[i].mode, &mut places)
+    } else {
+      self.check_arg(args[i], pt, fd.params[i].mode, &mut places)
+    }
   }
   self.check_disjoint(places)
   if self.ctx != Ctx.Code && mutates {
     self.err("E0321", span, "contracts must be pure, but `" + display + "` mutates its arguments")
   }
-  self.use_effects(fd.eff, span, "`" + display + "`")
+  let call_eff = self.call_effects(fd.eff, args)
+  self.use_effects(call_eff, span, "`" + display + "`")
+  // The callee as this call uses it: the effects its arguments lend it.
   var ps: List<Int> = []
   for p in fd.params {
     ps.push(self.tys.subst(p.ty, inst))
   }
-  let callee_ty = self.tys.func(ps, ret, fd.eff)
+  for k in effect_params(fd.eff) {
+    if k < ps.len() && k < args.len() {
+      ps[k] = self.tab.expr_ty[args[k]]
+    }
+  }
+  let callee_ty = self.tys.func(ps, ret, call_eff)
   let _ = self.record(callee, callee_ty)
   return ret
 }

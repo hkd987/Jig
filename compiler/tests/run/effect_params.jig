@@ -1,0 +1,41 @@
+import "std/io"
+
+/// Call `f` twice.
+fn twice(f: fn() -> Int) -> Int effects {f} {
+  return f() + f()
+}
+
+/// `f` applied to each, with `log`'s effects too.
+fn each(xs: List<Int>, f: fn(Int), log: fn(Str)) effects {f, log} {
+  for x in xs {
+    f(x)
+  }
+  log("done")
+}
+
+fn three() -> Int {
+  return 3
+}
+
+fn loud() -> Int effects {io} {
+  io.println("loud")
+  return 1
+}
+
+fn passes_on(g: fn() -> Int) -> Int effects {g} {
+  return twice(g)
+}
+
+fn main() effects {io} {
+  io.println(twice(three).str())
+  io.println(twice(loud).str())
+  io.println(twice(fn() { 5 }).str())
+  io.println(
+    twice(fn() {
+      io.println("closure")
+      7
+    }).str(),
+  )
+  io.println(passes_on(loud).str())
+  each([1, 2], fn(x) { io.println(x.str()) }, fn(s) { io.println(s) })
+}

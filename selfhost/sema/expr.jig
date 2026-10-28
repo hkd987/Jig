@@ -478,6 +478,16 @@ fn Sema.fn_value(&mut self, e: Int, f: Int, explicit: Option<List<Int>>, span: s
   self.set_res(e, Res.Fn(f))
   self.set_inst(e, inst)
   self.add_ref(f)
+  if !effect_params(fd.eff).is_empty() {
+    self.err(
+      "E0404",
+      span,
+      "`" +
+        fd.name +
+        "` takes its effects from its arguments, so it cannot be used as a function value",
+    )
+    return self.tys.error
+  }
   return self.tys.func(ptys, ret, fd.eff)
 }
 
@@ -1319,7 +1329,8 @@ fn Sema.check_closure(
     Some(te) => self.resolve_type_expr(te)
     None => if has_exp { exp_ret } else { self.fresh() }
   }
-  let allowed = if has_exp { Some(exp_eff) } else { None }
+  // Against an effect parameter (`EFFECT_OPEN`), the closure may have any effects: its own.
+  let allowed = if has_exp && !effects_open(exp_eff) { Some(exp_eff) } else { None }
   self.closures.push(
     ClosureFrame {
       ret: ret_ty

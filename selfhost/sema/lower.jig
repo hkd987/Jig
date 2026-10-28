@@ -95,7 +95,7 @@ fn Lw.instance(&mut self, f: Int, args: List<Int>) -> Int {
   let fd = self.s.defs.fns[f]
   var name = self.s.fn_display_name(f)
   if !args.is_empty() {
-    name = name + "<" + self.s.tys.display_list(args) + ">"
+    name = name + "<" + self.s.tys.display_list(args, self.s.tys.effect_vars, -1) + ">"
   }
   var intr: Option<Intrinsic> = None
   if !fd.has_body {

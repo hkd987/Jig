@@ -933,8 +933,51 @@ impl Cx<'_> {
             self.check_arg(a, pt, mode, &mut places);
         }
         self.check_disjoint(&places);
+        let eff = self.call_effects(eff, args);
         self.use_effects(eff, span, &format!("`{name}`"));
         self.tys.subst(ret, &recv)
+    }
+
+    /// The type a call expects for argument `i`: for an effect parameter, its function type
+    /// admitting any effects.
+    fn arg_expectation(&mut self, pt: Ty, i: usize, eff: EffectSet) -> Ty {
+        if !eff.contains(EffectSet::param(i)) {
+            return pt;
+        }
+        match self.tys.kind(pt).clone() {
+            TyKind::Fn(ps, r, pe) => {
+                self.tys.func(ps.to_vec(), r, pe.minus(EffectSet::param(i)).union(EffectSet::OPEN))
+            }
+            _ => pt,
+        }
+    }
+
+    /// Check the argument for an effect parameter: a closure against `pt`, which gives its
+    /// parameters their types; anything else on its own, so that its type keeps its effects.
+    fn check_effect_arg(&mut self, a: ExprId, pt: Ty, mode: Mode, places: &mut Vec<ExprId>) {
+        if mode == Mode::MutRef || matches!(self.ast.exprs[a].kind, ExprKind::Closure { .. } | ExprKind::MutArg(_)) {
+            self.check_arg(a, pt, mode, places);
+            return;
+        }
+        let t = self.check_expr(a, None);
+        if !self.coerce(t, pt) {
+            let sp = self.ast.exprs[a].span;
+            self.mismatch(sp, pt, t);
+        }
+    }
+
+    /// A call's effects: the callee's own, and for each effect parameter those of the
+    /// function passed for it.
+    fn call_effects(&mut self, eff: EffectSet, args: &[ExprId]) -> EffectSet {
+        let mut out = EffectSet(eff.0 & EffectSet::ALL.0);
+        for k in eff.params() {
+            let Some(&a) = args.get(k) else { continue };
+            let t = self.tables.expr_ty[a.0 as usize];
+            if let TyKind::Fn(_, _, ae) = self.kind_of(t) {
+                out = out.union(ae.minus(EffectSet::OPEN));
+            }
+        }
+        out
     }
 
     fn check_arg(&mut self, a: ExprId, pt: Ty, mode: Mode, places: &mut Vec<ExprId>) {
@@ -1049,16 +1092,28 @@ impl Cx<'_> {
                 continue;
             };
             let pt = self.tys.subst(pt, &inst);
-            self.check_arg(a, pt, mode, &mut places);
+            if eff.contains(EffectSet::param(i)) {
+                let pt = self.arg_expectation(pt, i, eff);
+                self.check_effect_arg(a, pt, mode, &mut places);
+            } else {
+                self.check_arg(a, pt, mode, &mut places);
+            }
         }
         self.check_disjoint(&places);
         if self.ctx != Ctx::Code && params.iter().any(|p| p.1 == Mode::MutRef) {
             self.err(codes::E0321, span, format!("contracts must be pure, but `{display}` mutates its arguments"));
         }
-        self.use_effects(eff, span, &format!("`{display}`"));
+        let call_eff = self.call_effects(eff, args);
+        self.use_effects(call_eff, span, &format!("`{display}`"));
+        // The callee as this call uses it: the effects its arguments lend it.
         let callee_ty = {
-            let ps: Vec<Ty> = params.iter().map(|p| self.tys.subst(p.0, &inst)).collect();
-            self.tys.func(ps, ret, eff)
+            let mut ps: Vec<Ty> = params.iter().map(|p| self.tys.subst(p.0, &inst)).collect();
+            for k in eff.params() {
+                if let (Some(p), Some(&a)) = (ps.get_mut(k), args.get(k)) {
+                    *p = self.tables.expr_ty[a.0 as usize];
+                }
+            }
+            self.tys.func(ps, ret, call_eff)
         };
         self.record(callee, callee_ty);
         ret

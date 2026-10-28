@@ -214,10 +214,16 @@ codes! {
          that its own `effects {...}` clause does not list. Add the effect to the clause, or \
          restructure so the effectful call happens in the caller.";
     E0402 = 402, "unknown-effect", "unknown effect",
-        "Effects are `io`, `fs`, `net`, `clock`, `rand`, `env`, `spawn` and `ffi`.";
+        "Effects are `io`, `fs`, `net`, `clock`, `rand`, `env`, `spawn` and `ffi`. A function's \
+         `effects` clause may also name one of its parameters of function type: a call then \
+         performs the effects of the function passed for it.";
     E0403 = 403, "unused-effect", "declared effect is never used",
         "The function declares an effect it never performs. Remove it so callers do not have to \
          declare it too.";
+    E0404 = 404, "effect-param-value", "function with effect parameters used as a value",
+        "A function whose `effects` clause names one of its parameters performs the effects of \
+         the function passed for it, which each call decides, so it can only be called, not \
+         passed as a function. Wrap it in a closure: `fn(f) { twice(f) }`.";
 
     // ---- E045: match ----
     E0451 = 451, "non-exhaustive", "non-exhaustive match",

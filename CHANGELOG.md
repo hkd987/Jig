@@ -8,9 +8,10 @@ agent-first workflow; the language may still change (see `docs/decisions.md`).
 **Language.** Go-shaped syntax with structs, enums with exhaustive `match`, structural
 interfaces, simple generics, closures, units of measure, refinement types
 (`x: Int where x > 0`), contracts (`requires`, `ensures`, `invariant`, `old`, quantifiers),
-declared effects, `Option` and `Result` with `?`, mutable value semantics with `&mut`
-only on parameters, and calls to C libraries behind the `ffi` effect. No nil, no zero
-values, no implicit conversions, no GC.
+declared effects (a function can take its effects from a function argument, so an HTTP
+handler can use files or a database), `Option` and `Result` with `?`, mutable value
+semantics with `&mut` only on parameters, and calls to C libraries behind the `ffi`
+effect. No nil, no zero values, no implicit conversions, no GC.
 
 **Verification.** Contracts and safety (overflow, bounds, division) proved per function by
 Z3 against callees' contracts (and, read off their bodies, what they write and, for pure

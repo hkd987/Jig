@@ -92,6 +92,14 @@ fn IntTy.min_int(self) -> Int
 }
 
 // ---- effects: a bit set over the eight effects ----
+// Bit `8 + k` is an effect parameter, the effects of whatever function is passed for
+// parameter `k` of the function whose signature it is in (named in its `effects` clause).
+// `EFFECT_OPEN`, only in the type a call expects for such an argument, admits any effects.
+
+const EFFECT_OPEN: Int = 2147483648
+
+/// How many parameters of one function can be effect parameters.
+const MAX_EFFECT_PARAMS: Int = 23
 
 fn effect_names() -> List<Str>
   ensures result.len() == 8
@@ -131,10 +139,41 @@ fn effect_list(set: Int) -> List<Str>
   return out
 }
 
-fn effects_render(set: Int) -> Str
+/// The effect parameter for parameter `k`.
+fn effect_param(k: Int) -> Int {
+  return 1 << (8 + k)
+}
+
+/// The parameters whose effects `set` includes.
+fn effect_params(set: Int) -> List<Int> {
+  var out: List<Int> = []
+  for k in 0..MAX_EFFECT_PARAMS {
+    if set & effect_param(k) != 0 {
+      out.push(k)
+    }
+  }
+  return out
+}
+
+fn effects_open(set: Int) -> Bool {
+  return set & EFFECT_OPEN != 0
+}
+
+/// The names of the effects in `set`: the eight in order, then its effect parameters, named
+/// by `vars` (`_` past its end).
+fn effect_names_in(set: Int, vars: List<Str>) -> List<Str> {
+  var out = effect_list(set)
+  for k in effect_params(set) {
+    out.push(if k < vars.len() { vars[k] } else { "_" })
+  }
+  return out
+}
+
+/// `set` as written in an `effects` clause: `{io, net}`.
+fn effects_render_in(set: Int, vars: List<Str>) -> Str
   ensures result.len() >= 2
 {
-  return "{" + effect_list(set).join(", ") + "}"
+  return "{" + effect_names_in(set, vars).join(", ") + "}"
 }
 
 enum TyKind {
@@ -174,6 +213,9 @@ struct TyCtx {
   unit_map: Map<List<Factor>, Int>
   /// ADT names, for display.
   adt_names: List<Str>
+  /// The parameter names of the function being checked, which name its effect parameters
+  /// when effects are shown (`_` without them).
+  effect_vars: List<Str>
   int: Int
   u8: Int
   float: Int
@@ -194,6 +236,7 @@ fn new_tys() -> TyCtx {
     units: []
     unit_map: Map.new()
     adt_names: []
+    effect_vars: []
     int: 0
     u8: 0
     float: 0
@@ -506,6 +549,12 @@ fn TyCtx.has_infer(self, t: Int) -> Bool {
 }
 
 fn TyCtx.display(self, t: Int) -> Str {
+  return self.display_in(t, self.effect_vars, -1)
+}
+
+/// `t` with its effect parameters named by `vars`, leaving out parameter `skip`'s (a
+/// parameter's type, as its function's signature writes it), if `skip >= 0`.
+fn TyCtx.display_in(self, t: Int, vars: List<Str>, skip: Int) -> Str {
   return match self.kinds[t] {
     Int(k, u) => if u != 0 { k.name() + "<" + self.unit_str(u) + ">" } else { k.name() }
     Float(u) => if u != 0 { "Float<" + self.unit_str(u) + ">" } else { "Float" }
@@ -515,23 +564,31 @@ fn TyCtx.display(self, t: Int) -> Str {
     Never => "Never"
     Error => "{unknown}"
     Tuple(ts) => {
-      var out = "(" + self.display_list(ts)
+      var out = "(" + self.display_list(ts, vars, skip)
       if ts.len() == 1 {
         out = out + ","
       }
       out + ")"
     }
-    Adt(a, ts) => self.adt_names[a] + self.display_args(ts)
-    List(x) => "List<" + self.display(x) + ">"
-    Set(x) => "Set<" + self.display(x) + ">"
-    Map(k, v) => "Map<" + self.display(k) + ", " + self.display(v) + ">"
+    Adt(a, ts) => self.adt_names[a] + self.display_args(ts, vars, skip)
+    List(x) => "List<" + self.display_in(x, vars, skip) + ">"
+    Set(x) => "Set<" + self.display_in(x, vars, skip) + ">"
+    Map(k, v) => "Map<" +
+      self.display_in(k, vars, skip) +
+      ", " +
+      self.display_in(v, vars, skip) +
+      ">"
     Fn(ps, r, e) => {
-      var out = "fn(" + self.display_list(ps) + ")"
+      var out = "fn(" + self.display_list(ps, vars, skip) + ")"
       if r != self.unit_ty {
-        out = out + " -> " + self.display(r)
+        out = out + " -> " + self.display_in(r, vars, skip)
       }
-      if e != 0 {
-        out = out + " effects " + effects_render(e)
+      var shown = effects_minus(e, EFFECT_OPEN)
+      if skip >= 0 {
+        shown = effects_minus(shown, effect_param(skip))
+      }
+      if shown != 0 {
+        out = out + " effects " + effects_render_in(shown, vars)
       }
       out
     }
@@ -540,19 +597,19 @@ fn TyCtx.display(self, t: Int) -> Str {
   }
 }
 
-fn TyCtx.display_list(self, ts: List<Int>) -> Str {
+fn TyCtx.display_list(self, ts: List<Int>, vars: List<Str>, skip: Int) -> Str {
   var parts: List<Str> = []
   for x in ts {
-    parts.push(self.display(x))
+    parts.push(self.display_in(x, vars, skip))
   }
   return parts.join(", ")
 }
 
-fn TyCtx.display_args(self, ts: List<Int>) -> Str
+fn TyCtx.display_args(self, ts: List<Int>, vars: List<Str>, skip: Int) -> Str
   ensures result.is_empty() == ts.is_empty()
 {
   if ts.is_empty() {
     return ""
   }
-  return "<" + self.display_list(ts) + ">"
+  return "<" + self.display_list(ts, vars, skip) + ">"
 }

@@ -6,12 +6,12 @@
 pub fn request(addr: Str, request: Str) -> Result<Str, Str> effects {net}
 
 /// Serve on `addr`, one connection at a time. Each request goes to `handle` with the
-/// current state, which returns the new state and the reply. Returns the final state after
-/// `limit` requests (0: keep serving). In tests it answers the simulated connections queued
-/// with `sim.connect`, then returns.
+/// current state, which returns the new state and the reply; serving performs whatever
+/// effects `handle` has. Returns the final state after `limit` requests (0: keep serving).
+/// In tests it answers the simulated connections queued with `sim.connect`, then returns.
 pub fn serve<S>(addr: Str, state: S, handle: fn(S, Str) -> (S, Str), limit: Int) -> Result<S, Str>
   requires limit >= 0
-  effects {net}
+  effects {net, handle}
 
 /// Serve HTTP/1.x on `addr`, like `serve`, for browsers and other HTTP clients, which do not
 /// close their sending side: a request ends after its headers and the `Content-Length` bytes
@@ -26,4 +26,4 @@ pub fn serve_http<S>(
   limit: Int,
 ) -> Result<S, Str>
   requires limit >= 0
-  effects {net}
+  effects {net, handle}

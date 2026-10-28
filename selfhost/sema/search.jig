@@ -204,17 +204,21 @@ fn Sema.search_sig(self, fd: FnDef) -> Str
     )
     _ => {}
   }
+  var vars: List<Str> = []
   for p in fd.params {
-    parts.push(
-      p.name + ": " + (if p.mode == Mode.MutRef { "&mut " } else { "" }) + self.tys.display(p.ty),
-    )
+    vars.push(p.name)
+  }
+  for k in 0..fd.params.len() {
+    let p = fd.params[k]
+    let t = self.tys.display_in(p.ty, vars, k)
+    parts.push(p.name + ": " + (if p.mode == Mode.MutRef { "&mut " } else { "" }) + t)
   }
   var s = "(" + parts.join(", ") + ")"
   if fd.ret != self.tys.unit_ty {
-    s += " -> " + self.tys.display(fd.ret)
+    s += " -> " + self.tys.display_in(fd.ret, vars, -1)
   }
   if fd.eff != 0 {
-    s += " effects " + effects_render(fd.eff)
+    s += " effects " + effects_render_in(fd.eff, vars)
   }
   return s
 }

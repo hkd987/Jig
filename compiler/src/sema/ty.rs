@@ -59,17 +59,45 @@ impl IntTy {
     }
 }
 
-/// A set of effects as a bitmask.
+/// A set of effects as a bitmask: bits 0 to 7 are the eight effects, and bit `8 + k` is an
+/// effect parameter, the effects of whatever function is passed for parameter `k` of the
+/// function whose signature it is in (named in its `effects` clause). `OPEN`, only in the
+/// type a call expects for such an argument, admits any effects.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, PartialOrd, Ord)]
-pub struct EffectSet(pub u8);
+pub struct EffectSet(pub u32);
 
 pub const EFFECT_NAMES: [&str; 8] = ["io", "fs", "net", "clock", "rand", "env", "spawn", "ffi"];
+
+/// The names of the effects in `e`: the eight in order, then its effect parameters, named by
+/// `vars` (`_` past its end).
+pub fn effect_names_in(e: EffectSet, vars: &[Symbol]) -> Vec<String> {
+    let mut out: Vec<String> = e.names().iter().map(|n| n.to_string()).collect();
+    for k in e.params() {
+        out.push(vars.get(k).map_or_else(|| "_".to_string(), |s| s.to_string()));
+    }
+    out
+}
+
+/// How many parameters of one function can be effect parameters.
+pub const MAX_EFFECT_PARAMS: usize = 23;
 
 impl EffectSet {
     pub const PURE: EffectSet = EffectSet(0);
     pub const ALL: EffectSet = EffectSet(0xff);
+    pub const OPEN: EffectSet = EffectSet(1 << 31);
     pub fn from_name(s: &str) -> Option<EffectSet> {
         EFFECT_NAMES.iter().position(|&n| n == s).map(|i| EffectSet(1 << i))
+    }
+    /// The effect parameter for parameter `k`.
+    pub fn param(k: usize) -> EffectSet {
+        EffectSet(1 << (8 + k))
+    }
+    /// The parameters whose effects this set includes.
+    pub fn params(self) -> Vec<usize> {
+        (0..MAX_EFFECT_PARAMS).filter(|k| self.0 & (1 << (8 + k)) != 0).collect()
+    }
+    pub fn is_open(self) -> bool {
+        self.0 & Self::OPEN.0 != 0
     }
     pub fn union(self, o: EffectSet) -> EffectSet {
         EffectSet(self.0 | o.0)
@@ -83,11 +111,9 @@ impl EffectSet {
     pub fn is_pure(self) -> bool {
         self.0 == 0
     }
+    /// The names of the eight effects in the set, in order.
     pub fn names(self) -> Vec<&'static str> {
         (0..8).filter(|i| self.0 & (1 << i) != 0).map(|i| EFFECT_NAMES[i]).collect()
-    }
-    pub fn render(self) -> String {
-        format!("{{{}}}", self.names().join(", "))
     }
 }
 
@@ -145,6 +171,9 @@ pub struct TyCtx {
     pub error: Ty,
     /// When set, every type and unit created is recorded, in order.
     pub log: Option<Vec<Interned>>,
+    /// The parameter names of the function being checked, which name its effect parameters
+    /// when effects are shown (`_` without them).
+    pub effect_vars: Vec<Symbol>,
 }
 
 pub const NO_UNIT: UnitId = UnitId(0);
@@ -176,6 +205,7 @@ impl TyCtx {
             never: Ty(0),
             error: Ty(0),
             log: None,
+            effect_vars: Vec::new(),
         };
         t.unit_id(&[]);
         t.int = t.intern(TyKind::Int(IntTy::I64, NO_UNIT));
@@ -413,13 +443,31 @@ impl TyCtx {
         }
     }
 
+    /// The names of the effects in `e`: the eight in order, then its effect parameters.
+    pub fn effect_names(&self, e: EffectSet) -> Vec<String> {
+        effect_names_in(e, &self.effect_vars)
+    }
+
+    /// `e` as written in an `effects` clause: `{io, net}`.
+    pub fn effects_str(&self, e: EffectSet) -> String {
+        format!("{{{}}}", self.effect_names(e).join(", "))
+    }
+
     pub fn display(&self, t: Ty) -> String {
         let mut s = String::new();
-        self.write_ty(t, &mut s);
+        self.write_ty(t, &mut s, &self.effect_vars, None);
         s
     }
 
-    fn write_ty(&self, t: Ty, out: &mut String) {
+    /// `t` with its effect parameters named by `vars`, leaving out parameter `skip`'s (a
+    /// parameter's type, as its function's signature writes it).
+    pub fn display_in(&self, t: Ty, vars: &[Symbol], skip: Option<usize>) -> String {
+        let mut s = String::new();
+        self.write_ty(t, &mut s, vars, skip);
+        s
+    }
+
+    fn write_ty(&self, t: Ty, out: &mut String, vars: &[Symbol], skip: Option<usize>) {
         match self.kind(t) {
             TyKind::Int(k, u) => {
                 out.push_str(k.name());
@@ -444,7 +492,7 @@ impl TyCtx {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    self.write_ty(x, out);
+                    self.write_ty(x, out, vars, skip);
                 }
                 if ts.len() == 1 {
                     out.push(',');
@@ -457,19 +505,19 @@ impl TyCtx {
                     let _ = write!(out, "{pkg}.");
                 }
                 out.push_str(name.as_str());
-                self.write_args(ts, out);
+                self.write_args(ts, out, vars, skip);
             }
             TyKind::List(x) => {
                 out.push_str("List");
-                self.write_args(&[*x], out);
+                self.write_args(&[*x], out, vars, skip);
             }
             TyKind::Set(x) => {
                 out.push_str("Set");
-                self.write_args(&[*x], out);
+                self.write_args(&[*x], out, vars, skip);
             }
             TyKind::Map(k, v) => {
                 out.push_str("Map");
-                self.write_args(&[*k, *v], out);
+                self.write_args(&[*k, *v], out, vars, skip);
             }
             TyKind::Fn(ps, r, e) => {
                 out.push_str("fn(");
@@ -477,15 +525,19 @@ impl TyCtx {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    self.write_ty(x, out);
+                    self.write_ty(x, out, vars, skip);
                 }
                 out.push(')');
                 if !self.is_unit(*r) {
                     out.push_str(" -> ");
-                    self.write_ty(*r, out);
+                    self.write_ty(*r, out, vars, skip);
+                }
+                let mut e = e.minus(EffectSet::OPEN);
+                if let Some(k) = skip {
+                    e = e.minus(EffectSet::param(k));
                 }
                 if !e.is_pure() {
-                    let _ = write!(out, " effects {}", e.render());
+                    let _ = write!(out, " effects {{{}}}", effect_names_in(e, vars).join(", "));
                 }
             }
             TyKind::Param(_, name) => out.push_str(name.as_str()),
@@ -493,7 +545,7 @@ impl TyCtx {
         }
     }
 
-    fn write_args(&self, ts: &[Ty], out: &mut String) {
+    fn write_args(&self, ts: &[Ty], out: &mut String, vars: &[Symbol], skip: Option<usize>) {
         if ts.is_empty() {
             return;
         }
@@ -502,7 +554,7 @@ impl TyCtx {
             if i > 0 {
                 out.push_str(", ");
             }
-            self.write_ty(x, out);
+            self.write_ty(x, out, vars, skip);
         }
         out.push('>');
     }
