@@ -1,0 +1,62 @@
+import "std/hash"
+
+// SHA-256 against FIPS 180-4's examples, HMAC-SHA-256 against RFC 4231's, hex and `equal`.
+
+test "SHA-256 of the standard's messages" {
+  assert(hash.sha256("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+  assert(hash.sha256("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+  assert(
+    hash.sha256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") ==
+      "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+  )
+  // 64 bytes: the padding takes a block of its own.
+  assert(
+    hash.sha256("a".repeat(64)) ==
+      "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+  )
+  assert(
+    hash.sha256("a".repeat(1000)) ==
+      "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3",
+  )
+  assert(hash.sha256("é") == hash.hex(hash.sha256_bytes([195, 169])))
+}
+
+test "HMAC-SHA-256 of RFC 4231's cases" {
+  var k20: List<U8> = []
+  for _ in 0..20 {
+    k20.push(11)
+  }
+  assert(
+    hash.hex(hash.hmac_sha256_bytes(k20, "Hi There".bytes())) ==
+      "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+  )
+  assert(
+    hash.hmac_sha256("Jefe", "what do ya want for nothing?") ==
+      "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+  )
+  // A key longer than a block is hashed first.
+  var k131: List<U8> = []
+  for _ in 0..131 {
+    k131.push(170)
+  }
+  assert(
+    hash.hex(
+      hash.hmac_sha256_bytes(
+        k131,
+        "Test Using Larger Than Block-Size Key - Hash Key First".bytes(),
+      ),
+    ) ==
+      "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54",
+  )
+}
+
+test "hex and equal" {
+  assert(hash.hex([]) == "" && hash.hex([0, 15, 16, 255]) == "000f10ff")
+  assert(hash.equal("abc", "abc") && !hash.equal("abc", "abd") && !hash.equal("abc", "ab"))
+}
+
+test "a digest is 64 hex digits, and the same text gives the same one"(s: Str) {
+  let d = hash.sha256(s)
+  assert(d.len() == 64 && d == hash.sha256(s) && hash.equal(d, hash.sha256(s)))
+  assert(s.is_empty() || hash.sha256(s + "x") != d)
+}

@@ -1,3 +1,5 @@
+import "std/hash"
+
 test "links between documents stay on the site; others go to GitHub" {
   assert(rewrite("README.md", "docs/reference.md") == "reference.html")
   assert(rewrite("docs/examples.md", "reference.md#effects") == "reference.html#effects")
@@ -24,5 +26,10 @@ test "every page is built, with the stylesheet, from what `read` returns" {
   assert(files[1].1.contains("<title>docs/reference.md · Jig</title>"))
   assert(files[1].1.contains("<a href=\"reference.html\" aria-current=\"page\">Reference</a>"))
   assert(files[files.len() - 1] == ("style.css", "body {}"))
-  assert(build(fn(_) { Err("missing") }) == Err("README.md: missing"))
+  assert(
+    files[1].1.contains(
+      "<link rel=\"stylesheet\" href=\"style.css?v=" + hash.sha256("body {}")[0..12] + "\">",
+    ),
+  )
+  assert(build(fn(_) { Err("missing") }) == Err("site/style.css: missing"))
 }

@@ -640,6 +640,7 @@ fn Sema.global_key(self, std_dir: Str, solver: Str) -> Str
     "strings",
     "html",
     "json",
+    "hash",
   ] {
     h.str("std/" + p)
     h.str(p + ".jig")

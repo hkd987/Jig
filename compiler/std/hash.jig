@@ -1,0 +1,225 @@
+// Hashing: SHA-256 (FIPS 180-4) and HMAC-SHA-256 (RFC 2104), over bytes or text, as bytes
+// or lowercase hex; and a comparison that takes the same time wherever two texts differ,
+// for checking a MAC.
+
+/// SHA-256's round constants.
+fn round_constants() -> List<U32>
+  ensures result.len() == 64
+{
+  return [
+    1116352408,
+    1899447441,
+    3049323471,
+    3921009573,
+    961987163,
+    1508970993,
+    2453635748,
+    2870763221,
+    3624381080,
+    310598401,
+    607225278,
+    1426881987,
+    1925078388,
+    2162078206,
+    2614888103,
+    3248222580,
+    3835390401,
+    4022224774,
+    264347078,
+    604807628,
+    770255983,
+    1249150122,
+    1555081692,
+    1996064986,
+    2554220882,
+    2821834349,
+    2952996808,
+    3210313671,
+    3336571891,
+    3584528711,
+    113926993,
+    338241895,
+    666307205,
+    773529912,
+    1294757372,
+    1396182291,
+    1695183700,
+    1986661051,
+    2177026350,
+    2456956037,
+    2730485921,
+    2820302411,
+    3259730800,
+    3345764771,
+    3516065817,
+    3600352804,
+    4094571909,
+    275423344,
+    430227734,
+    506948616,
+    659060556,
+    883997877,
+    958139571,
+    1322822218,
+    1537002063,
+    1747873779,
+    1955562222,
+    2024104815,
+    2227730452,
+    2361852424,
+    2428436474,
+    2756734187,
+    3204031479,
+    3329325298,
+  ]
+}
+
+/// `x` rotated right by `n` bits.
+fn rotr(x: U32, n: Int) -> U32
+  requires n > 0 && n < 32
+{
+  return (x >> n) | (x << (32 - n))
+}
+
+/// The SHA-256 digest of `data`: 32 bytes.
+pub fn sha256_bytes(data: List<U8>) -> List<U8>
+  ensures result.len() == 32
+{
+  let k = round_constants()
+  var h: List<U32> = [
+    1779033703,
+    3144134277,
+    1013904242,
+    2773480762,
+    1359893119,
+    2600822924,
+    528734635,
+    1541459225,
+  ]
+  // The message, a 1 bit, zeros to 56 bytes past a multiple of 64, and its length in bits.
+  var m = data
+  let bits = (data.len() as U64).wrapping_mul(8)
+  m.push(128)
+  for m.len() % 64 != 56 {
+    m.push(0)
+  }
+  for i in 0..8 {
+    m.push(((bits >> (56 - 8 * i)) % 256) as U8)
+  }
+  var w: List<U32> = [0].repeat(64)
+  for blk in 0..m.len() / 64 invariant w.len() == 64 && h.len() == 8 {
+    for t in 0..16 invariant w.len() == 64 {
+      let j = blk * 64 + t * 4
+      w[t] = (m[j] as U32) << 24 |
+        (m[j + 1] as U32) << 16 |
+        (m[j + 2] as U32) << 8 |
+        m[j + 3] as U32
+    }
+    for t in 16..64 invariant w.len() == 64 {
+      let s0 = rotr(w[t - 15], 7) ^ rotr(w[t - 15], 18) ^ (w[t - 15] >> 3)
+      let s1 = rotr(w[t - 2], 17) ^ rotr(w[t - 2], 19) ^ (w[t - 2] >> 10)
+      w[t] = w[t - 16].wrapping_add(s0).wrapping_add(w[t - 7]).wrapping_add(s1)
+    }
+    var a = h[0]
+    var b = h[1]
+    var c = h[2]
+    var d = h[3]
+    var e = h[4]
+    var f = h[5]
+    var g = h[6]
+    var hh = h[7]
+    for t in 0..64 {
+      let s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
+      let ch = (e & f) ^ (~e & g)
+      let t1 = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(k[t]).wrapping_add(w[t])
+      let s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
+      let maj = (a & b) ^ (a & c) ^ (b & c)
+      let t2 = s0.wrapping_add(maj)
+      hh = g
+      g = f
+      f = e
+      e = d.wrapping_add(t1)
+      d = c
+      c = b
+      b = a
+      a = t1.wrapping_add(t2)
+    }
+    h[0] = h[0].wrapping_add(a)
+    h[1] = h[1].wrapping_add(b)
+    h[2] = h[2].wrapping_add(c)
+    h[3] = h[3].wrapping_add(d)
+    h[4] = h[4].wrapping_add(e)
+    h[5] = h[5].wrapping_add(f)
+    h[6] = h[6].wrapping_add(g)
+    h[7] = h[7].wrapping_add(hh)
+  }
+  var out: List<U8> = []
+  for i in 0..8 invariant out.len() == i * 4 {
+    out.push(((h[i] >> 24) % 256) as U8)
+    out.push(((h[i] >> 16) % 256) as U8)
+    out.push(((h[i] >> 8) % 256) as U8)
+    out.push((h[i] % 256) as U8)
+  }
+  return out
+}
+
+/// The SHA-256 digest of `s`'s bytes, in hex: 64 characters.
+pub fn sha256(s: Str) -> Str
+  ensures result.len() == 64
+{
+  return hex(sha256_bytes(s.bytes()))
+}
+
+/// The HMAC-SHA-256 of `msg` under `key` (RFC 2104): 32 bytes.
+pub fn hmac_sha256_bytes(key: List<U8>, msg: List<U8>) -> List<U8>
+  ensures result.len() == 32
+{
+  var k = if key.len() > 64 { sha256_bytes(key) } else { key }
+  for k.len() < 64 {
+    k.push(0)
+  }
+  var inner: List<U8> = []
+  var outer: List<U8> = []
+  for i in 0..64 {
+    inner.push(k[i] ^ 54)
+    outer.push(k[i] ^ 92)
+  }
+  inner.extend(msg)
+  outer.extend(sha256_bytes(inner))
+  return sha256_bytes(outer)
+}
+
+/// The HMAC-SHA-256 of `msg` under `key`, in hex: 64 characters.
+pub fn hmac_sha256(key: Str, msg: Str) -> Str
+  ensures result.len() == 64
+{
+  return hex(hmac_sha256_bytes(key.bytes(), msg.bytes()))
+}
+
+/// `bytes` in lowercase hex, two characters a byte.
+pub fn hex(bytes: List<U8>) -> Str
+  ensures result.len() == bytes.len() * 2
+{
+  let digits = "0123456789abcdef"
+  var out = ""
+  for i in 0..bytes.len() invariant out.len() == i * 2 {
+    let b = bytes[i] as Int
+    out += digits[b / 16..b / 16 + 1] + digits[b % 16..b % 16 + 1]
+  }
+  return out
+}
+
+/// Whether `a` and `b` are the same text, taking as long wherever they differ, so the time
+/// does not tell how much of a secret was guessed right.
+pub fn equal(a: Str, b: Str) -> Bool
+  ensures !result || a.len() == b.len()
+{
+  if a.len() != b.len() {
+    return false
+  }
+  var diff: U8 = 0
+  for i in 0..a.len() {
+    diff = diff | (a[i] ^ b[i])
+  }
+  return diff == 0
+}

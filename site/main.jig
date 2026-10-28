@@ -1,4 +1,5 @@
 import "std/fs"
+import "std/hash"
 import "std/html"
 import "std/io"
 import "std/os"
@@ -84,7 +85,7 @@ fn rewrite(src: Str, target: Str) -> Str {
 }
 
 /// The page around a document: navigation, the document's contents beside it, a footer.
-fn layout(doc: markdown.Doc, src: Str, page: Str) -> Str {
+fn layout(doc: markdown.Doc, src: Str, page: Str, style: Str) -> Str {
   var links = [html.el("a", [("class", "home"), ("href", "index.html")], [html.text("Jig")])]
   for n in nav() {
     let attrs = if n.1 == page {
@@ -123,13 +124,21 @@ fn layout(doc: markdown.Doc, src: Str, page: Str) -> Str {
   }
   let head = [
     html.el("meta", [("name", "viewport"), ("content", "width=device-width, initial-scale=1")], []),
-    html.el("link", [("rel", "stylesheet"), ("href", "style.css")], []),
+    html.el("link", [("rel", "stylesheet"), ("href", style)], []),
   ]
   return html.document(title, head, body)
 }
 
 /// Every file of the site, made from the documents `read` returns: (name, contents).
 fn build(read: fn(Str) -> Result<Str, Str>) -> Result<List<(Str, Str)>, Str> effects {read} {
+  let css = match read("site/style.css") {
+    Ok(c) => c
+    Err(e) => {
+      return Err("site/style.css: " + e)
+    }
+  }
+  // The stylesheet's link names its content, so a changed one is never served from a cache.
+  let style = "style.css?v=" + hash.sha256(css)[0..12]
   var out: List<(Str, Str)> = []
   for p in pages() {
     let src = p.0
@@ -140,14 +149,9 @@ fn build(read: fn(Str) -> Result<Str, Str>) -> Result<List<(Str, Str)>, Str> eff
       }
     }
     let doc = markdown.to_html(text, fn(t) { rewrite(src, t) })
-    out.push((p.1, layout(doc, src, p.1)))
+    out.push((p.1, layout(doc, src, p.1, style)))
   }
-  match read("site/style.css") {
-    Ok(css) => out.push(("style.css", css))
-    Err(e) => {
-      return Err("site/style.css: " + e)
-    }
-  }
+  out.push(("style.css", css))
   return Ok(out)
 }
 

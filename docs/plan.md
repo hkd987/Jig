@@ -246,7 +246,9 @@ keeping the standard library over 80%):
 - [x] `std/json`: a `Json` value, `parse`, `stringify` and `pretty`, strict to RFC 8259,
       exact integers, errors with line and column, a nesting limit. Every contract proves;
       the guestbook serves its entries as JSON.
-- [ ] `std/hash`: SHA-256 and HMAC-SHA-256, checked against the published test vectors.
+- [x] `std/hash`: SHA-256 and HMAC-SHA-256, checked against the published test vectors
+      (FIPS 180-4, RFC 4231), with hex and a constant-time `equal`. Every obligation proves;
+      the site names its stylesheet by its hash.
 - [ ] `std/regex`: literals, `.`, classes, anchors, `* + ? {m,n}`, groups, alternation and
       captures, matched in time linear in the input.
 
