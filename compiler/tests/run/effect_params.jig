@@ -13,6 +13,17 @@ fn each(xs: List<Int>, f: fn(Int), log: fn(Str)) effects {f, log} {
   log("done")
 }
 
+struct Bag {
+  xs: List<Int>
+}
+
+/// `f` on each item: a method's effect parameter.
+fn Bag.each(self, f: fn(Int)) effects {f} {
+  for x in self.xs {
+    f(x)
+  }
+}
+
 fn three() -> Int {
   return 3
 }
@@ -38,4 +49,5 @@ fn main() effects {io} {
   )
   io.println(passes_on(loud).str())
   each([1, 2], fn(x) { io.println(x.str()) }, fn(s) { io.println(s) })
+  Bag { xs: [3, 4] }.each(fn(x) { io.println("item " + x.str()) })
 }
