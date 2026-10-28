@@ -1,0 +1,122 @@
+import "std/hash"
+import "std/io"
+import "std/json"
+import "std/net"
+import "std/os"
+import "std/time"
+
+// `api [ADDR [N]]` serves a small JSON API on ADDR (default :8080): forever, or N requests.
+// Its handler keeps no state, so `net.serve_http_parallel` answers many requests at once in
+// native builds:
+//
+//   GET /time                the time, in ISO 8601 and in milliseconds
+//   GET /sha256?text=TEXT    TEXT's SHA-256
+//   GET /wait?ms=MS          an answer after MS milliseconds (at most 5000), like a slow backend
+
+/// The value of `%XX`'s hex digit `b`, or -1.
+fn hex_digit(b: U8) -> Int
+  ensures result >= -1 && result <= 15
+{
+  return if b >= 48 && b <= 57 {
+    b as Int - 48
+  } else if b >= 97 && b <= 102 {
+    b as Int - 87
+  } else if b >= 65 && b <= 70 {
+    b as Int - 55
+  } else {
+    -1
+  }
+}
+
+/// A query value with `+` and `%XX` decoded; a `%` without two hex digits stays as it is.
+fn decode(s: Str) -> Str {
+  var out: List<U8> = []
+  var i = 0
+  for i < s.len() invariant i >= 0 && i <= s.len() {
+    let b = s[i]
+    if b == 43 {
+      out.push(32)
+      i += 1
+    } else if b == 37 && i + 2 < s.len() && hex_digit(s[i + 1]) >= 0 && hex_digit(s[i + 2]) >= 0 {
+      out.push((hex_digit(s[i + 1]) * 16 + hex_digit(s[i + 2])) as U8)
+      i += 3
+    } else {
+      out.push(b)
+      i += 1
+    }
+  }
+  return Str.from_bytes(out).unwrap_or(s)
+}
+
+/// The value of `name` in the query of `path` (`/a?x=1&y=2`), decoded.
+fn param(path: Str, name: Str) -> Option<Str> {
+  let parts = path.split("?")
+  if parts.len() < 2 {
+    return None
+  }
+  for pair in parts[1].split("&") {
+    let kv = pair.split("=")
+    if kv.len() == 2 && kv[0] == name {
+      return Some(decode(kv[1]))
+    }
+  }
+  return None
+}
+
+/// A JSON reply.
+fn answer(status: Int, body: json.Json) -> Str {
+  return net.reply(status, "application/json", json.stringify(body) + "\n")
+}
+
+/// An error reply: `{"error": message}`.
+fn failure(status: Int, message: Str) -> Str {
+  return answer(status, json.Json.Object([("error", json.Json.String(message))]))
+}
+
+/// One request. It keeps no state, so it can run on several threads at once.
+fn handle(raw: Str) -> Str effects {clock} {
+  let req = match net.parse_request(raw) {
+    Ok(r) => r
+    Err(e) => {
+      return failure(400, e)
+    }
+  }
+  if req.method != "GET" {
+    return failure(405, "only GET")
+  }
+  let route = req.path.split("?")[0]
+  if route == "/time" {
+    let ms = time.now_ms()
+    let iso = if ms >= time.MIN_MS && ms <= time.MAX_MS { time.iso(ms) } else { "" }
+    return answer(
+      200,
+      json.Json.Object([("iso", json.Json.String(iso)), ("ms", json.Json.Int(ms))]),
+    )
+  }
+  if route == "/sha256" {
+    return match param(req.path, "text") {
+      Some(t) => answer(200, json.Json.Object([("sha256", json.Json.String(hash.sha256(t)))]))
+      None => failure(400, "give ?text=")
+    }
+  }
+  if route == "/wait" {
+    let ms = param(req.path, "ms").unwrap_or("").to_int().unwrap_or(-1)
+    if ms < 0 || ms > 5000 {
+      return failure(400, "give ?ms= from 0 to 5000")
+    }
+    time.sleep(ms)
+    return answer(200, json.Json.Object([("waited", json.Json.Int(ms))]))
+  }
+  return failure(404, "no route " + route)
+}
+
+fn main() effects {io, env, net, clock} {
+  let args = os.args()
+  let addr = if args.len() > 1 { args[1] } else { ":8080" }
+  let limit = if args.len() > 2 { max(args[2].to_int().unwrap_or(0), 0) } else { 0 }
+  io.println("listening on " + addr)
+  match net.serve_http_parallel(addr, handle, limit) {
+    Ok(n) => io.println("answered " + n.str())
+    Err(e) => io.eprintln(e)
+  }
+}

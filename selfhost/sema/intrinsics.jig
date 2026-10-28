@@ -818,16 +818,20 @@ fn Interp.intrinsic(
       self.fx.net_replies.insert(addr, replies)
       return ret_v(ok_v(Value.Str(r)))
     }
-    NetServe | NetServeHttp => {
-      let http = intr.op == Op.NetServeHttp
+    NetServe | NetServeHttp | NetServeParallel => {
+      // The parallel server's handler keeps no state; here it answers one request at a time,
+      // so tests stay deterministic.
+      let parallel = intr.op == Op.NetServeParallel
+      let http = intr.op != Op.NetServe
       let addr = str_v(a[0])
-      var state = a[1]
-      let limit = int_v(a[3])
+      var state = if parallel { Value.Unit } else { a[1] }
+      let handle = if parallel { a[1] } else { a[2] }
+      let limit = int_v(if parallel { a[2] } else { a[3] })
       if limit < 0 {
         return Err(self.panic("precondition failed: limit >= 0\n  limit = " + limit.str(), span))
       }
       if self.fx.real {
-        return self.serve_real(addr, state, a[2], limit, http, span)
+        return self.serve_real(addr, state, handle, limit, http, parallel, span)
       }
       var served = 0
       for limit == 0 || served < limit {
@@ -843,9 +847,10 @@ fn Interp.intrinsic(
           reply = http_refusal(0 - frame)
         } else {
           let (s2, r) = self.serve_one(
-            a[2],
+            handle,
             state,
             if frame >= 0 { req[0..frame] } else { req },
+            parallel,
             span,
           )?
           state = s2
@@ -856,7 +861,7 @@ fn Interp.intrinsic(
         self.fx.net_answers.insert(addr, answers)
         served += 1
       }
-      return ret_v(ok_v(state))
+      return ret_v(ok_v(if parallel { Value.Int(served) } else { state }))
     }
     SimStdout => {
       return ret_v(Value.Str(self.fx.stdout))
@@ -1074,15 +1079,23 @@ fn sort_values(xs: &mut List<Value>) {
 }
 
 /// One request through a `net.serve` handler: the new state and the reply.
+/// One request through `handle`: `handle(state, req)`, or `handle(req)` for a stateless one.
 fn Interp.serve_one(
   &mut self,
   handle: Value,
   state: Value,
   req: Str,
+  stateless: Bool,
   span: syntax.Span,
 ) -> Result<(Value, Str), Trap>
   effects {io, fs, net, clock, env, ffi}
 {
+  if stateless {
+    return match self.call_value(handle, [Value.Str(req)], span)? {
+      Str(r) => Ok((state, r))
+      _ => Err(self.panic("internal error: a handler returned something else", span))
+    }
+  }
   match self.call_value(handle, [state, Value.Str(req)], span)? {
     Tuple(t) => if t.len() == 2 {
       return Ok((t[0], str_v(t[1])))

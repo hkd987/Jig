@@ -265,7 +265,10 @@ Changes to both compilers:
       every contract proving; `examples/fetch`, tested against a local HTTPS server with a
       throwaway CA (an unknown root and a wrong name are refused) in `cargo test` and jigc's
       suites.
-- [ ] Concurrent serving (D34): a server that answers connections in parallel.
+- [x] Concurrent serving (D34): a server that answers connections in parallel.
+      `net.serve_http_parallel` with a stateless handler; workers in native code, one request
+      at a time on the interpreter; `examples/api` answers eight slow requests at once in CI,
+      with both compilers, and ThreadSanitizer finds no race in it.
 - [ ] C interop beyond numbers and strings (D35): byte buffers in and out, opaque pointers,
       structs passed by pointer, and callbacks.
 - [ ] The prover models `starts_with`, `ends_with`, `join` and bit operations on

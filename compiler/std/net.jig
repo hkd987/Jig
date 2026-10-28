@@ -5,6 +5,16 @@
 /// Send `request` to the server at `addr` and return its reply.
 pub fn request(addr: Str, request: Str) -> Result<Str, Str> effects {net}
 
+/// Serve HTTP on `addr` like `serve_http`, answering several connections at once: native
+/// programs take each request on one of several threads (`JIG_THREADS`, else twice the
+/// processors), so `handle` keeps no state of its own (keep it in a database or files) and
+/// may run more than once at a time. A connection waits at most 30 seconds for its client.
+/// Returns how many requests it answered, after `limit` (0: keep serving). The interpreter,
+/// and so `jig test`, answers one at a time.
+pub fn serve_http_parallel(addr: Str, handle: fn(Str) -> Str, limit: Int) -> Result<Int, Str>
+  requires limit >= 0
+  effects {net, handle}
+
 /// Send the HTTP request `request` to `addr` and read the reply until the server closes the
 /// connection, which a request with `Connection: close` asks it to; unlike `request`, the
 /// sending side stays open. With `tls`, the connection is TLS through the system's OpenSSL,

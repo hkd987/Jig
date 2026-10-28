@@ -49,6 +49,8 @@ pub struct CGen<'l, 'a> {
     sortby_thunks: FxHashSet<Ty>,
     task_thunks: FxHashSet<(Ty, Option<Ty>)>,
     serve_thunks: FxHashSet<Ty>,
+    /// Whether the stateless handler thunk (`net.serve_http_parallel`) is emitted.
+    handle_thunk: bool,
     threads: bool,
     counter: usize,
 }
@@ -115,6 +117,7 @@ pub fn generate(lw: &mut Lowerer) -> Result<CProgram, String> {
         sortby_thunks: FxHashSet::default(),
         task_thunks: FxHashSet::default(),
         serve_thunks: FxHashSet::default(),
+        handle_thunk: false,
         threads: false,
         counter: 0,
     };
@@ -2314,6 +2317,27 @@ impl<'l, 'a> CGen<'l, 'a> {
                 );
                 let c = self.cty(ret);
                 format!("(sk{n} ? (({c}){{.tag = 0, .u.v0 = {{.f0 = sv{n}}}}}) : (({c}){{.tag = 1, .u.v1 = {{.f0 = se{n}}}}}))")
+            }
+            NetServeParallel => {
+                // The handler runs on several threads, so reference counts must be atomic.
+                self.threads = true;
+                if !self.handle_thunk {
+                    self.handle_thunk = true;
+                    let _ = writeln!(self.glue_decls, "JIG_FN jig_str *handle_str(jig_fn *f, jig_str *req);");
+                    let _ = writeln!(
+                        self.glue,
+                        "JIG_FN jig_str *handle_str(jig_fn *f, jig_str *req) {{\n    return ((jig_str *(*)(jig_env *, jig_str *))f->code)(f->env, req);\n}}"
+                    );
+                }
+                let _ = writeln!(
+                    cx.out,
+                    "    jig_fn hf{n} = {};\n    int64_t sn{n}; bool sk{n}; jig_str *se{n} = jig_net_serve_parallel({}, &hf{n}, handle_str, {}, &sn{n}, &sk{n}, {loc});",
+                    a[1],
+                    a[0],
+                    a[2]
+                );
+                let c = self.cty(ret);
+                format!("(sk{n} ? (({c}){{.tag = 0, .u.v0 = {{.f0 = sn{n}}}}}) : (({c}){{.tag = 1, .u.v1 = {{.f0 = se{n}}}}}))")
             }
             SimStdout | SimStderr | SimSetStdin | SimSetArgs | SimSetEnv | SimSetFile | SimFile | SimRemoveFile
             | SimSetTime | SimAdvance | SimSeed | SimReply | SimRequests | SimConnect | SimAnswers => {

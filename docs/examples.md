@@ -20,6 +20,7 @@ jig run examples/http -- :8080 # run it (then: curl localhost:8080)
 | [postgres](../examples/postgres) | Notes in a Postgres table, through libpq behind the `ffi` effect; SQL built and tested as pure code | `jig run examples/postgres -- list` |
 | [guestbook](../examples/guestbook) | A web app on Postgres with a JSON API: an HTTP handler that queries the database, tested against fakes | `jig test examples/guestbook` |
 | [ssr](../examples/ssr) | Pages rendered on the server with `std/html`, a router package with `:params`, a blog served over HTTP | `jig run examples/ssr -- :8080` |
+| [api](../examples/api) | A JSON API with `net.serve_http_parallel`: a stateless handler, many requests answered at once natively | `jig run examples/api -- :8080` |
 | [fetch](../examples/fetch) | An HTTP client: `net.get` and `net.post`, HTTPS with checked certificates, redirects; tested on simulated servers | `jig run examples/fetch -- https://example.com` |
 | [greet](../examples/greet) | TCP client and server with `net.request` and `net.serve` | `jig test examples/greet` |
 | [wordfreq](../examples/wordfreq) | Reading standard input, maps, sorting | `echo "a b a" \| jig run examples/wordfreq` |
@@ -252,6 +253,23 @@ listening on :8080
 $ curl localhost:8080/posts/2
 <!doctype html>
 <html><head><meta charset="utf-8"><title>Escaping &lt;, &gt; and &amp;</title></head>...
+```
+
+## Many requests at once
+
+`examples/api` is a small JSON API (`/time`, `/sha256?text=...`, `/wait?ms=...`) whose
+handler keeps no state, so it serves with `net.serve_http_parallel`: a native build answers
+each request on one of a pool of threads, and a slow request does not hold up the others.
+The handler is an ordinary function, `fn handle(raw: Str) -> Str effects {clock}`; its tests
+call it directly with simulated time, and `jig test` runs the server on simulated
+connections, one at a time. CI sends eight requests that each wait 400 ms and checks they are
+answered together.
+
+```
+$ jig build examples/api -o api && ./api :8080 &
+listening on :8080
+$ curl 'localhost:8080/sha256?text=hello'
+{"sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}
 ```
 
 ## An HTTP client

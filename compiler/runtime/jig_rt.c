@@ -24,6 +24,19 @@ static char **g_argv;
 static char g_out[1 << 16];
 static size_t g_out_len;
 static uint64_t g_rng;
+/* Set once a server answers on several threads (`net.serve_http_parallel`), whose handlers
+   may print or draw random numbers: from then on the output buffer and the generator are
+   locked. Task functions (std/task) have no such effects. */
+static bool g_threaded;
+static pthread_mutex_t g_shared_mu = PTHREAD_MUTEX_INITIALIZER;
+#define SHARED_LOCK() \
+    do { \
+        if (g_threaded) pthread_mutex_lock(&g_shared_mu); \
+    } while (0)
+#define SHARED_UNLOCK() \
+    do { \
+        if (g_threaded) pthread_mutex_unlock(&g_shared_mu); \
+    } while (0)
 
 static void flush_out(void) {
     if (g_out_len) {
@@ -61,6 +74,7 @@ void jig_run_main(void (*f)(void)) {
 }
 
 void jig_exit(int code) {
+    SHARED_LOCK();
     flush_out();
     exit(code);
 }
@@ -1633,10 +1647,12 @@ void jig_char_invalid(int64_t v, const char *loc) {
 /* ---------- effects ---------- */
 
 void jig_print(const jig_str *s, bool newline, bool err) {
+    SHARED_LOCK();
     if (err) {
         flush_out();
         fwrite(jig_str_data(s), 1, (size_t)jig_str_len(s), stderr);
         if (newline) fputc('\n', stderr);
+        SHARED_UNLOCK();
         return;
     }
     const char *d = jig_str_data(s);
@@ -1649,6 +1665,7 @@ void jig_print(const jig_str *s, bool newline, bool err) {
         g_out_len += n;
     }
     if (newline) g_out[g_out_len++] = '\n';
+    SHARED_UNLOCK();
 }
 
 jig_str *jig_read_line(bool *ok) {
@@ -1799,6 +1816,9 @@ static jig_str *net_err(const jig_str *addr, const char *what) {
     jig_buf_push_cstr(&b, what);
     return jig_buf_to_str(&b);
 }
+
+/* How long a client or a server's connection waits to read or write, in seconds. */
+#define NET_TIMEOUT 30
 
 /* "host:port" (":port" is this machine) resolved for connecting or listening. */
 static struct addrinfo *net_resolve(const jig_str *addr, bool listen, const char **err) {
@@ -2043,6 +2063,128 @@ jig_str *jig_net_serve_http(const jig_str *addr, void *state, jig_fn *f, jig_ser
     return net_serve_loop(addr, state, f, call, limit, ok, loc, true);
 }
 
+/* `net.serve_http_parallel`: this thread accepts connections and queues them; workers each
+   take one, read its request, call the handler and answer. A connection waits at most
+   NET_TIMEOUT seconds for its client. Returns after `limit` requests are answered. */
+typedef struct {
+    pthread_mutex_t mu;
+    pthread_cond_t ready;
+    int *fds;
+    int64_t head, len, cap;
+    bool done;
+    jig_fn *f;
+    jig_handle_call call;
+} serve_queue;
+
+static void *serve_worker(void *arg) {
+    serve_queue *q = arg;
+    for (;;) {
+        pthread_mutex_lock(&q->mu);
+        while (q->head == q->len && !q->done) pthread_cond_wait(&q->ready, &q->mu);
+        if (q->head == q->len) {
+            pthread_mutex_unlock(&q->mu);
+            return NULL;
+        }
+        int c = q->fds[q->head++];
+        pthread_mutex_unlock(&q->mu);
+        struct timeval tv = {NET_TIMEOUT, 0};
+        setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+        int refuse = 0;
+        jig_str *req = net_read_http(c, &refuse);
+        if (refuse) {
+            const char *r = http_refusal(refuse);
+            net_send_all(c, r, strlen(r));
+        } else {
+            jig_str *reply = q->call(q->f, req);
+            net_send_all(c, jig_str_data(reply), (size_t)jig_str_len(reply));
+            jig_str_release(reply);
+        }
+        close(c);
+        jig_str_release(req);
+    }
+}
+
+static int serve_workers(void) {
+    const char *e = getenv("JIG_THREADS");
+    long n = e ? atol(e) : 2 * sysconf(_SC_NPROCESSORS_ONLN);
+    return n < 1 ? 1 : n > 256 ? 256 : (int)n;
+}
+
+jig_str *jig_net_serve_parallel(const jig_str *addr, jig_fn *f, jig_handle_call call, int64_t limit,
+                                int64_t *served, bool *ok, const char *loc) {
+    if (limit < 0) jig_panic("precondition failed: limit >= 0", loc);
+    const char *err = NULL;
+    struct addrinfo *res = net_resolve(addr, true, &err);
+    *ok = false;
+    *served = 0;
+    if (!res) return net_err(addr, err);
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    int one = 1;
+    if (fd >= 0) setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    if (fd < 0 || bind(fd, res->ai_addr, res->ai_addrlen) != 0 || listen(fd, 128) != 0) {
+        jig_str *e = net_err(addr, strerror(errno));
+        if (fd >= 0) close(fd);
+        freeaddrinfo(res);
+        return e;
+    }
+    freeaddrinfo(res);
+    pthread_mutex_lock(&g_shared_mu);
+    g_threaded = true;
+    pthread_mutex_unlock(&g_shared_mu);
+    serve_queue q = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, NULL, 0, 0, 0, false, f, call};
+    int n = serve_workers();
+    pthread_t *ts = malloc(sizeof *ts * (size_t)n);
+    if (!ts) jig_oom();
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, (size_t)64 << 20);
+    int started = 0;
+    while (started < n && pthread_create(&ts[started], &attr, serve_worker, &q) == 0) started++;
+    pthread_attr_destroy(&attr);
+    jig_str *e = NULL;
+    for (int64_t accepted = 0; started > 0 && (limit == 0 || accepted < limit);) {
+        SHARED_LOCK();
+        flush_out();
+        SHARED_UNLOCK();
+        int c = accept(fd, NULL, NULL);
+        if (c < 0) {
+            if (errno == EINTR) continue;
+            e = net_err(addr, strerror(errno));
+            break;
+        }
+        pthread_mutex_lock(&q.mu);
+        if (q.len == q.cap) {
+            /* Room at the front first: the taken connections are done with. */
+            memmove(q.fds, q.fds + q.head, sizeof *q.fds * (size_t)(q.len - q.head));
+            q.len -= q.head;
+            q.head = 0;
+            if (q.len == q.cap) {
+                q.cap = q.cap ? 2 * q.cap : 64;
+                q.fds = realloc(q.fds, sizeof *q.fds * (size_t)q.cap);
+                if (!q.fds) jig_oom();
+            }
+        }
+        q.fds[q.len++] = c;
+        pthread_cond_signal(&q.ready);
+        pthread_mutex_unlock(&q.mu);
+        accepted++;
+        *served = accepted;
+    }
+    if (!started) e = net_err(addr, "cannot start a thread");
+    pthread_mutex_lock(&q.mu);
+    q.done = true;
+    pthread_cond_broadcast(&q.ready);
+    pthread_mutex_unlock(&q.mu);
+    for (int i = 0; i < started; i++) pthread_join(ts[i], NULL);
+    free(ts);
+    free(q.fds);
+    close(fd);
+    if (e) return e;
+    *ok = true;
+    return NULL;
+}
+
 int64_t jig_now_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -2050,11 +2192,13 @@ int64_t jig_now_ns(void) {
 }
 
 static uint64_t next_rand(void) {
+    SHARED_LOCK();
     uint64_t x = g_rng;
     x ^= x >> 12;
     x ^= x << 25;
     x ^= x >> 27;
     g_rng = x;
+    SHARED_UNLOCK();
     return x * 0x2545f4914f6cdd1dull;
 }
 
@@ -2193,15 +2337,13 @@ const char *jig_ccall_os_error(void) { return strerror(errno); }
 /* ---------- HTTP client (`net.fetch`) ----------
    One request over TCP or TLS: send it, keep the sending side open (an HTTP server may take
    a half-close for a client that has gone) and read the reply until the server closes, which
-   `Connection: close` asks it to. A read waits at most FETCH_TIMEOUT seconds.
+   `Connection: close` asks it to. A read waits at most NET_TIMEOUT seconds.
 
    TLS goes through the system's OpenSSL, opened when a program first fetches over it, so a
    program that never does needs no OpenSSL to build or to run. These are the few functions it
    calls, by their ABI, which is the same in OpenSSL 1.1 and 3. The server's certificate must
    chain to a trusted root (the system's, or SSL_CERT_FILE's) and name the host. The Rust
    interpreter does the same (`compiler/src/mir/tls.rs`), with the same messages. */
-
-#define FETCH_TIMEOUT 30
 
 typedef struct {
     int ready; /* 0: not tried, 1: loaded, -1: missing */
@@ -2304,7 +2446,7 @@ jig_str *jig_net_fetch(const jig_str *addr, const jig_str *req, bool tls, bool *
     const char *err = NULL;
     int fd = net_connect(addr, &err);
     if (fd < 0) return net_err(addr, err);
-    struct timeval tv = {FETCH_TIMEOUT, 0};
+    struct timeval tv = {NET_TIMEOUT, 0};
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
     jig_buf b = {0};

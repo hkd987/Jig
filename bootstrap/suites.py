@@ -479,6 +479,7 @@ def suite_net(r):
         failures.append("net: the interpreted server did not finish")
     failures += net_http(r)
     failures += net_fetch(r)
+    failures += net_parallel(r)
     return failures
 
 
@@ -517,6 +518,56 @@ def net_http(r):
         out = server.communicate(timeout=30)[0].decode()
         if out != "listening on %s\nserved 3\n" % addr:
             failures.append("net: the %s http server printed %r" % (how, out))
+    return failures
+
+
+def net_parallel(r):
+    """The api example with net.serve_http_parallel: natively, eight requests that each wait
+    400 ms are answered at once; the interpreter answers them one at a time."""
+    import threading
+    failures = []
+    d = r.scratch("net-api")
+    shutil.copy(os.path.join(ROOT, "examples/api/main.jig"), os.path.join(d, "main.jig"))
+    exe = os.path.join(d, "api")
+    code, _, err = r.run(["build", d, "-o", exe])
+    if code != 0:
+        return ["net: api build failed: " + err]
+    for how, cmd, n in (("native", [exe], 8), ("interpreted", [r.jigc, "run", d, "--"], 2)):
+        addr = free_addr()
+        env = dict(os.environ, JIG_THREADS="8")
+        server = subprocess.Popen(cmd + [addr, str(n + 1)], stdout=subprocess.PIPE, cwd=ROOT, env=env)
+        if not wait_listening(addr):
+            server.kill()
+            failures.append("net: the %s api server never listened" % how)
+            continue
+        host, port = addr.split(":")
+        replies = [None] * n
+
+        def one(i):
+            c = http.client.HTTPConnection(host, int(port), timeout=20)
+            try:
+                c.request("GET", "/wait?ms=400")
+                resp = c.getresponse()
+                replies[i] = (resp.status, resp.read().decode())
+            except OSError as e:
+                replies[i] = ("error", str(e))
+            finally:
+                c.close()
+
+        start = time.time()
+        threads = [threading.Thread(target=one, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        took = time.time() - start
+        if replies != [(200, '{"waited":400}\n')] * n:
+            failures.append("net: the %s api server answered %r" % (how, replies))
+        if how == "native" and took >= 2.4:
+            failures.append("net: eight waits took %.2fs natively: not answered at once" % took)
+        out = server.communicate(timeout=30)[0].decode()
+        if out != "listening on %s\nanswered %d\n" % (addr, n + 1):
+            failures.append("net: the %s api server printed %r" % (how, out))
     return failures
 
 

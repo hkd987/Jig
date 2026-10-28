@@ -65,7 +65,7 @@ for agents.
 
 ## Examples
 
-[Twenty small projects](docs/examples.md), each checked and tested in CI with both
+[Twenty-one small projects](docs/examples.md), each checked and tested in CI with both
 compilers, show what Jig code looks like:
 
 - [http](examples/http): a web server in 30 lines, tested on simulated requests
@@ -74,6 +74,7 @@ compilers, show what Jig code looks like:
 - [guestbook](examples/guestbook): a web app on Postgres, its handler tested against a fake database
 - [ssr](examples/ssr): pages rendered on the server with `std/html`, and a router package
 - [fetch](examples/fetch): an HTTP client, HTTPS included, tested on simulated servers
+- [api](examples/api): a JSON API whose stateless handler answers many requests at once
 - [todo](examples/todo): a command-line app on files, every effect in its signatures
 - [stack](examples/stack) and [vending](examples/vending): contracts that all prove
 - [cart](examples/cart) and [bank](examples/bank): behaviour written first as `.feature` scenarios
@@ -111,7 +112,8 @@ Jig is an alpha. What it does not do yet (phase 5 of [the plan](docs/plan.md) cl
 
 - **Libraries.** The standard library has files, TCP, HTTP serving and an HTTP client (with
   HTTPS through the system's OpenSSL), HTML, JSON, regular expressions, hashing, dates,
-  randomness, tasks and text helpers. A server answers one connection at a time.
+  randomness, tasks and text helpers; a server can answer many connections at once when its
+  handler keeps no state.
 - **C interop** passes numbers and strings only: no structs, buffers or callbacks, so a
   library that needs them (or a parameterized SQL query) needs a small C wrapper.
 - **Verification** proves what contracts and safety checks say, not what the author meant.

@@ -156,3 +156,81 @@ fn fetch_over_tls() {
     let _ = server.kill();
     let _ = server.wait();
 }
+
+/// One HTTP GET over a fresh connection, the whole reply.
+fn http_get(addr: &str, path: &str) -> String {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    write!(s, "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    out
+}
+
+/// The api example natively with `net.serve_http_parallel`: eight requests that each wait
+/// 400 ms are answered at once, well under the 3.2 s one at a time would take; the
+/// interpreter answers the same requests, one at a time.
+#[test]
+fn parallel_serving() {
+    if !have_cc() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/api");
+    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("net-api");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::copy(src.join("main.jig"), work.join("main.jig")).unwrap();
+    let mut prog = jig::sema::analyze(&Sources::Disk, &work);
+    assert!(!prog.diags.has_errors());
+    let exe = work.join("api");
+    let opts =
+        BuildOpts { release: false, build_dir: work.join("build"), out: exe.clone(), proven: Default::default() };
+    build(&mut prog, &opts).expect("build");
+    let jig = env!("CARGO_BIN_EXE_jig");
+    for native in [true, false] {
+        let addr = format!("127.0.0.1:{}", free_port());
+        let n = if native { 8 } else { 2 };
+        let mut cmd = if native {
+            Command::new(&exe)
+        } else {
+            let mut c = Command::new(jig);
+            c.arg("run").arg(&work).arg("--");
+            c
+        };
+        // One more request: the probe that waits for it to listen.
+        let server = cmd
+            .args([addr.clone(), (n + 1).to_string()])
+            .env("JIG_THREADS", "8")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let start = Instant::now();
+        while std::net::TcpStream::connect(&addr).is_err() {
+            assert!(start.elapsed() < Duration::from_secs(20), "the server never listened");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let start = Instant::now();
+        let replies: Vec<String> = (0..n)
+            .map(|_| {
+                let a = addr.clone();
+                std::thread::spawn(move || http_get(&a, "/wait?ms=400"))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .collect();
+        let took = start.elapsed();
+        for r in &replies {
+            assert!(r.starts_with("HTTP/1.1 200 OK\r\n") && r.ends_with("{\"waited\":400}\n"), "{r}");
+        }
+        if native {
+            assert!(took < Duration::from_millis(2400), "eight waits took {took:?}: not answered at once");
+        } else {
+            assert!(took >= Duration::from_millis(800), "the interpreter answers one at a time");
+        }
+        let out = server.wait_with_output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("listening on {addr}\nanswered {}\n", n + 1));
+    }
+}

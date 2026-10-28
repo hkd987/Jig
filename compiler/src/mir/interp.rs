@@ -1504,12 +1504,17 @@ impl<'l, 'a> Interp<'l, 'a> {
                     Err(e) => Self::err(format!("{addr}: {e}")),
                 })
             }
-            NetServe | NetServeHttp => {
-                let http = intr.op == NetServeHttp;
+            NetServe | NetServeHttp | NetServeParallel => {
+                // The parallel server's handler keeps no state; here it answers one request
+                // at a time, so tests stay deterministic.
+                let parallel = intr.op == NetServeParallel;
+                let http = intr.op != NetServe;
                 let addr = self.str_arg(&a[0], span)?.to_string();
-                let mut state = a[1].clone();
-                let handle = a[2].clone();
-                let limit = int(&a[3]);
+                let (mut state, handle, limit) = if parallel {
+                    (Value::Unit, a[1].clone(), int(&a[2]))
+                } else {
+                    (a[1].clone(), a[2].clone(), int(&a[3]))
+                };
                 if limit < 0 {
                     return Err(self.panic(format!("precondition failed: limit >= 0\n  limit = {limit}"), span));
                 }
@@ -1526,7 +1531,7 @@ impl<'l, 'a> Interp<'l, 'a> {
                                     }
                                     _ => req,
                                 };
-                                let (s2, reply) = self.serve_one(&handle, state, &req, span)?;
+                                let (s2, reply) = self.serve_one(&handle, state, &req, parallel, span)?;
                                 state = s2;
                                 reply
                             }
@@ -1534,7 +1539,7 @@ impl<'l, 'a> Interp<'l, 'a> {
                         self.fx.net_answers.entry(addr.clone()).or_default().push(reply);
                         served += 1;
                     }
-                    return ret(Self::ok(state));
+                    return ret(Self::ok(if parallel { Value::Int(served as i64) } else { state }));
                 }
                 if let Some(e) = addr_error(&addr) {
                     return ret(Self::err(format!("{addr}: {e}")));
@@ -1554,7 +1559,7 @@ impl<'l, 'a> Interp<'l, 'a> {
                         match read_http(&mut conn) {
                             (_, Some(status)) => http_refusal(status).to_string(),
                             (req, None) => {
-                                let (s2, reply) = self.serve_one(&handle, state, &req, span)?;
+                                let (s2, reply) = self.serve_one(&handle, state, &req, parallel, span)?;
                                 state = s2;
                                 reply
                             }
@@ -1562,14 +1567,14 @@ impl<'l, 'a> Interp<'l, 'a> {
                     } else {
                         let mut req = String::new();
                         let _ = std::io::Read::read_to_string(&mut conn, &mut req);
-                        let (s2, reply) = self.serve_one(&handle, state, &req, span)?;
+                        let (s2, reply) = self.serve_one(&handle, state, &req, parallel, span)?;
                         state = s2;
                         reply
                     };
                     let _ = std::io::Write::write_all(&mut conn, reply.as_bytes());
                     served += 1;
                 }
-                ret(Self::ok(state))
+                ret(Self::ok(if parallel { Value::Int(served as i64) } else { state }))
             }
             SimStdout | SimStderr | SimSetStdin | SimSetArgs | SimSetEnv | SimSetFile | SimFile | SimRemoveFile
             | SimSetTime | SimAdvance | SimSeed | SimReply | SimRequests | SimConnect | SimAnswers => {
@@ -1675,7 +1680,21 @@ impl<'l, 'a> Interp<'l, 'a> {
     }
 
     /// One request through a `net.serve` handler: the new state and the reply.
-    fn serve_one(&mut self, handle: &Value, state: Value, req: &str, span: Span) -> R<(Value, String)> {
+    /// One request through `handle`: `handle(state, req)`, or `handle(req)` for a stateless one.
+    fn serve_one(
+        &mut self,
+        handle: &Value,
+        state: Value,
+        req: &str,
+        stateless: bool,
+        span: Span,
+    ) -> R<(Value, String)> {
+        if stateless {
+            return match self.call_value(handle, vec![Value::Str(Rc::from(req))], span)? {
+                Value::Str(r) => Ok((state, r.to_string())),
+                v => Err(self.panic(format!("internal error: handler returned {v:?}"), span)),
+            };
+        }
         match self.call_value(handle, vec![state, Value::Str(Rc::from(req))], span)? {
             Value::Tuple(t) if t.len() == 2 => {
                 let reply = match &t[1] {

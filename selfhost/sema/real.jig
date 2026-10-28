@@ -136,6 +136,7 @@ fn Interp.serve_real(
   handle: Value,
   limit: Int,
   http: Bool,
+  stateless: Bool,
   span: syntax.Span,
 ) -> Result<(Value, List<Value>), Trap>
   effects {io, fs, net, clock, env, ffi}
@@ -161,7 +162,7 @@ fn Interp.serve_real(
     if frame >= 0 {
       req = req[0..frame]
     }
-    let (s2, reply) = match self.serve_one(handle, st, req, span) {
+    let (s2, reply) = match self.serve_one(handle, st, req, stateless, span) {
       Ok(r) => r
       Err(t) => {
         jig_ccall_close(conn)
@@ -174,5 +175,5 @@ fn Interp.serve_real(
     served += 1
   }
   jig_ccall_close(fd)
-  return ret_v(ok_v(st))
+  return ret_v(ok_v(if stateless { Value.Int(served) } else { st }))
 }

@@ -1,0 +1,58 @@
+import "std/hash"
+import "std/json"
+import "std/net"
+import "std/sim"
+import "std/time"
+
+/// The JSON body of a reply.
+fn body_of(reply: Str) -> json.Json {
+  return json.parse(net.parse_response(reply).unwrap().body).unwrap()
+}
+
+fn get(path: Str) -> Str {
+  return "GET " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n"
+}
+
+test "the time, from the clock" {
+  sim.set_time(1793178900000)
+  let r = handle(get("/time"))
+  assert(r.starts_with("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"))
+  assert(body_of(r).get("iso") == Some(json.Json.String("2026-10-28T09:15:00.000Z")))
+  assert(body_of(r).get("ms") == Some(json.Json.Int(1793178900000)))
+}
+
+test "a hash of the decoded text" {
+  let r = handle(get("/sha256?text=a+b%21"))
+  assert(body_of(r).get("sha256").unwrap().as_str() == Some(hash.sha256("a b!")))
+  assert(handle(get("/sha256")).starts_with("HTTP/1.1 400 Bad Request"))
+}
+
+test "a wait takes the simulated time it asks for" {
+  sim.set_time(1000)
+  assert(body_of(handle(get("/wait?ms=250"))).get("waited") == Some(json.Json.Int(250)))
+  assert(time.now_ms() == 1250)
+  assert(handle(get("/wait?ms=9999")).starts_with("HTTP/1.1 400 "))
+}
+
+test "other routes and methods are refused" {
+  assert(
+    body_of(handle(get("/nope"))) ==
+      json.Json.Object([("error", json.Json.String("no route /nope"))]),
+  )
+  assert(handle("POST /time HTTP/1.1\r\nContent-Length: 0\r\n\r\n").starts_with("HTTP/1.1 405 "))
+  assert(handle("garbage").starts_with("HTTP/1.1 400 "))
+}
+
+test "query values decode + and %XX, and keep a bad %"(s: Str) {
+  assert(decode(s.replace("%", "").replace("+", "")) == s.replace("%", "").replace("+", ""))
+}
+
+test "the server answers each request and counts them" {
+  sim.connect(":8080", get("/sha256?text=x"))
+  sim.connect(":8080", get("/missing"))
+  sim.set_args(["api", ":8080", "2"])
+  main()
+  let answers = sim.answers(":8080")
+  assert(answers.len() == 2 && answers[1].starts_with("HTTP/1.1 404 Not Found"))
+  assert(sim.stdout() == "listening on :8080\nanswered 2\n")
+}

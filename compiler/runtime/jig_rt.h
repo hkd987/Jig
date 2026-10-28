@@ -367,6 +367,10 @@ jig_str *jig_net_serve(const jig_str *addr, void *state, jig_fn *f, jig_serve_ca
                        const char *loc);
 jig_str *jig_net_serve_http(const jig_str *addr, void *state, jig_fn *f, jig_serve_call call, int64_t limit,
                             bool *ok, const char *loc);
+/* A stateless handler: reply = f(req). */
+typedef jig_str *(*jig_handle_call)(jig_fn *f, jig_str *req);
+jig_str *jig_net_serve_parallel(const jig_str *addr, jig_fn *f, jig_handle_call call, int64_t limit,
+                                int64_t *served, bool *ok, const char *loc);
 int64_t jig_rand_int(int64_t lo, int64_t hi, const char *loc);
 double jig_rand_float(void);
 

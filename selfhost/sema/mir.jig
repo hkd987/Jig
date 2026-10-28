@@ -357,6 +357,7 @@ enum Op {
   NetFetch
   NetServe
   NetServeHttp
+  NetServeParallel
   /// `x.str()` with derived formatting (the type in `tys[0]`).
   Show
   StrConcat
@@ -431,6 +432,7 @@ fn lookup_intrinsic(pkg_path: Str, recv: Option<TyKey>, name: Str) -> Option<(Op
         "fetch" => Some(Op.NetFetch)
         "serve" => Some(Op.NetServe)
         "serve_http" => Some(Op.NetServeHttp)
+        "serve_http_parallel" => Some(Op.NetServeParallel)
         _ => None
       }
       "std/rand" => match name {

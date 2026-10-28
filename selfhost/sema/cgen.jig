@@ -57,6 +57,8 @@ struct Cg {
   sortby_thunks: Set<Int>
   task_thunks: Set<(Int, Int)>
   serve_thunks: Set<Int>
+  /// Whether the stateless handler thunk (`net.serve_http_parallel`) is emitted.
+  handle_thunk: Bool
   threads: Bool
   counter: Int
   /// The working directory: locations name files relative to it.
@@ -274,6 +276,7 @@ fn new_cg(lw: Lw, cwd: Str) -> Cg {
     sortby_thunks: Set.new()
     task_thunks: Set.new()
     serve_thunks: Set.new()
+    handle_thunk: false
     threads: false
     counter: 0
     cwd: cwd

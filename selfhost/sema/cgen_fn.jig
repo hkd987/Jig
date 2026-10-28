@@ -2107,6 +2107,39 @@ fn Cg.intrinsic(
         " }\n"
       return self.result_of(ret, "sk" + n, "sv" + n, "se" + n)
     }
+    NetServeParallel => {
+      // The handler runs on several threads, so reference counts must be atomic.
+      self.threads = true
+      if !self.handle_thunk {
+        self.handle_thunk = true
+        self.glue_decls += "JIG_FN jig_str *handle_str(jig_fn *f, jig_str *req);\n"
+        self.glue += "JIG_FN jig_str *handle_str(jig_fn *f, jig_str *req) {\n    return ((jig_str *(*)(jig_env *, jig_str *))f->code)(f->env, req);\n}\n"
+      }
+      cx.out += "    jig_fn hf" +
+        n +
+        " = " +
+        a[1] +
+        ";\n    int64_t sn" +
+        n +
+        "; bool sk" +
+        n +
+        "; jig_str *se" +
+        n +
+        " = jig_net_serve_parallel(" +
+        a[0] +
+        ", &hf" +
+        n +
+        ", handle_str, " +
+        a[2] +
+        ", &sn" +
+        n +
+        ", &sk" +
+        n +
+        ", " +
+        loc +
+        ");\n"
+      return self.result_of(ret, "sk" + n, "sn" + n, "se" + n)
+    }
     SimStdout | SimStderr | SimSetStdin | SimSetArgs | SimSetEnv | SimSetFile | SimFile | SimRemoveFile | SimSetTime | SimAdvance | SimSeed | SimReply | SimRequests | SimConnect | SimAnswers => {
       // E0607 keeps the simulation out of programs; nothing compiled can reach it.
       let c = self.cty(ret)

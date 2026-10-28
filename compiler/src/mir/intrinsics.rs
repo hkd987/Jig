@@ -132,6 +132,7 @@ pub enum Op {
     NetFetch,
     NetServe,
     NetServeHttp,
+    NetServeParallel,
     // compiler-generated
     /// `x.str()` with derived formatting (type in `tys[0]`).
     Show,
@@ -316,6 +317,7 @@ pub fn lookup(pkg_path: &str, recv: Option<TyKey>, name: &str) -> Option<(Op, Op
         ("std/net", None, "fetch") => NetFetch,
         ("std/net", None, "serve") => NetServe,
         ("std/net", None, "serve_http") => NetServeHttp,
+        ("std/net", None, "serve_http_parallel") => NetServeParallel,
         ("std/rand", None, "int") => RandInt,
         ("std/rand", None, "float") => RandFloat,
         ("std/task", None, n) => match n {
