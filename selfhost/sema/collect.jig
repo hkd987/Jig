@@ -40,7 +40,7 @@ fn plural(n: Int) -> Str
   return if n == 1 { "" } else { "s" }
 }
 
-fn Sema.collect(&mut self) {
+fn Sema.collect(&mut self, threads: Bool) effects {spawn} {
   self.declare_all()
   for p in self.pkgs {
     for (name, def) in p.scope {
@@ -54,8 +54,14 @@ fn Sema.collect(&mut self) {
     self.ensure_alias(i)
   }
   self.resolve_adts()
+  if !threads || !self.resolve_fns_parallel() {
+    for i in 0..self.defs.fns.len() {
+      self.resolve_fn(i)
+    }
+  }
+  // Methods are registered in order, so that the first of two with one name is kept.
   for i in 0..self.defs.fns.len() {
-    self.resolve_fn(i)
+    self.register_method(i)
   }
   self.resolve_consts()
   self.resolve_tests()
@@ -1063,20 +1069,6 @@ fn Sema.resolve_fn(&mut self, fid: Int) {
         }
         self.defs.fns[fid].recv = Some(key)
         self.defs.fns[fid].self_ty = Some(self_ty)
-        let mk = (key, item.name.text)
-        match self.defs.methods.get(mk) {
-          Some(prev) => {
-            let prev_span = self.defs.fns[prev].name_span
-            self.push(
-              diag(
-                "E0202",
-                item.name.span,
-                "method `" + item.name.text + "` is defined more than once",
-              ).label(prev_span, "first defined here"),
-            )
-          }
-          None => self.defs.methods.insert(mk, fid)
-        }
       }
       None => {
         if f.self_param.is_some() {
@@ -1132,6 +1124,30 @@ fn Sema.resolve_fn(&mut self, fid: Int) {
     } else {
       self.err("E0109", item.name.span, "function `" + item.name.text + "` has no body")
     }
+  }
+}
+
+/// Make method `fid` (one whose receiver resolved) callable on its type, unless an earlier
+/// one has its name.
+fn Sema.register_method(&mut self, fid: Int) {
+  let fd = self.defs.fns[fid]
+  match fd.recv {
+    Some(key) => {
+      let mk = (key, fd.name)
+      match self.defs.methods.get(mk) {
+        Some(prev) => {
+          let prev_span = self.defs.fns[prev].name_span
+          self.push(
+            diag("E0202", fd.name_span, "method `" + fd.name + "` is defined more than once").label(
+              prev_span,
+              "first defined here",
+            ),
+          )
+        }
+        None => self.defs.methods.insert(mk, fid)
+      }
+    }
+    None => {}
   }
 }
 

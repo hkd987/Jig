@@ -230,7 +230,8 @@ at most 6 integer-sized and 8 `Float` arguments. A parameter may also be a byte 
 `List<U8>` is passed as a `const uint8_t *` to its bytes, and `&mut List<U8>` as a
 `uint8_t *` that C may write, as many bytes as the list holds (size it first); pass the
 length as an `Int` yourself. Pointers C hands out are `Int`s, and a struct passed by pointer
-is a `&mut List<U8>` of its size, read by byte offset. C cannot call back into Jig. Their
+is a `&mut List<U8>` of its size, read by byte offset. C's `long` is `Int` on Linux and macOS
+but 32 bits on Windows, where it is `I32`. C cannot call back into Jig. Their
 contracts are checked at run time. Link libraries with `link NAME` lines in `jig.mod`
 (`libc` and `libm` are always there).
 

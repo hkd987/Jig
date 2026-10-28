@@ -1,6 +1,7 @@
-// Checking function bodies on several threads, as the bootstrap compiler does (D25). Bodies
-// are independent once the signatures are collected, so each task checks a run of whole
-// files on its own copy of the checker. What a task adds to the shared type table is then
+// Resolving signatures and checking function bodies on several threads, as the bootstrap
+// compiler does (D25). Signatures are independent once types are declared, and bodies once
+// the signatures are collected, so each task resolves or checks a run of whole files on its
+// own copy of the checker. What a task adds to the shared type table is then
 // replayed into it in the sequential order, so every type gets the id a sequential check
 // gives it, and the ids in the task's tables and bodies are renamed to match. Diagnostics,
 // bodies and tables come back in function order, which is the order a sequential check
@@ -16,13 +17,15 @@ const PARALLEL_CHECK_BYTES: Int = 262144
 const CHECK_CHUNKS: Int = 8
 
 /// What one task found: the bodies of its functions, the tables of their files, the
-/// diagnostics it added, the imports bodies used, and its type table.
+/// diagnostics it added, the imports bodies used, and the types and units it added to its
+/// copy of the type table (only those, so the copy is freed on the task's thread).
 struct ChunkOut {
   bodies: List<Option<Body>>
   tables: List<(Int, Int, Tables)>
   diags: List<syntax.Diag>
   imports_used: List<Set<(Int, Str)>>
-  tys: TyCtx
+  kinds: List<TyKind>
+  units: List<List<Factor>>
 }
 
 /// Runs of whole files, as ranges of function ids: about CHECK_CHUNKS of them, or none when
@@ -58,10 +61,84 @@ fn Sema.body_chunks(self) -> List<(Int, Int)> {
   return out
 }
 
+/// What one task resolved: the definitions of its functions, the diagnostics it added, the
+/// imports signatures used, and the types and units it added to its copy of the type table.
+struct SigChunk {
+  fns: List<FnDef>
+  diags: List<syntax.Diag>
+  imports_used: List<(Int, Int, Str)>
+  kinds: List<TyKind>
+  units: List<List<Factor>>
+}
+
+/// Resolve the signatures of functions `lo` to `hi` on a copy of the checker.
+fn Sema.resolve_chunk(self, lo: Int, hi: Int) -> SigChunk {
+  var s = self
+  let d0 = s.diags.len()
+  let ty0 = s.tys.kinds.len()
+  let unit0 = s.tys.units.len()
+  for fid in lo..hi {
+    s.resolve_fn(fid)
+  }
+  return SigChunk {
+    fns: s.defs.fns[min(lo, s.defs.fns.len())..min(hi, s.defs.fns.len())]
+    diags: s.diags[min(d0, s.diags.len())..s.diags.len()]
+    imports_used: s.defs.sig_imports_used.items()
+    kinds: s.tys.kinds[min(ty0, s.tys.kinds.len())..s.tys.kinds.len()]
+    units: s.tys.units[min(unit0, s.tys.units.len())..s.tys.units.len()]
+  }
+}
+
+/// Resolve every function's signature on several threads when the program is big enough;
+/// false when it is not, and nothing was done.
+fn Sema.resolve_fns_parallel(&mut self) -> Bool effects {spawn} {
+  let chunks = self.body_chunks()
+  if chunks.len() < 2 {
+    return false
+  }
+  let base = self
+  let outs = task.map(chunks, fn(c) { base.resolve_chunk(c.0, c.1) })
+  let ty_base = self.tys.kinds.len()
+  let unit_base = self.tys.units.len()
+  for k in 0..min(chunks.len(), outs.len()) {
+    let out = outs[k]
+    let map = self.tys.absorb(out.kinds, out.units, ty_base, unit_base)
+    let lo = chunks[k].0
+    for i in 0..out.fns.len() {
+      if lo + i < self.defs.fns.len() {
+        self.defs.fns[lo + i] = renamed_fn(out.fns[i], ty_base, map)
+      }
+    }
+    for d in out.diags {
+      self.diags.push(d)
+    }
+    for x in out.imports_used {
+      self.defs.sig_imports_used.insert(x)
+    }
+  }
+  return true
+}
+
+/// A function's definition with its type ids as the shared table has them.
+fn renamed_fn(fd: FnDef, base: Int, map: List<Int>) -> FnDef {
+  var out = fd
+  for i in 0..out.params.len() {
+    out.params[i].ty = renamed(out.params[i].ty, base, map)
+  }
+  out.ret = renamed(out.ret, base, map)
+  out.self_ty = match out.self_ty {
+    Some(t) => Some(renamed(t, base, map))
+    None => None
+  }
+  return out
+}
+
 /// Check functions `lo` to `hi` on a copy of the checker.
 fn Sema.check_chunk(self, lo: Int, hi: Int) -> ChunkOut {
   var s = self
   let d0 = s.diags.len()
+  let ty0 = s.tys.kinds.len()
+  let unit0 = s.tys.units.len()
   var bodies: List<Option<Body>> = []
   var files: List<(Int, Int)> = []
   for fid in lo..hi {
@@ -86,7 +163,8 @@ fn Sema.check_chunk(self, lo: Int, hi: Int) -> ChunkOut {
     tables: tables
     diags: s.diags[d0..s.diags.len()]
     imports_used: s.imports_used
-    tys: s.tys
+    kinds: s.tys.kinds[min(ty0, s.tys.kinds.len())..s.tys.kinds.len()]
+    units: s.tys.units[min(unit0, s.tys.units.len())..s.tys.units.len()]
   }
 }
 
@@ -104,7 +182,7 @@ fn Sema.check_fns_parallel(&mut self) -> Bool effects {spawn} {
   let unit_base = self.tys.units.len()
   var jobs: List<(ChunkOut, List<Int>)> = []
   for out in outs {
-    jobs.push((out, self.tys.absorb(out.tys, ty_base, unit_base)))
+    jobs.push((out, self.tys.absorb(out.kinds, out.units, ty_base, unit_base)))
   }
   let renamed_outs = task.map(jobs, fn(j) { renamed_chunk(j.0, ty_base, j.1) })
   for out in renamed_outs {
@@ -172,16 +250,22 @@ fn renamed_all(ts: List<Int>, base: Int, map: List<Int>) -> List<Int> {
   return out
 }
 
-/// Replay into this type table the types and units `other` added after `base` and
-/// `unit_base`, in the order it added them; what each of its types is here.
-fn TyCtx.absorb(&mut self, other: TyCtx, base: Int, unit_base: Int) -> List<Int> {
+/// Replay into this type table the types and units another copy of it added after `base`
+/// and `unit_base`, in the order it added them; what each of its types is here.
+fn TyCtx.absorb(
+  &mut self,
+  kinds: List<TyKind>,
+  units: List<List<Factor>>,
+  base: Int,
+  unit_base: Int,
+) -> List<Int> {
   var umap: List<Int> = []
-  for u in unit_base..other.units.len() {
-    umap.push(self.unit_id(other.units[u]))
+  for u in units {
+    umap.push(self.unit_id(u))
   }
   var tmap: List<Int> = []
-  for t in base..other.kinds.len() {
-    let k = match other.kinds[t] {
+  for kind in kinds {
+    let k = match kind {
       Int(ik, u) => TyKind.Int(ik, renamed(u, unit_base, umap))
       Float(u) => TyKind.Float(renamed(u, unit_base, umap))
       Tuple(ts) => TyKind.Tuple(renamed_all(ts, base, tmap))

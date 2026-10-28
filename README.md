@@ -98,7 +98,7 @@ language (see `bench/` and `docs/gates/`):
 
 | Metric | Target | Now |
 | --- | --- | --- |
-| `jig check` on a 100k-line project | under 100 ms | about 210 ms (jigc, one thread; the Rust compiler takes 70 ms on 4 cores) |
+| `jig check` on a 100k-line project | under 100 ms | 176 ms on 4 threads, where the Rust compiler takes 98 ms (1.8×) |
 | Re-proof after changing one function | under 1 s | 0.2 s |
 | Runtime vs Rust, 8 benchmarks (instructions) | within 10% | 0.79 (slowest: nbody 1.44, wordfreq 1.13, fannkuch 1.12) |
 | Hello-world release binary | under 100 KB | 94 KB |
@@ -124,8 +124,8 @@ Jig is an alpha. What it does not do yet (phase 5 of [the plan](docs/plan.md) cl
   Strings are known to the prover by their length, not their contents, and an invariant over
   every node of a tree or table cannot be stated, so most of the compiler's own table
   lookups stay run-time checks (D29).
-- **Speed.** `jig check` is about three times slower than the Rust compiler it replaced (one
-  thread against four), and float-heavy code runs behind Rust (nbody, 1.44).
+- **Speed.** `jig check` takes 1.6 to 1.8 times as long as the Rust compiler it replaced
+  (both on four threads), and float-heavy code runs behind Rust (nbody, 1.44).
 - **Agents** took about half a turn more in Jig than in Rust and TypeScript (three runs per
   task and language).
 - **Platforms and tools.** CI and the release cover Linux (x86-64), macOS (Apple silicon)

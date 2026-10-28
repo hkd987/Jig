@@ -168,9 +168,11 @@ fn Sema.loaded_dirs(self) -> Set<Str> {
   return out
 }
 
-fn analysis_of(dir: Str, std_dir: Str, cwd: Str) -> Analysis effects {fs, env, spawn} {
+/// The analysis of the program rooted at `dir`, and the checker's state, which `jig check`
+/// keeps until it exits instead of freeing it.
+fn analysis_of(dir: Str, std_dir: Str, cwd: Str) -> (Analysis, Sema) effects {fs, env, spawn} {
   let (s, _) = analyze(dir, std_dir)
-  return Analysis { root: dir, loaded: s.loaded_dirs(), diags: s.project_diags(cwd) }
+  return (Analysis { root: dir, loaded: s.loaded_dirs(), diags: s.project_diags(cwd) }, s)
 }
 
 /// `start` as an absolute path without `.` or `..` segments.
@@ -211,24 +213,35 @@ fn existing_absolute(p: Str, cwd: Str) -> Str
 /// Check the project containing `start` (or just the package at `start` if there is no
 /// `jig.mod`), as `jig check` does.
 fn check_project(start: Str, std_dir: Str, cwd: Str) -> List<ProjectDiag> effects {fs, env, spawn} {
+  let (diags, _) = check_analyses(start, std_dir, cwd)
+  return diags
+}
+
+/// `check_project`'s findings, and the checker's state for each program it analyzed.
+fn check_analyses(start: Str, std_dir: Str, cwd: Str) -> (List<ProjectDiag>, List<Sema>)
+  effects {fs, env, spawn}
+{
   let abs = existing_absolute(start, cwd)
   let start_dir = if !is_dir(abs) && fs.exists(abs) { parent_dir(abs).unwrap_or(abs) } else { abs }
   let root = match find_project_root(start_dir) {
     Some(r) => r
     None => {
+      let (a, s) = analysis_of(start_dir, std_dir, cwd)
       var out: List<ProjectDiag> = []
-      for (d, _) in analysis_of(start_dir, std_dir, cwd).diags {
+      for (d, _) in a.diags {
         out.push(d)
       }
-      return out
+      return (out, [s])
     }
   }
   let dirs = package_dirs(root)
   var analyses: List<Analysis> = []
+  var semas: List<Sema> = []
   var covered: Set<Str> = Set.new()
   for d in dirs {
     if has_main(d) {
-      let a = analysis_of(d, std_dir, cwd)
+      let (a, s) = analysis_of(d, std_dir, cwd)
+      semas.push(s)
       for x in a.loaded.items() {
         covered.insert(x)
       }
@@ -239,7 +252,8 @@ fn check_project(start: Str, std_dir: Str, cwd: Str) -> List<ProjectDiag> effect
     if covered.contains(d) {
       continue
     }
-    let a = analysis_of(d, std_dir, cwd)
+    let (a, s) = analysis_of(d, std_dir, cwd)
+    semas.push(s)
     for x in a.loaded.items() {
       covered.insert(x)
     }
@@ -294,15 +308,16 @@ fn check_project(start: Str, std_dir: Str, cwd: Str) -> List<ProjectDiag> effect
   for (d, _) in keyed {
     out.push(d)
   }
-  return out
+  return (out, semas)
 }
 
-/// `jigc check [PATH] [--json]`: what `jig check` prints, and its exit code.
-fn check_cmd(start: Str, std_dir: Str, cwd: Str, json: Bool) -> Output
-  ensures result.code == 0 || result.code == 1
+/// `jigc check [PATH] [--json]`: what `jig check` prints and its exit code, and the checker's
+/// state.
+fn check_cmd(start: Str, std_dir: Str, cwd: Str, json: Bool) -> (Output, List<Sema>)
+  ensures result.0.code == 0 || result.0.code == 1
   effects {fs, env, spawn}
 {
-  let diags = check_project(start, std_dir, cwd)
+  let (diags, semas) = check_analyses(start, std_dir, cwd)
   var out = ""
   for d in diags {
     out += if json { d.json + "\n" } else { d.text + "\n" }
@@ -315,5 +330,5 @@ fn check_cmd(start: Str, std_dir: Str, cwd: Str, json: Bool) -> Output
   } else {
     n.str() + " error" + plural_s(n) + "\n"
   }
-  return output(out, summary, if n == 0 { 0 } else { 1 })
+  return (output(out, summary, if n == 0 { 0 } else { 1 }), semas)
 }

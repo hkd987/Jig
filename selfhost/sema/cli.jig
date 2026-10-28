@@ -3,6 +3,7 @@
 
 import "std/fs"
 import "std/io"
+import "std/os"
 import "std/time"
 import "syntax"
 
@@ -336,6 +337,18 @@ fn result_output(r: Result<Str, Str>) -> Output
 }
 
 /// Run `jigc ARGS` (without the program name) in `cwd`: what it prints, and its exit code.
+/// Print `o` as `main` does and exit with its code while `_kept` is still borrowed here, so
+/// the checker's state for a whole program is never freed: the process ends anyway, and
+/// freeing it took a tenth of a large program's check.
+fn finish(o: Output, _kept: List<Sema>) -> Never effects {io, env} {
+  io.print(o.out)
+  if !o.err.is_empty() {
+    // Standard error has no print without a line break.
+    io.eprintln(if o.err.ends_with("\n") { o.err[0..o.err.len() - 1] } else { o.err })
+  }
+  os.exit(o.code)
+}
+
 pub fn run_cli(args: List<Str>, cwd: Str, std_dir: Str) -> Output
   effects {io, fs, net, clock, env, ffi, spawn}
 {
@@ -346,7 +359,8 @@ pub fn run_cli(args: List<Str>, cwd: Str, std_dir: Str) -> Output
   let rest = args[1..args.len()]
   if cmd == "check" {
     let o = parse_opts(rest)
-    return check_cmd(o.path, std_dir, cwd, o.json)
+    let (out, semas) = check_cmd(o.path, std_dir, cwd, o.json)
+    finish(out, semas)
   }
   if cmd == "test" {
     let o = parse_opts(rest)

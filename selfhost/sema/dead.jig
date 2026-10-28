@@ -359,53 +359,60 @@ fn Sema.item_name_span(self, pkg: Int, file: Int, item: Int) -> syntax.Span
 /// ADTs and interfaces that a package other than their own mentions: in any expression or
 /// pattern type, a signature, a field, an alias or a generic bound.
 fn Sema.cross_package_types(self, adts: &mut Set<Int>, ifaces: &mut Set<Int>) {
+  // The types each package mentions, gathered in one pass over the definitions.
+  var work: List<List<Int>> = []
   for pid in 0..self.pkgs.len() {
-    if !self.is_user(pid) {
+    var w: List<Int> = []
+    if self.is_user(pid) {
+      for tab in self.tables[pid] {
+        w.extend(tab.expr_ty)
+        w.extend(tab.pat_ty)
+      }
+    }
+    work.push(w)
+  }
+  for fd in self.defs.fns {
+    let pid = fd.pkg
+    if pid < 0 || pid >= work.len() || !self.is_user(pid) {
       continue
     }
-    var work: List<Int> = []
-    for tab in self.tables[pid] {
-      work.extend(tab.expr_ty)
-      work.extend(tab.pat_ty)
+    for p in fd.params {
+      work[pid].push(p.ty)
     }
-    for fd in self.defs.fns {
-      if fd.pkg != pid {
-        continue
-      }
-      for p in fd.params {
-        work.push(p.ty)
-      }
-      work.push(fd.ret)
-      for g in fd.generics {
-        for b in g.bounds {
-          match b {
-            Iface(i) => if self.defs.ifaces[i].pkg != pid { ifaces.insert(i) }
-            _ => {}
-          }
+    work[pid].push(fd.ret)
+    for g in fd.generics {
+      for b in g.bounds {
+        match b {
+          Iface(i) => if self.defs.ifaces[i].pkg != pid { ifaces.insert(i) }
+          _ => {}
         }
       }
     }
-    for ad in self.defs.adts {
-      if ad.pkg != pid {
-        continue
-      }
-      for f in ad.fields {
-        work.push(f.ty)
-      }
-      for v in ad.variants {
-        for f in v.fields {
-          work.push(f.ty)
-        }
+  }
+  for ad in self.defs.adts {
+    let pid = ad.pkg
+    if pid < 0 || pid >= work.len() || !self.is_user(pid) {
+      continue
+    }
+    for f in ad.fields {
+      work[pid].push(f.ty)
+    }
+    for v in ad.variants {
+      for f in v.fields {
+        work[pid].push(f.ty)
       }
     }
-    for a in self.defs.aliases {
-      if a.pkg == pid {
-        work.push(a.ty)
-      }
+  }
+  for a in self.defs.aliases {
+    if a.pkg >= 0 && a.pkg < work.len() && self.is_user(a.pkg) {
+      work[a.pkg].push(a.ty)
     }
+  }
+  for pid in 0..work.len() {
+    var todo = work[pid]
     var seen: Set<Int> = Set.new()
-    for !work.is_empty() {
-      let t = work.pop().unwrap_or(0)
+    for !todo.is_empty() {
+      let t = todo.pop().unwrap_or(0)
       if seen.contains(t) {
         continue
       }
@@ -415,17 +422,17 @@ fn Sema.cross_package_types(self, adts: &mut Set<Int>, ifaces: &mut Set<Int>) {
           if self.defs.adts[a].pkg != pid {
             adts.insert(a)
           }
-          work.extend(args)
+          todo.extend(args)
         }
-        Tuple(ts) => work.extend(ts)
-        List(x) | Set(x) => work.push(x)
+        Tuple(ts) => todo.extend(ts)
+        List(x) | Set(x) => todo.push(x)
         Map(k, v) => {
-          work.push(k)
-          work.push(v)
+          todo.push(k)
+          todo.push(v)
         }
         Fn(ps, r, _) => {
-          work.extend(ps)
-          work.push(r)
+          todo.extend(ps)
+          todo.push(r)
         }
         _ => {}
       }

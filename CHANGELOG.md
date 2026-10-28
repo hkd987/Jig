@@ -29,8 +29,8 @@ formatting), and a VS Code extension in `editors/vscode`.
 **Toolchain.** One command: `check`, `test`, `prove`, `run`, `build`, `trace`, `fmt`, `get`,
 `explain`, `search`, `reference`, `mcp`. Structured JSON diagnostics with stable codes.
 Native code through C (release builds as one unit at `-O2`), within 10% of Rust on the
-shared benchmark suite; a 100k-line project checks in about 70 ms with the Rust compiler on
-four threads (jigc, which `jig` now runs, takes about 210 ms on one).
+shared benchmark suite; jigc, which `jig` now runs, checks a 100k-line project on four
+threads in 1.6 to 1.8 times the Rust compiler's time.
 
 **Standard library.** `std/io`, `fs`, `net` (TCP request/response, HTTP serving for
 browsers and HTTP clients, a server that answers many connections at once, an HTTP client
@@ -67,5 +67,5 @@ CI checks and tests each one with both compilers.
 **Not yet.** Fewer agent turns than Rust and TypeScript (the first runs solved every task
 in all three, in 7.3, 6.8 and 6.2 turns on average), contracts on most of the compiler (477
 of its 1,229 functions prove completely, the lexer and nearly all of the parser among them),
-self-hosted speed parity, and checking 100k lines in under 100 ms with jigc (209 ms on one
-thread; the Rust compiler's 70 ms uses four) are open (`docs/gates/phase4.md`).
+self-hosted speed parity, and checking 100k lines in under 100 ms with jigc (176 ms on four
+threads, where the Rust compiler takes 98) are open (`docs/gates/phase4.md`, `phase5.md`).
