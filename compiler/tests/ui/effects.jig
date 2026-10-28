@@ -21,10 +21,11 @@ pub fn unknown() effects {disk} { //~ E0402
 }
 
 pub fn closures(xs: List<Int>) -> List<Int> effects {io} {
-  return xs.map(fn(x) {
+  let f: fn(Int) -> Int = fn(x) {
     io.println(x.str()) //~ E0401
     x
-  })
+  }
+  return xs.map(f)
 }
 
 pub fn clock_in_contract() -> Int

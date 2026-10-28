@@ -256,8 +256,9 @@ keeping the standard library over 80%):
 
 Changes to both compilers:
 
-- [ ] Built-in methods (`map`, `filter`, `fold`, `any`, `all`, `sort_by`, ...) take functions
-      with effects, as effect parameters do (D31).
+- [x] Built-in methods (`map`, `filter`, `fold`, `any`, `all`, `sort_by`, ...) take functions
+      with effects, as effect parameters do (D31): each declares `effects {f}`, so a call has
+      the effects of the function passed, in the interpreter and in native code alike.
 - [ ] An HTTP client and TLS (D33): `http` and `https` requests from `std/net`, TLS through the
       system's OpenSSL, linked only by programs that use it; simulated in tests.
 - [ ] Concurrent serving (D34): a server that answers connections in parallel.

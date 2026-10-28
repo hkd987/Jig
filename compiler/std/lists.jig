@@ -117,6 +117,7 @@ pub fn flatten<T>(xss: List<List<T>>) -> List<T>
 /// The first element `pred` accepts.
 pub fn find<T>(xs: List<T>, pred: fn(T) -> Bool) -> Option<T>
   ensures result.is_none() || !xs.is_empty()
+  effects {pred}
 {
   for i in 0..xs.len() {
     if pred(xs[i]) {
@@ -129,6 +130,7 @@ pub fn find<T>(xs: List<T>, pred: fn(T) -> Bool) -> Option<T>
 /// The index of the first element `pred` accepts.
 pub fn position<T>(xs: List<T>, pred: fn(T) -> Bool) -> Option<Int>
   ensures result.is_none() || (result.unwrap() >= 0 && result.unwrap() < xs.len())
+  effects {pred}
 {
   for i in 0..xs.len() {
     if pred(xs[i]) {
@@ -141,6 +143,7 @@ pub fn position<T>(xs: List<T>, pred: fn(T) -> Bool) -> Option<Int>
 /// How many elements `pred` accepts.
 pub fn count<T>(xs: List<T>, pred: fn(T) -> Bool) -> Int
   ensures result >= 0 && result <= xs.len()
+  effects {pred}
 {
   var n = 0
   for i in 0..xs.len() invariant n >= 0 && n <= i {
@@ -154,6 +157,7 @@ pub fn count<T>(xs: List<T>, pred: fn(T) -> Bool) -> Int
 /// The elements `pred` accepts, then the rest, each in order.
 pub fn partition<T>(xs: List<T>, pred: fn(T) -> Bool) -> (List<T>, List<T>)
   ensures result.0.len() + result.1.len() == xs.len()
+  effects {pred}
 {
   var yes: List<T> = []
   var no: List<T> = []

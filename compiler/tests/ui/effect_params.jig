@@ -50,6 +50,22 @@ pub fn not_a_function(n: Int, g: fn() -> Int) -> Int effects {n, m, g, g} { //~ 
   return n + g()
 }
 
+pub fn pure_map(xs: List<Int>) -> Int {
+  let quiet = xs.map(fn(x) { x + 1 })
+  let loud = xs.map(fn(x) { //~ E0401
+    io.println("x")
+    x
+  })
+  return quiet.len() + loud.len()
+}
+
+pub fn loud_filter(xs: List<Int>) -> List<Int> effects {io} {
+  return xs.filter(fn(x) {
+    io.println("x")
+    x > 0
+  })
+}
+
 pub interface Runner {
   fn run(self, f: fn()) effects {f} //~ E0402
 }

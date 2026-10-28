@@ -14,3 +14,23 @@ loud
 done
 item 3
 item 4
+map 3
+map 1
+map 2
+[6, 2, 4]
+keep 3
+keep 1
+keep 2
+[1, 2]
+add 3
+add 1
+add 2
+6
+any 3
+any 1
+true
+compare
+compare
+[3, 2, 1]
+some
+Some(5)

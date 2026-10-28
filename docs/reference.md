@@ -212,7 +212,10 @@ perform effects. Tests run effects against deterministic fakes.
 
 An `effects` clause may name a parameter of function type: the parameter then takes a
 function with any effects, and each call performs that function's effects. Such a function
-is called, not passed as a value.
+is called, not passed as a value. The built-in methods that take a function (`map`,
+`filter`, `fold`, `any`, `all`, `sort_by`, `Option.map`, `Result.map`, `map_err`, and
+`lists.find`, `position`, `count`, `partition`) work this way, so `xs.map(f)` has `f`'s
+effects.
 
 ```
 fn twice(f: fn() -> Int) -> Int effects {f} {

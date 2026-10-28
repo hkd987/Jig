@@ -82,6 +82,7 @@ pub fn Option<T>.ok_or<E>(self, err: E) -> Result<T, E>
 
 pub fn Option<T>.map<U>(self, f: fn(T) -> U) -> Option<U>
   ensures result.is_some() == self.is_some()
+  effects {f}
 {
   return match self {
     Some(v) => Some(f(v))
@@ -136,6 +137,7 @@ pub fn Result<T, E>.ok(self) -> Option<T>
 
 pub fn Result<T, E>.map<U>(self, f: fn(T) -> U) -> Result<U, E>
   ensures result.is_ok() == self.is_ok()
+  effects {f}
 {
   return match self {
     Ok(v) => Ok(f(v))
@@ -145,6 +147,7 @@ pub fn Result<T, E>.map<U>(self, f: fn(T) -> U) -> Result<U, E>
 
 pub fn Result<T, E>.map_err<F>(self, f: fn(E) -> F) -> Result<T, F>
   ensures result.is_ok() == self.is_ok()
+  effects {f}
 {
   return match self {
     Ok(v) => Ok(v)
@@ -280,10 +283,11 @@ pub fn List<T: Eq>.index_of(self, item: T) -> Option<Int>
 }
 
 /// Sorts by a strict "less than" comparison, stably.
-pub fn List<T>.sort_by(&mut self, less: fn(T, T) -> Bool)
+pub fn List<T>.sort_by(&mut self, less: fn(T, T) -> Bool) effects {less}
 
 pub fn List<T>.map<U>(self, f: fn(T) -> U) -> List<U>
   ensures result.len() == self.len()
+  effects {f}
 {
   var out: List<U> = []
   for i in 0..self.len() invariant out.len() == i {
@@ -294,6 +298,7 @@ pub fn List<T>.map<U>(self, f: fn(T) -> U) -> List<U>
 
 pub fn List<T>.filter(self, keep: fn(T) -> Bool) -> List<T>
   ensures result.len() <= self.len()
+  effects {keep}
 {
   var out: List<T> = []
   for i in 0..self.len() invariant out.len() <= i {
@@ -304,7 +309,7 @@ pub fn List<T>.filter(self, keep: fn(T) -> Bool) -> List<T>
   return out
 }
 
-pub fn List<T>.fold<A>(self, init: A, f: fn(A, T) -> A) -> A {
+pub fn List<T>.fold<A>(self, init: A, f: fn(A, T) -> A) -> A effects {f} {
   var acc = init
   for x in self {
     acc = f(acc, x)
@@ -314,6 +319,7 @@ pub fn List<T>.fold<A>(self, init: A, f: fn(A, T) -> A) -> A {
 
 pub fn List<T>.any(self, pred: fn(T) -> Bool) -> Bool
   ensures !result || !self.is_empty()
+  effects {pred}
 {
   for x in self {
     if pred(x) {
@@ -325,6 +331,7 @@ pub fn List<T>.any(self, pred: fn(T) -> Bool) -> Bool
 
 pub fn List<T>.all(self, pred: fn(T) -> Bool) -> Bool
   ensures result || !self.is_empty()
+  effects {pred}
 {
   for x in self {
     if !pred(x) {

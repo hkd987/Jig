@@ -113,8 +113,6 @@ Jig is an alpha. What it does not do yet (phase 5 of [the plan](docs/plan.md) cl
   TLS (so no HTTPS). A server answers one connection at a time.
 - **C interop** passes numbers and strings only: no structs, buffers or callbacks, so a
   library that needs them (or a parameterized SQL query) needs a small C wrapper.
-- **Built-in methods** (`map`, `filter`, `fold`, ...) take pure functions; a loop does what
-  an effectful callback would. Your own functions can take effectful ones (D31).
 - **Verification** proves what contracts and safety checks say, not what the author meant.
   Bit operations, `starts_with` and `join` are not modeled, and an invariant over every node
   of a tree or table cannot be stated, so most of the compiler's own table lookups stay

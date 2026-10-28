@@ -50,4 +50,46 @@ fn main() effects {io} {
   io.println(passes_on(loud).str())
   each([1, 2], fn(x) { io.println(x.str()) }, fn(s) { io.println(s) })
   Bag { xs: [3, 4] }.each(fn(x) { io.println("item " + x.str()) })
+  // Built-in methods take functions with effects too.
+  let xs = [3, 1, 2]
+  let doubled = xs.map(fn(x) {
+    io.println("map " + x.str())
+    x * 2
+  })
+  io.println(doubled.str())
+  let small = xs.filter(fn(x) {
+    io.println("keep " + x.str())
+    x < 3
+  })
+  io.println(small.str())
+  io.println(
+    xs
+      .fold(0, fn(a, x) {
+        io.println("add " + x.str())
+        a + x
+      })
+      .str(),
+  )
+  io.println(
+    xs
+      .any(fn(x) {
+        io.println("any " + x.str())
+        x == 1
+      })
+      .str(),
+  )
+  var sorted = xs
+  sorted.sort_by(fn(a, b) {
+    io.println("compare")
+    a > b
+  })
+  io.println(sorted.str())
+  io.println(
+    Some(4)
+      .map(fn(x) {
+        io.println("some")
+        x + 1
+      })
+      .str(),
+  )
 }

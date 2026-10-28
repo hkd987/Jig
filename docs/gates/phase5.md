@@ -12,7 +12,7 @@ Some rows are research rather than implementation; they say so.
 | JSON | `std/json` | done: strict RFC 8259 reader, compact and indented writers; every contract proves; round-trip property tests; the guestbook's `/api/entries` |
 | Hashing | `std/hash`: SHA-256, HMAC-SHA-256 | done: matches FIPS 180-4 and RFC 4231 vectors; every obligation proves; the site versions its stylesheet with it |
 | Regular expressions | `std/regex`, linear-time matching | done: a Pike VM, so matching is linear in the text; Perl's choice among matches and captures; every contract proves; `(a*)*b` and the like on 5,000 characters in the tests |
-| Built-in methods take only pure functions | effect parameters on `map`, `filter`, `fold`, ... | open |
+| Built-in methods take only pure functions | effect parameters on `map`, `filter`, `fold`, ... | done: thirteen functions in the prelude and `std/lists` take their effects from their function argument; proofs about their callers are unchanged |
 | No HTTP client, no TLS | `std/net` requests over http and https, OpenSSL (D33) | open |
 | One connection at a time | concurrent serving (D34) | open |
 | C interop: numbers and strings only | buffers, pointers, structs, callbacks (D35) | open; callbacks into the interpreter need a trampoline per signature |
