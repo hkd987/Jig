@@ -42,6 +42,9 @@ jobs:
           node-version: 22
       - name: Agent benchmark tasks (reference solutions in Jig, Rust and TypeScript)
         run: python3 bench/agents/run.py ./target/debug/jig --reference
+      - name: The VS Code extension packages
+        working-directory: editors/vscode
+        run: npm ci --no-audit --no-fund && npx --yes @vscode/vsce package --out jig.vsix
 
   bootstrap:
     # D6: the checked-in C builds jigc with nothing but a C compiler, jigc reproduces it, and

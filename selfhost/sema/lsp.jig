@@ -1,0 +1,704 @@
+// `jig lsp`: a Language Server Protocol server over stdio (D36), for editors. Each message
+// is a `Content-Length` header, a blank line and that many bytes of JSON-RPC. It keeps the
+// open documents' texts, checks the project a document belongs to after every change (the
+// open texts in place of the files) and publishes the diagnostics per file; it answers
+// hovers with an expression's type or a function's signature, definitions with where a
+// name is declared, and formatting with the canonical layout.
+
+import "std/fs"
+import "std/io"
+import "syntax"
+
+/// The server's state between messages.
+struct Lsp {
+  std_dir: Str
+  /// The open documents' texts, by path.
+  docs: Map<Str, Str>
+  /// The URI each open document was opened with, by path.
+  uris: Map<Str, Str>
+  /// The URIs the last publication gave diagnostics.
+  published: List<Str>
+  /// The last check's analyses.
+  last: List<Sema>
+}
+
+/// The next message's body, or `None` at the end of the input.
+fn read_message() -> Option<Str> effects {io} {
+  var length = -1
+  for {
+    let line = match io.read_line() {
+      Some(l) => l.trim()
+      None => {
+        return None
+      }
+    }
+    if line.is_empty() {
+      if length >= 0 {
+        return Some(io.read(length))
+      }
+      continue
+    }
+    let colon = match line.find(":") {
+      Some(c) => c
+      None => -1
+    }
+    if colon > 0 && colon < line.len() && line[0..colon].to_lower() == "content-length" {
+      length = max(line[colon + 1..line.len()].trim().to_int().unwrap_or(-1), -1)
+    }
+  }
+}
+
+fn send(body: Str) effects {io} {
+  io.print("Content-Length: " + body.len().str() + "\r\n\r\n" + body)
+}
+
+fn lsp_result(id: Json, result: Json) -> Str {
+  return json_text(Json.Obj([("jsonrpc", jstr("2.0")), ("id", id), ("result", result)]))
+}
+
+fn lsp_error(id: Json, code: Int, message: Str) -> Str {
+  return json_text(
+    Json.Obj(
+      [
+        ("jsonrpc", jstr("2.0")),
+        ("id", id),
+        ("error", Json.Obj([("code", Json.Num(code)), ("message", jstr(message))])),
+      ],
+    ),
+  )
+}
+
+fn notification(method: Str, params: Json) -> Str {
+  return json_text(
+    Json.Obj([("jsonrpc", jstr("2.0")), ("method", jstr(method)), ("params", params)]),
+  )
+}
+
+// ---- URIs and positions ----
+
+fn hex_value(b: U8) -> Int
+  ensures result >= -1 && result <= 15
+{
+  return if b >= 48 && b <= 57 {
+    b as Int - 48
+  } else if b >= 97 && b <= 102 {
+    b as Int - 87
+  } else if b >= 65 && b <= 70 {
+    b as Int - 55
+  } else {
+    -1
+  }
+}
+
+/// The path a `file://` URI names, its `%XX` escapes decoded.
+fn uri_path(uri: Str) -> Str {
+  let s = if uri.starts_with("file://") { uri[7..uri.len()] } else { uri }
+  var out: List<U8> = []
+  var i = 0
+  for i < s.len() invariant i >= 0 && i <= s.len() {
+    let b = s[i]
+    if b == 37 && i + 2 < s.len() && hex_value(s[i + 1]) >= 0 && hex_value(s[i + 2]) >= 0 {
+      out.push((hex_value(s[i + 1]) * 16 + hex_value(s[i + 2])) as U8)
+      i += 3
+    } else {
+      out.push(b)
+      i += 1
+    }
+  }
+  return Str.from_bytes(out).unwrap_or(s)
+}
+
+/// The `file://` URI of a path, escaping what a URI cannot hold.
+fn path_uri(path: Str) -> Str {
+  let digits = "0123456789ABCDEF"
+  var out = "file://"
+  for i in 0..path.len() {
+    let b = path[i]
+    let plain = b >= 97 && b <= 122 ||
+      b >= 65 && b <= 90 ||
+      b >= 48 && b <= 57 ||
+      b == 47 ||
+      b == 45 ||
+      b == 46 ||
+      b == 95 ||
+      b == 126
+    if plain {
+      out += path[i..i + 1]
+    } else {
+      let v = b as Int
+      out += "%" + digits[v / 16..v / 16 + 1] + digits[v % 16..v % 16 + 1]
+    }
+  }
+  return out
+}
+
+/// How many UTF-16 code units the UTF-8 text `s[a..b]` takes: an editor's columns.
+fn utf16_len(s: Str, a: Int, b: Int) -> Int
+  requires a >= 0 && a <= b && b <= s.len()
+  ensures result >= 0
+{
+  var n = 0
+  for i in a..b invariant n >= 0 && n <= 2 * (i - a) {
+    let c = s[i]
+    if c < 128 || c >= 192 {
+      n += if c >= 240 { 2 } else { 1 }
+    }
+  }
+  return n
+}
+
+/// The line and UTF-16 column of byte `off` in `text`.
+fn position(text: Str, off: Int) -> (Int, Int) {
+  let end = min(max(off, 0), text.len())
+  var line = 0
+  var start = 0
+  for i in 0..end invariant start >= 0 && start <= i {
+    if text[i] == 10 {
+      line += 1
+      start = i + 1
+    }
+  }
+  return (line, utf16_len(text, start, end))
+}
+
+/// The byte offset of a line and UTF-16 column in `text` (clamped to the line).
+fn offset_at(text: Str, line: Int, col: Int) -> Int
+  ensures result >= 0 && result <= text.len()
+{
+  var at = 0
+  var l = 0
+  for at < text.len() && l < line invariant at >= 0 && at <= text.len() {
+    if text[at] == 10 {
+      l += 1
+    }
+    at += 1
+  }
+  var units = 0
+  for at < text.len() && text[at] != 10 && units < col invariant at >= 0 && at <= text.len() {
+    let c = text[at]
+    if c < 128 || c >= 192 {
+      units += if c >= 240 { 2 } else { 1 }
+    }
+    at += 1
+    // The rest of a character's bytes.
+    for at < text.len() && text[at] >= 128 && text[at] < 192 invariant at >= 0 && at <= text.len() {
+      at += 1
+    }
+  }
+  return at
+}
+
+fn pos_json(text: Str, off: Int) -> Json {
+  let (line, col) = position(text, off)
+  return Json.Obj([("line", Json.Num(line)), ("character", Json.Num(col))])
+}
+
+fn range_json(text: Str, lo: Int, hi: Int) -> Json {
+  return Json.Obj([("start", pos_json(text, lo)), ("end", pos_json(text, hi))])
+}
+
+/// The directory a file is in.
+fn dir_of_file(path: Str) -> Str {
+  return parent_dir(path).unwrap_or("/")
+}
+
+fn get_str(j: Json, keys: List<Str>) -> Str {
+  var at = j
+  for k in keys {
+    at = at.get(k).unwrap_or(Json.Null)
+  }
+  return at.as_str().unwrap_or("")
+}
+
+fn get_int(j: Json, keys: List<Str>) -> Int {
+  var at = j
+  for k in keys {
+    at = at.get(k).unwrap_or(Json.Null)
+  }
+  return at.as_int().unwrap_or(0)
+}
+
+// ---- checking ----
+
+/// The text of the file at `path`: open in the editor, else on disk.
+fn Lsp.text_of(self, path: Str) -> Str effects {fs} {
+  return match self.docs.get(path) {
+    Some(t) => t
+    None => fs.read(path).unwrap_or("")
+  }
+}
+
+/// The URI to publish `path`'s diagnostics under.
+fn Lsp.uri_of(self, path: Str) -> Str {
+  return self.uris.get(path).unwrap_or(path_uri(path))
+}
+
+/// The analyses a check of `path`'s project takes, as `jig check` makes them: one from each
+/// package with `main`, then one from `path`'s package if none of those loaded it.
+fn Lsp.analyses(self, path: Str) -> List<Sema> effects {fs, env} {
+  let dir = dir_of_file(path)
+  var out: List<Sema> = []
+  var covered: Set<Str> = Set.new()
+  match find_project_root(dir) {
+    Some(root) => {
+      for d in package_dirs(root) {
+        if has_main(d) {
+          let (s, _) = analyze_with(d, self.std_dir, self.docs)
+          for x in s.loaded_dirs().items() {
+            covered.insert(x)
+          }
+          out.push(s)
+        }
+      }
+    }
+    None => {}
+  }
+  if !covered.contains(dir) {
+    let (s, _) = analyze_with(dir, self.std_dir, self.docs)
+    out.push(s)
+  }
+  return out
+}
+
+/// A diagnostic where an editor shows it: (file, start, end, code, message), offsets within
+/// the file.
+fn Sema.placed(self, d: syntax.Diag) -> Option<(SrcFile, Int, Int, Str, Str)> {
+  let f = match self.src_file_at(d.lo) {
+    Some(sf) => sf
+    None => {
+      return None
+    }
+  }
+  var message = d.msg
+  for n in d.notes {
+    message += "\n" + n
+  }
+  let lo = d.lo - f.base
+  return Some((f, lo, max(d.hi - f.base, lo), d.code, message))
+}
+
+/// Check the project `path` belongs to and publish every file's diagnostics, clearing those
+/// of files that have none now. A dead-code error in a package several analyses loaded counts
+/// only if they all report it, as in `jig check`.
+fn Lsp.check(&mut self, path: Str) effects {io, fs, env} {
+  let analyses = self.analyses(path)
+  var placed: List<List<(SrcFile, Int, Int, Str, Str)>> = []
+  for s in analyses {
+    var ds: List<(SrcFile, Int, Int, Str, Str)> = []
+    for d in s.diags {
+      match s.placed(d) {
+        Some(x) => ds.push(x)
+        None => {}
+      }
+    }
+    placed.push(ds)
+  }
+  var files: List<Str> = []
+  var texts: List<Str> = []
+  var lists: List<List<Json>> = []
+  var seen: Set<(Str, Int, Int, Str, Str)> = Set.new()
+  for k in 0..placed.len() {
+    for (f, lo, hi, code, message) in placed[k] {
+      let key = (f.path, lo, hi, code, message)
+      if seen.contains(key) {
+        continue
+      }
+      if code.starts_with("E06") {
+        let dir = dir_of_file(f.path)
+        var agree = true
+        for j in 0..placed.len() {
+          if j == k || j >= analyses.len() || !analyses[j].loaded_dirs().contains(dir) {
+            continue
+          }
+          var found = false
+          for (g, glo, _, gcode, _) in placed[j] {
+            if g.path == f.path && glo == lo && gcode == code {
+              found = true
+            }
+          }
+          agree = agree && found
+        }
+        if !agree {
+          continue
+        }
+      }
+      seen.insert(key)
+      let diag = Json.Obj(
+        [
+          ("range", range_json(f.text, lo, hi)),
+          ("severity", Json.Num(1)),
+          ("code", jstr(code)),
+          ("source", jstr("jig")),
+          ("message", jstr(message)),
+        ],
+      )
+      match files.index_of(f.path) {
+        Some(i) => if i >= 0 && i < lists.len() { lists[i].push(diag) }
+        None => {
+          files.push(f.path)
+          texts.push(f.text)
+          lists.push([diag])
+        }
+      }
+    }
+  }
+  var now: List<Str> = []
+  for k in 0..files.len() {
+    let uri = self.uri_of(files[k])
+    now.push(uri)
+    let ds = if k < lists.len() { lists[k] } else { [] }
+    send(
+      notification(
+        "textDocument/publishDiagnostics",
+        Json.Obj([("uri", jstr(uri)), ("diagnostics", Json.Arr(ds))]),
+      ),
+    )
+  }
+  for uri in self.published {
+    if !now.contains(uri) {
+      send(
+        notification(
+          "textDocument/publishDiagnostics",
+          Json.Obj([("uri", jstr(uri)), ("diagnostics", Json.Arr([]))]),
+        ),
+      )
+    }
+  }
+  // An open document with no diagnostics still gets an empty list, once.
+  match self.uris.get(path) {
+    Some(uri) => if !now.contains(uri) && !self.published.contains(uri) {
+      send(
+        notification(
+          "textDocument/publishDiagnostics",
+          Json.Obj([("uri", jstr(uri)), ("diagnostics", Json.Arr([]))]),
+        ),
+      )
+    }
+    None => {}
+  }
+  self.published = now
+  self.last = analyses
+}
+
+/// An analysis that loaded `path`: the last check's, else a new one.
+fn Lsp.sema_for(&mut self, path: Str) -> Option<Sema> effects {fs, env} {
+  for s in self.last {
+    if s.file_named(path).is_some() {
+      return Some(s)
+    }
+  }
+  self.last = self.analyses(path)
+  for s in self.last {
+    if s.file_named(path).is_some() {
+      return Some(s)
+    }
+  }
+  return None
+}
+
+// ---- hover and definition ----
+
+/// The package and file of `path` in `s`, if it was analyzed.
+fn Sema.file_named(self, path: Str) -> Option<(Int, Int)> {
+  for p in 0..self.pkgs.len() {
+    let files = self.pkgs[p].files
+    for f in 0..files.len() {
+      if files[f].path == path {
+        return Some((p, f))
+      }
+    }
+  }
+  return None
+}
+
+/// The innermost expression in file `f` of package `p` whose span holds global offset `at`.
+fn Sema.expr_at(self, p: Int, f: Int, at: Int) -> Option<Int> {
+  if p < 0 || p >= self.pkgs.len() || f < 0 || f >= self.pkgs[p].files.len() {
+    return None
+  }
+  let ast = self.pkgs[p].files[f].ast
+  var best = -1
+  var width = -1
+  for e in 0..ast.exprs.len() {
+    let sp = ast.exprs[e].span
+    if sp.lo <= at && at < sp.hi && (best < 0 || sp.hi - sp.lo < width) {
+      best = e
+      width = sp.hi - sp.lo
+    }
+  }
+  return if best < 0 { None } else { Some(best) }
+}
+
+/// What a resolved name is, as hover shows it.
+fn Sema.describe(self, r: Res, ty: Int) -> Str {
+  return match r {
+    Fn(id) | Method(id) => if id >= 0 && id < self.defs.fns.len() {
+      let fd = self.defs.fns[id]
+      "fn " + fd.name + self.search_sig(fd)
+    } else {
+      self.tys.display(ty)
+    }
+    _ => self.tys.display(ty)
+  }
+}
+
+/// The function whose body holds global offset `at` in file `f` of package `p`.
+fn Sema.fn_around(self, p: Int, f: Int, at: Int) -> Option<Int> {
+  for id in 0..self.defs.fns.len() {
+    let fd = self.defs.fns[id]
+    if fd.pkg == p && fd.file == f && fd.span.lo <= at && at <= fd.span.hi {
+      return Some(id)
+    }
+  }
+  return None
+}
+
+/// Where the thing expression `e` names is declared: a global span.
+fn Sema.definition_of(self, p: Int, f: Int, e: Int, at: Int) -> Option<syntax.Span> {
+  if p < 0 || p >= self.tables.len() || f < 0 || f >= self.tables[p].len() {
+    return None
+  }
+  let tab = self.tables[p][f]
+  if e < 0 || e >= tab.expr_res.len() {
+    return None
+  }
+  return match tab.expr_res[e] {
+    Fn(id) | Method(id) => if id >= 0 && id < self.defs.fns.len() {
+      Some(self.defs.fns[id].name_span)
+    } else {
+      None
+    }
+    Local(l) => match self.fn_around(p, f, at) {
+      Some(id) => if id >= 0 && id < self.bodies.len() {
+        match self.bodies[id] {
+          Some(b) => if l >= 0 && l < b.locals.len() { Some(b.locals[l].span) } else { None }
+          None => None
+        }
+      } else {
+        None
+      }
+      None => None
+    }
+    Const(id) => if id >= 0 && id < self.defs.consts.len() {
+      let c = self.defs.consts[id]
+      let ok = c.pkg >= 0 &&
+        c.pkg < self.pkgs.len() &&
+        c.file >= 0 &&
+        c.file < self.pkgs[c.pkg].files.len() &&
+        c.item >= 0 &&
+        c.item < self.pkgs[c.pkg].files[c.file].ast.items.len()
+      if ok {
+        Some(self.item_name_span(c.pkg, c.file, c.item))
+      } else {
+        None
+      }
+    } else {
+      None
+    }
+    Variant(adt, index) => if adt >= 0 && adt < self.defs.adts.len() {
+      let a = self.defs.adts[adt]
+      if index >= 0 && index < a.variants.len() {
+        Some(a.variants[index].span)
+      } else {
+        None
+      }
+    } else {
+      None
+    }
+    _ => None
+  }
+}
+
+/// The hover for `path` at a line and column.
+fn Lsp.hover(&mut self, path: Str, line: Int, col: Int) -> Json effects {fs, env} {
+  let s = match self.sema_for(path) {
+    Some(x) => x
+    None => {
+      return Json.Null
+    }
+  }
+  let (p, f) = match s.file_named(path) {
+    Some(pf) => pf
+    None => {
+      return Json.Null
+    }
+  }
+  let file = s.pkgs[p].files[f]
+  let at = file.base + offset_at(file.text, line, col)
+  let e = match s.expr_at(p, f, at) {
+    Some(x) => x
+    None => {
+      return Json.Null
+    }
+  }
+  let tab = s.tables[p][f]
+  if e >= tab.expr_ty.len() || e >= tab.expr_res.len() {
+    return Json.Null
+  }
+  let sp = file.ast.exprs[e].span
+  let text = s.describe(tab.expr_res[e], tab.expr_ty[e])
+  return Json.Obj(
+    [
+      (
+        "contents",
+        Json.Obj([("kind", jstr("markdown")), ("value", jstr("```jig\n" + text + "\n```"))]),
+      ),
+      ("range", range_json(file.text, sp.lo - file.base, sp.hi - file.base)),
+    ],
+  )
+}
+
+/// Where the name at a line and column of `path` is declared.
+fn Lsp.definition(&mut self, path: Str, line: Int, col: Int) -> Json effects {fs, env} {
+  let s = match self.sema_for(path) {
+    Some(x) => x
+    None => {
+      return Json.Null
+    }
+  }
+  let (p, f) = match s.file_named(path) {
+    Some(pf) => pf
+    None => {
+      return Json.Null
+    }
+  }
+  let file = s.pkgs[p].files[f]
+  let at = file.base + offset_at(file.text, line, col)
+  let e = match s.expr_at(p, f, at) {
+    Some(x) => x
+    None => {
+      return Json.Null
+    }
+  }
+  let sp = match s.definition_of(p, f, e, at) {
+    Some(x) => x
+    None => {
+      return Json.Null
+    }
+  }
+  let target = match s.src_file_at(sp.lo) {
+    Some(t) => t
+    None => {
+      return Json.Null
+    }
+  }
+  return Json.Obj(
+    [
+      ("uri", jstr(self.uri_of(target.path))),
+      ("range", range_json(target.text, sp.lo - target.base, sp.hi - target.base)),
+    ],
+  )
+}
+
+/// The edits that format `path`'s text, none if it is formatted or does not parse.
+fn Lsp.formatting(self, path: Str) -> Json effects {fs} {
+  let text = self.text_of(path)
+  return match syntax.format_source(text) {
+    Ok(out) => if out == text {
+      Json.Arr([])
+    } else {
+      Json.Arr([Json.Obj([("range", range_json(text, 0, text.len())), ("newText", jstr(out))])])
+    }
+    Err(_) => Json.Arr([])
+  }
+}
+
+// ---- the loop ----
+
+fn capabilities() -> Json {
+  return Json.Obj(
+    [
+      (
+        "textDocumentSync",
+        Json.Obj(
+          [("openClose", Json.Bool(true)), ("change", Json.Num(1)), ("save", Json.Bool(true))],
+        ),
+      ),
+      ("hoverProvider", Json.Bool(true)),
+      ("definitionProvider", Json.Bool(true)),
+      ("documentFormattingProvider", Json.Bool(true)),
+    ],
+  )
+}
+
+fn lsp_serve(std_dir: Str) -> Output effects {io, fs, env} {
+  var lsp = Lsp { std_dir: std_dir, docs: Map.new(), uris: Map.new(), published: [], last: [] }
+  var shut = false
+  for {
+    let body = match read_message() {
+      Some(b) => b
+      None => {
+        break
+      }
+    }
+    let msg = match parse_json_result(body) {
+      Ok(m) => m
+      Err(e) => {
+        send(lsp_error(Json.Null, -32700, "parse error: " + e))
+        continue
+      }
+    }
+    let method = get_str(msg, ["method"])
+    let params = msg.get("params").unwrap_or(Json.Obj([]))
+    let id = msg.get("id")
+    let uri = get_str(params, ["textDocument", "uri"])
+    let path = uri_path(uri)
+    let line = get_int(params, ["position", "line"])
+    let col = get_int(params, ["position", "character"])
+    if method == "exit" {
+      break
+    }
+    if method == "textDocument/didOpen" {
+      lsp.docs.insert(path, get_str(params, ["textDocument", "text"]))
+      lsp.uris.insert(path, uri)
+      lsp.check(path)
+    } else if method == "textDocument/didChange" {
+      // Whole texts only (`change: 1`): the last change is the document.
+      match params.get("contentChanges") {
+        Some(Arr(changes)) => if !changes.is_empty() {
+          lsp.docs.insert(path, get_str(changes[changes.len() - 1], ["text"]))
+        }
+        _ => {}
+      }
+      lsp.check(path)
+    } else if method == "textDocument/didSave" {
+      lsp.check(path)
+    } else if method == "textDocument/didClose" {
+      let _ = lsp.docs.remove(path)
+      lsp.check(path)
+      let _ = lsp.uris.remove(path)
+    }
+    let rid = match id {
+      Some(i) => i
+      None => {
+        // A notification: nothing to answer.
+        continue
+      }
+    }
+    if method == "initialize" {
+      send(
+        lsp_result(
+          rid,
+          Json.Obj(
+            [
+              ("capabilities", capabilities()),
+              ("serverInfo", Json.Obj([("name", jstr("jig")), ("version", jstr(JIG_VERSION))])),
+            ],
+          ),
+        ),
+      )
+    } else if method == "shutdown" {
+      shut = true
+      send(lsp_result(rid, Json.Null))
+    } else if method == "textDocument/hover" {
+      send(lsp_result(rid, lsp.hover(path, line, col)))
+    } else if method == "textDocument/definition" {
+      send(lsp_result(rid, lsp.definition(path, line, col)))
+    } else if method == "textDocument/formatting" {
+      send(lsp_result(rid, lsp.formatting(path)))
+    } else {
+      send(lsp_error(rid, -32601, "method not found: " + method))
+    }
+  }
+  return output("", "", if shut { 0 } else { 1 })
+}

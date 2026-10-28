@@ -315,6 +315,7 @@ enum Op {
   Eprintln
   ReadLine
   ReadAll
+  ReadN
   FsRead
   FsWrite
   FsExists
@@ -387,6 +388,7 @@ fn lookup_intrinsic(pkg_path: Str, recv: Option<TyKey>, name: Str) -> Option<(Op
         "println" => Some(Op.Println)
         "eprintln" => Some(Op.Eprintln)
         "read_line" => Some(Op.ReadLine)
+        "read" => Some(Op.ReadN)
         "read_all" => Some(Op.ReadAll)
         _ => None
       }

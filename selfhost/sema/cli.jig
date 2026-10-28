@@ -269,6 +269,7 @@ fn usage() -> Str
     "  search <signature>      find functions by type, e.g. 'List<T> -> Option<T>'",
     "  reference               print the language reference",
     "  mcp                     serve the agent tools over MCP (stdio)",
+    "  lsp                     a language server for editors (stdio)",
     "  hook <name>             Claude Code hook entry points (post-edit, pre-commit)",
     "  cc DIR [STD]            DIR's release build as one C file, the runtime included",
     "  debug tokens|ast|fmt FILE, debug check|c|vc|sim DIR",
@@ -403,6 +404,9 @@ pub fn run_cli(args: List<Str>, cwd: Str, std_dir: Str) -> Output
   }
   if cmd == "mcp" {
     return mcp_serve(std_dir, cwd)
+  }
+  if cmd == "lsp" {
+    return lsp_serve(std_dir)
   }
   if cmd == "get" {
     return get_cmd(parse_opts(rest), cwd)

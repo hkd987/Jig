@@ -2263,6 +2263,7 @@ impl<'l, 'a> CGen<'l, 'a> {
                 format!("(rk{n} ? {some} : {none})")
             }
             ReadAll => "jig_read_all()".into(),
+            ReadN => format!("jig_read_n({}, {loc})", a[0]),
             FsRead | FsWrite => {
                 let call = if intr.op == FsRead {
                     format!("jig_fs_read({}, &fk{n})", a[0])

@@ -1,0 +1,81 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Jig",
+  "scopeName": "source.jig",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#chars" },
+    { "include": "#numbers" },
+    { "include": "#declarations" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#calls" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.documentation.jig", "match": "///.*$" },
+        { "name": "comment.line.double-slash.jig", "match": "//.*$" }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.jig",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [{ "name": "constant.character.escape.jig", "match": "\\\\(u\\{[0-9a-fA-F]+\\}|.)" }]
+    },
+    "chars": {
+      "name": "string.quoted.single.jig",
+      "match": "'(\\\\(u\\{[0-9a-fA-F]+\\}|.)|[^'\\\\])'"
+    },
+    "numbers": {
+      "name": "constant.numeric.jig",
+      "match": "\\b(0x[0-9a-fA-F_]+|0b[01_]+|[0-9][0-9_]*(\\.[0-9][0-9_]*)?([eE][+-]?[0-9]+)?)\\b"
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(fn)\\s+(?:([A-Z][A-Za-z0-9_]*)(?:<[^>]*>)?\\.)?([a-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.function.jig" },
+            "2": { "name": "entity.name.type.jig" },
+            "3": { "name": "entity.name.function.jig" }
+          }
+        },
+        {
+          "match": "\\b(struct|enum|interface|type)\\s+([A-Z][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.type.jig" },
+            "2": { "name": "entity.name.type.jig" }
+          }
+        },
+        {
+          "match": "\\b(test|step)\\s+(\"[^\"]*\")",
+          "captures": {
+            "1": { "name": "keyword.declaration.jig" },
+            "2": { "name": "string.quoted.double.jig" }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        { "name": "keyword.control.jig", "match": "\\b(if|else|for|in|match|return|break|continue)\\b" },
+        { "name": "keyword.other.contract.jig", "match": "\\b(requires|ensures|invariant|where|old|forall|exists|effects)\\b" },
+        { "name": "keyword.declaration.jig", "match": "\\b(fn|let|var|const|struct|enum|interface|type|import|pub|test|step|as|unit)\\b" },
+        { "name": "constant.language.jig", "match": "\\b(true|false)\\b" },
+        { "name": "variable.language.jig", "match": "\\b(self|Self|result)\\b" },
+        { "name": "keyword.operator.jig", "match": "(&mut|->|=>|==|!=|<=|>=|&&|\\|\\||[-+*/%<>=!&|^~]|\\.\\.=?)" }
+      ]
+    },
+    "types": {
+      "name": "entity.name.type.jig",
+      "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+    },
+    "calls": {
+      "match": "\\b([a-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+      "captures": { "1": { "name": "entity.name.function.call.jig" } }
+    }
+  }
+}

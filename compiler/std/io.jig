@@ -5,3 +5,8 @@ pub fn println(s: Str) effects {io}
 pub fn eprintln(s: Str) effects {io}
 pub fn read_line() -> Option<Str> effects {io}
 pub fn read_all() -> Str effects {io}
+
+/// Up to `n` bytes of standard input: fewer only when it ends, `""` after.
+pub fn read(n: Int) -> Str
+  requires n >= 0
+  effects {io}

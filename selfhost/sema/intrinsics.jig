@@ -674,6 +674,29 @@ fn Interp.intrinsic(
       self.fx.stdin_pos = self.fx.stdin.len()
       return ret_v(Value.Str(rest))
     }
+    ReadN => {
+      let n = int_v(a[0])
+      if n < 0 {
+        return Err(self.panic("precondition failed: n >= 0\n  n = " + n.str(), span))
+      }
+      if self.fx.real {
+        return ret_v(Value.Str(io.read(n)))
+      }
+      // The first `n` bytes of what is left; the rest stays as lines.
+      let from = min(self.fx.stdin_pos, self.fx.stdin.len())
+      let rest = self.fx.stdin[from..self.fx.stdin.len()].join("\n")
+      var cut = min(n, rest.len())
+      for cut > 0 && cut < rest.len() && rest[cut] >= 128 && rest[cut] < 192 {
+        cut -= 1
+      }
+      var kept = self.fx.stdin[0..from]
+      let tail = rest[cut..rest.len()]
+      if !tail.is_empty() {
+        kept.extend(tail.split("\n"))
+      }
+      self.fx.stdin = kept
+      return ret_v(Value.Str(rest[0..cut]))
+    }
     FsRead => {
       let p = str_v(a[0])
       if self.fx.real {

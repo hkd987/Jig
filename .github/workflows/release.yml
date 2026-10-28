@@ -59,6 +59,12 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Package the VS Code extension
+        working-directory: editors/vscode
+        run: npm ci --no-audit --no-fund && npx --yes @vscode/vsce package --out "../../dist/jig-vscode-${GITHUB_REF_NAME}.vsix"
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -67,4 +73,4 @@ jobs:
           # The notes are the changelog's first section.
           awk '/^## /{n++} n==1' CHANGELOG.md > dist/notes.md
           gh release create "$GITHUB_REF_NAME" --prerelease --title "Jig $GITHUB_REF_NAME" \
-            --notes-file dist/notes.md dist/*.tar.gz dist/jigc.c
+            --notes-file dist/notes.md dist/*.tar.gz dist/*.vsix dist/jigc.c

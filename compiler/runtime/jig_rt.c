@@ -1694,6 +1694,21 @@ jig_str *jig_read_all(void) {
     return jig_buf_to_str(&b);
 }
 
+/* `io.read(n)`: up to `n` bytes of standard input, fewer only at its end. */
+jig_str *jig_read_n(int64_t n, const char *loc) {
+    if (n < 0) jig_panic("precondition failed: n >= 0", loc);
+    flush_out();
+    jig_buf b = {0};
+    char tmp[1 << 14];
+    while (n > 0) {
+        size_t k = fread(tmp, 1, n < (int64_t)sizeof tmp ? (size_t)n : sizeof tmp, stdin);
+        if (!k) break;
+        jig_buf_push(&b, tmp, (int64_t)k);
+        n -= (int64_t)k;
+    }
+    return jig_buf_to_str(&b);
+}
+
 static char *cpath(const jig_str *p) {
     char *s = jig_alloc((size_t)jig_str_len(p) + 1);
     memcpy(s, jig_str_data(p), (size_t)jig_str_len(p));

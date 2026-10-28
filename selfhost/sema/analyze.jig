@@ -86,7 +86,12 @@ fn Sema.sort_diags(&mut self) {
 
 /// Check the package in `dir` (an absolute path) with the standard library in `std_dir`.
 fn analyze(dir: Str, std_dir: Str) -> (Sema, Str) effects {fs, env} {
-  let ld = load_program(dir, std_dir)
+  return analyze_with(dir, std_dir, Map.new())
+}
+
+/// `analyze`, with the files `overlays` names read from it (an editor's unsaved buffers).
+fn analyze_with(dir: Str, std_dir: Str, overlays: Map<Str, Str>) -> (Sema, Str) effects {fs, env} {
+  let ld = load_program_with(dir, std_dir, overlays)
   let root = ld.project_root.unwrap_or(dir)
   var s = new_sema(ld)
   s.collect()

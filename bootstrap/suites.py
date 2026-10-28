@@ -619,6 +619,141 @@ def net_fetch(r):
     return failures
 
 
+# ---------- lsp ----------
+
+
+class LspClient:
+    """A language client for `jigc lsp` over pipes. A thread reads the server's messages, so a
+    missing one times out instead of hanging the suite."""
+
+    def __init__(self, jigc):
+        import queue
+        import threading
+        self.p = subprocess.Popen([jigc, "lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self.notes = []
+        self.inbox = queue.Queue()
+        threading.Thread(target=self.read_all, daemon=True).start()
+
+    def send(self, method, params, id=None):
+        msg = {"jsonrpc": "2.0", "method": method, "params": params}
+        if id is not None:
+            msg["id"] = id
+        b = json.dumps(msg).encode()
+        self.p.stdin.write(b"Content-Length: %d\r\n\r\n" % len(b) + b)
+        self.p.stdin.flush()
+
+    def read_all(self):
+        while True:
+            n = -1
+            while True:
+                line = self.p.stdout.readline()
+                if not line:
+                    self.inbox.put(None)
+                    return
+                line = line.strip()
+                if not line:
+                    if n >= 0:
+                        break
+                    continue
+                k, _, v = line.partition(b":")
+                if k.strip().lower() == b"content-length":
+                    n = int(v)
+            self.inbox.put(json.loads(self.p.stdout.read(n)))
+
+    def recv(self):
+        import queue
+        try:
+            return self.inbox.get(timeout=30)
+        except queue.Empty:
+            return None
+
+    def request(self, id, method, params):
+        self.send(method, params, id)
+        while True:
+            m = self.recv()
+            if m is None or m.get("id") == id:
+                return m
+            self.notes.append(m)
+
+    def diagnostics(self):
+        """The next publication."""
+        m = self.recv()
+        return (m["params"]["uri"], m["params"]["diagnostics"]) if m and "params" in m else (None, None)
+
+
+def suite_lsp(r):
+    failures = []
+    d = r.scratch("lsp")
+    write(os.path.join(d, "jig.mod"), "module lspdemo\n")
+    main = os.path.join(d, "main.jig")
+    text = (
+        'import "std/io"\n'
+        'import "geom"\n\n'
+        "fn main() effects {io} {\n"
+        '  let label = "é😀"\n'
+        "  let a = geom.area(3)\n"
+        "  io.println(label + a.str())\n"
+        "}\n"
+    )
+    write(main, text)
+    os.makedirs(os.path.join(d, "geom"), exist_ok=True)
+    geom = os.path.join(d, "geom", "geom.jig")
+    write(geom, "/// A square's area.\npub fn area(side: Int) -> Int {\n  return side * side\n}\n")
+    uri, guri = "file://" + main, "file://" + geom
+    c = LspClient(r.jigc)
+
+    def check(what, got, want):
+        if got != want:
+            failures.append("lsp: %s: got %r, want %r" % (what, got, want))
+
+    init = c.request(1, "initialize", {"processId": None, "capabilities": {}})
+    caps = init["result"]["capabilities"] if init else {}
+    check("capabilities", sorted(caps), ["definitionProvider", "documentFormattingProvider", "hoverProvider", "textDocumentSync"])
+    c.send("initialized", {})
+    c.send("textDocument/didOpen", {"textDocument": {"uri": uri, "languageId": "jig", "version": 1, "text": text}})
+    check("open", c.diagnostics(), (uri, []))
+    # An error after non-ASCII text on its line: columns count UTF-16 units.
+    bad = text.replace('io.println(label + a.str())', 'io.println(label + "é😀" + a)')
+    c.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2}, "contentChanges": [{"text": bad}]})
+    got_uri, ds = c.diagnostics()
+    check("error uri", got_uri, uri)
+    check("error", [(x["code"], x["range"]["start"], x["range"]["end"]) for x in ds or []],
+          [("E0306", {"line": 6, "character": 13}, {"line": 6, "character": 30})])
+    c.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 3}, "contentChanges": [{"text": text}]})
+    check("fixed", c.diagnostics(), (uri, []))
+    hov = c.request(2, "textDocument/hover", {"textDocument": {"uri": uri}, "position": {"line": 5, "character": 16}})
+    check("hover on a call", hov and hov["result"]["contents"]["value"], "```jig\nfn area(side: Int) -> Int\n```")
+    hov = c.request(3, "textDocument/hover", {"textDocument": {"uri": uri}, "position": {"line": 6, "character": 14}})
+    check("hover on a local", hov and hov["result"]["contents"]["value"], "```jig\nStr\n```")
+    df = c.request(4, "textDocument/definition", {"textDocument": {"uri": uri}, "position": {"line": 5, "character": 16}})
+    check("definition in another file", df and df["result"], {"uri": guri, "range": {"start": {"line": 1, "character": 7}, "end": {"line": 1, "character": 11}}})
+    df = c.request(5, "textDocument/definition", {"textDocument": {"uri": uri}, "position": {"line": 6, "character": 21}})
+    check("definition of a local", df and df["result"]["range"]["start"], {"line": 5, "character": 6})
+    # An unsaved change to one file shows its effect in the file that uses it.
+    c.send("textDocument/didOpen", {"textDocument": {"uri": guri, "languageId": "jig", "version": 1, "text": "pub fn area(side: Str) -> Int {\n  return side.len()\n}\n"}})
+    pubs = dict([c.diagnostics(), c.diagnostics()])
+    check("no errors where the change is", pubs.get(guri), [])
+    check("errors where it is used", [x["code"] for x in pubs.get(uri, [])], ["E0301"])
+    c.send("textDocument/didClose", {"textDocument": {"uri": guri}})
+    pubs = dict([c.diagnostics(), c.diagnostics()])
+    check("closed: the disk's text again", pubs, {uri: [], guri: []})
+    messy = text.replace("  let a = geom.area(3)", "      let a   = geom.area( 3 )")
+    c.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 4}, "contentChanges": [{"text": messy}]})
+    c.diagnostics()
+    fm = c.request(6, "textDocument/formatting", {"textDocument": {"uri": uri}, "options": {"tabSize": 2, "insertSpaces": True}})
+    check("formatting", fm and [e["newText"] for e in fm["result"]], [text])
+    un = c.request(7, "textDocument/references", {})
+    check("unknown method", un and un["error"]["code"], -32601)
+    check("shutdown", c.request(8, "shutdown", None), {"jsonrpc": "2.0", "id": 8, "result": None})
+    c.send("exit", None)
+    try:
+        check("exit code", c.p.wait(timeout=30), 0)
+    except subprocess.TimeoutExpired:
+        c.p.kill()
+        failures.append("lsp: the server did not exit")
+    return failures
+
+
 SUITES = {
     "ui": suite_ui,
     "run": suite_run,
@@ -630,6 +765,7 @@ SUITES = {
     "projects": suite_projects,
     "modules": suite_modules,
     "net": suite_net,
+    "lsp": suite_lsp,
 }
 
 

@@ -350,6 +350,7 @@ static inline uint32_t jig_char_from_int(int64_t v, const char *loc) {
 void jig_print(const jig_str *s, bool newline, bool err);
 jig_str *jig_read_line(bool *ok);
 jig_str *jig_read_all(void);
+jig_str *jig_read_n(int64_t n, const char *loc);
 jig_str *jig_fs_read(const jig_str *path, bool *ok);
 jig_str *jig_fs_write(const jig_str *path, const jig_str *contents, bool *ok);
 bool jig_fs_exists(const jig_str *path);

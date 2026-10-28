@@ -1,0 +1,26 @@
+import "std/io"
+import "std/sim"
+
+// Standard input read by bytes and by lines, interleaved.
+
+test "read takes bytes and read_line the line after them" {
+  sim.set_stdin("abc\ndefgh\nijk")
+  assert(io.read(5) == "abc\nd")
+  assert(io.read_line() == Some("efgh"))
+  assert(io.read(100) == "ijk")
+  assert(io.read(3) == "" && io.read_line() == None)
+}
+
+test "a length-prefixed message, as a language server reads one" {
+  sim.set_stdin("Content-Length: 7\n\n{\"a\":1}Content-Length: 2\n\n[]")
+  assert(io.read_line() == Some("Content-Length: 7") && io.read_line() == Some(""))
+  assert(io.read(7) == "{\"a\":1}")
+  assert(io.read_line() == Some("Content-Length: 2") && io.read_line() == Some(""))
+  assert(io.read(2) == "[]")
+}
+
+test "read stops at a character's first byte"(n: Int) requires n >= 0, n <= 8 {
+  sim.set_stdin("é中x")
+  let got = io.read(n)
+  assert(got.len() <= n && "é中x".starts_with(got))
+}

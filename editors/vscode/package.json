@@ -1,0 +1,39 @@
+{
+  "name": "jig",
+  "displayName": "Jig",
+  "description": "The Jig language: syntax highlighting, and diagnostics, hovers, definitions and formatting from `jig lsp`.",
+  "version": "0.1.0",
+  "publisher": "jig-lang",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/hkd987/Jig" },
+  "engines": { "vscode": "^1.82.0" },
+  "categories": ["Programming Languages", "Formatters", "Linters"],
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "languages": [
+      {
+        "id": "jig",
+        "aliases": ["Jig", "jig"],
+        "extensions": [".jig"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      { "language": "jig", "scopeName": "source.jig", "path": "./syntaxes/jig.tmLanguage.json" }
+    ],
+    "configuration": {
+      "title": "Jig",
+      "properties": {
+        "jig.path": {
+          "type": "string",
+          "default": "jig",
+          "description": "The `jig` command the extension starts as `jig lsp`."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "9.0.1"
+  }
+}

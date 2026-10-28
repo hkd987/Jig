@@ -128,8 +128,10 @@ Jig is an alpha. What it does not do yet (phase 5 of [the plan](docs/plan.md) cl
   far).
 - **Platforms and tools.** CI and the release cover Linux (x86-64) and macOS (Apple
   silicon); other POSIX systems should build it with `bootstrap/install.sh` but are untested,
-  and there is no Windows port. There is no editor or language server support beyond the
-  Claude Code plugin and `jig mcp`, and modules come from git (`jig get`), with no registry.
+  and there is no Windows port. The language server (`jig lsp`, and the VS Code extension in
+  `editors/vscode`) has diagnostics, hover, definitions and formatting but no completion
+  or rename yet, and modules come from git (`jig get`) with [an index](docs/packages.md)
+  but no hosted registry.
 
 ## Self-hosted
 

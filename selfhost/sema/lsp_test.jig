@@ -1,0 +1,27 @@
+// The language server's text positions and URIs.
+
+test "positions count lines and UTF-16 columns" {
+  let text = "ab\nxé中😀y\n"
+  assert(position(text, 0) == (0, 0) && position(text, 3) == (1, 0))
+  // é is two bytes and one unit, 中 three bytes and one unit, 😀 four bytes and two units.
+  assert(position(text, 4) == (1, 1) && position(text, 6) == (1, 2) && position(text, 9) == (1, 3))
+  assert(position(text, 13) == (1, 5) && position(text, 99) == (2, 0))
+  assert(offset_at(text, 1, 5) == 13 && offset_at(text, 1, 1) == 4 && offset_at(text, 0, 99) == 2)
+  assert(offset_at(text, 7, 0) == text.len())
+}
+
+test "an offset and its position round-trip"(k: Int) requires k >= 0, k <= 14 {
+  let text = "ab\nxé中😀y\n"
+  // Only offsets where a character starts.
+  if k < text.len() && text[k] >= 128 && text[k] < 192 {
+    return
+  }
+  let (line, col) = position(text, k)
+  assert(offset_at(text, line, col) == min(k, text.len()))
+}
+
+test "file URIs and paths" {
+  assert(uri_path("file:///home/me/My%20Project/main.jig") == "/home/me/My Project/main.jig")
+  assert(path_uri("/home/me/My Project/é.jig") == "file:///home/me/My%20Project/%C3%A9.jig")
+  assert(uri_path(path_uri("/a b/c#d%e")) == "/a b/c#d%e")
+}

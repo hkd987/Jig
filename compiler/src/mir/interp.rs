@@ -1391,6 +1391,37 @@ impl<'l, 'a> Interp<'l, 'a> {
                 let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut s);
                 ret(Value::Str(Rc::from(s.as_str())))
             }
+            ReadN => {
+                let n = int(&a[0]);
+                if n < 0 {
+                    return Err(self.panic(format!("precondition failed: n >= 0\n  n = {n}"), span));
+                }
+                let n = n as usize;
+                if self.fx.fake {
+                    // The first `n` bytes of what is left; the rest stays as lines.
+                    let rest = self.fx.stdin[self.fx.stdin_pos.min(self.fx.stdin.len())..].join("\n");
+                    let mut cut = n.min(rest.len());
+                    while !rest.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    let (head, tail) = rest.split_at(cut);
+                    self.fx.stdin.truncate(self.fx.stdin_pos);
+                    if !tail.is_empty() {
+                        self.fx.stdin.extend(tail.split('\n').map(|l| l.to_string()));
+                    }
+                    return ret(Value::Str(Rc::from(head)));
+                }
+                let mut buf = vec![0u8; n];
+                let mut got = 0;
+                let mut input = std::io::stdin().lock();
+                while got < n {
+                    match std::io::Read::read(&mut input, &mut buf[got..]) {
+                        Ok(0) | Err(_) => break,
+                        Ok(k) => got += k,
+                    }
+                }
+                ret(Value::Str(Rc::from(String::from_utf8_lossy(&buf[..got]).as_ref())))
+            }
             FsRead => {
                 let p = self.str_arg(&a[0], span)?;
                 if self.fx.fake {

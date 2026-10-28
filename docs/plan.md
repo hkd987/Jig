@@ -289,9 +289,12 @@ Tools and platforms:
 - [x] macOS in CI and in the release: a job on Apple silicon builds jigc from the C bootstrap
       with the system's clang, checks the fixed point and runs every suite; the release
       publishes a macOS arm64 binary next to the Linux one.
-- [ ] Editor support (D36): `jig lsp` (diagnostics, types on hover, go to definition,
-      formatting) and a VS Code extension.
-- [ ] Modules: a package index on the site. Modules already resolve by URL and git tag, as
+- [x] Editor support (D36): `jig lsp` (diagnostics, types on hover, go to definition,
+      formatting) and a VS Code extension. jigc's `selfhost/sema/lsp.jig`, with `io.read(n)`
+      in both compilers; a scripted session in jigc's suites (an error after non-ASCII text,
+      a change in one file shown in another, definitions across files, formatting) and
+      `editors/vscode`, packaged in CI and attached to releases.
+- [x] Modules: a package index on the site. Modules already resolve by URL and git tag, as
       Go's do; hosting a registry service is outside what this repository can deploy.
 - [ ] Windows: the runtime is POSIX (sockets, threads, `dlopen`), so it needs a port.
 - [ ] Agent benchmark: three runs per task and language, to separate the turn counts from

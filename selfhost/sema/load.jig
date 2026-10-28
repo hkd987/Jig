@@ -389,6 +389,8 @@ struct Loader {
   /// project itself or the standard library).
   modules: List<Resolved>
   pkg_module: List<Option<Int>>
+  /// Files' texts that replace what is on disk: an editor's unsaved buffers (`jig lsp`).
+  overlays: Map<Str, Str>
 
   invariant next_base >= 0 && next_base <= syntax.MAX_OFFSET
 }
@@ -416,8 +418,9 @@ fn dummy_span() -> syntax.Span
   return syntax.Span { lo: 0, hi: 0 }
 }
 
-/// Load the package in `dir` (an absolute path) and everything it imports.
-fn load_program(dir: Str, std_dir: Str) -> Loaded effects {fs, env} {
+/// Load the package in `dir` (an absolute path) and everything it imports, reading the
+/// files `overlays` names from it instead of the disk (an editor's unsaved buffers).
+fn load_program_with(dir: Str, std_dir: Str, overlays: Map<Str, Str>) -> Loaded effects {fs, env} {
   let project_root = find_project_root(dir)
   var ld = Loader {
     std_dir: std_dir
@@ -430,6 +433,7 @@ fn load_program(dir: Str, std_dir: Str) -> Loaded effects {fs, env} {
     next_base: 1
     modules: []
     pkg_module: []
+    overlays: overlays
   }
   var links: List<Str> = []
   match project_root {
@@ -587,7 +591,11 @@ fn Loader.add_dir_package(
   let p = self.new_package(path, false, module)
   for n in sources invariant p >= 0 && p < self.pkgs.len() {
     let f = join_path(dir, n)
-    match fs.read(f) {
+    let read = match self.overlays.get(f) {
+      Some(text) => Ok(text)
+      None => fs.read(f)
+    }
+    match read {
       Ok(text) => self.add_file(p, f, text)
       Err(_) => self.diags.push(diag("E0902", dummy_span(), "cannot read " + f))
     }

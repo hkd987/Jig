@@ -457,7 +457,7 @@ its position; `Str.to_int` and `to_float` ignore surrounding spaces and accept a
 
 | Package | Functions |
 | --- | --- |
-| `std/io` (`io`) | `print(s) println(s) eprintln(s) read_line() -> Option<Str> read_all() -> Str` |
+| `std/io` (`io`) | `print(s) println(s) eprintln(s) read_line() -> Option<Str> read_all() -> Str read(n) -> Str` (`read`: up to `n` bytes, fewer only at the end) |
 | `std/fs` (`fs`) | `read(path) -> Result<Str, Str> write(path, s) -> Result<(), Str> exists(path) -> Bool list(dir) -> Result<List<Str>, Str>` |
 | `std/os` (`env`) | `args() -> List<Str> env(name) -> Option<Str> exit(code) -> Never` |
 | `std/time` (`clock`) | `now_ms() -> Int now_ns() -> Int sleep(ms)`; pure, for UTC dates in years 0 to 9999 (`MIN_MS` to `MAX_MS`): `utc(ms) -> DateTime` (`year month day hour minute second ms`) `unix_ms(d) iso(ms) http_date(ms) -> Str parse_iso(s) -> Option<Int> weekday(ms)` (1 is Monday) `is_leap(year) days_in_month(year, month)` |
@@ -486,6 +486,7 @@ its position; `Str.to_int` and `to_float` ignore surrounding spaces and accept a
 | `jig fmt [--check]` | canonical formatting; no options |
 | `jig trace [fn F \| scenario S \| uncovered] [--json]` | traceability between scenarios and code |
 | `jig explain <code>` | long explanation of a diagnostic code |
+| `jig lsp` | a language server for editors over stdio: diagnostics as you type, types and signatures on hover, go to definition, formatting (`editors/vscode` is the VS Code extension) |
 
 Every diagnostic has a stable code (`E0301`), a span, a message, and where possible a
 counterexample and candidate fixes. `--json` prints one JSON object per line.

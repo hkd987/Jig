@@ -1999,6 +1999,9 @@ fn Cg.intrinsic(
     ReadAll => {
       return "jig_read_all()"
     }
+    ReadN => {
+      return "jig_read_n(" + a[0] + ", " + loc + ")"
+    }
     FsRead | FsWrite => {
       let c = if intr.op == Op.FsRead {
         "jig_fs_read(" + a[0] + ", &fk" + n + ")"

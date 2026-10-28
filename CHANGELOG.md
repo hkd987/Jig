@@ -23,6 +23,9 @@ typed step functions at compile time and run as tests. Unreachable functions, un
 fields, unused exports and impossible arms are errors, and `jig trace` maps scenarios to
 the code they exercise.
 
+**Editors.** `jig lsp`, a language server (diagnostics as you type, hover, go to definition,
+formatting), and a VS Code extension in `editors/vscode`.
+
 **Toolchain.** One command: `check`, `test`, `prove`, `run`, `build`, `trace`, `fmt`, `get`,
 `explain`, `search`, `reference`, `mcp`. Structured JSON diagnostics with stable codes.
 Native code through C (release builds as one unit at `-O2`), within 10% of Rust on the
