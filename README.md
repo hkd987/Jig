@@ -114,8 +114,9 @@ Jig is an alpha. What it does not do yet (phase 5 of [the plan](docs/plan.md) cl
   HTTPS through the system's OpenSSL), HTML, JSON, regular expressions, hashing, dates,
   randomness, tasks and text helpers; a server can answer many connections at once when its
   handler keeps no state.
-- **C interop** passes numbers and strings only: no structs, buffers or callbacks, so a
-  library that needs them (or a parameterized SQL query) needs a small C wrapper.
+- **C interop** passes numbers, strings and byte buffers (a struct is a buffer read by
+  offset), but C cannot call back into Jig, so a library that takes a callback needs a small
+  C wrapper.
 - **Verification** proves what contracts and safety checks say, not what the author meant.
   Strings are known to the prover by their length, not their contents, and an invariant over
   every node of a tree or table cannot be stated, so most of the compiler's own table

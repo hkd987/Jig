@@ -21,6 +21,8 @@ pub enum CArg {
     Int(i64),
     Float(f64),
     Str(CString),
+    /// A byte buffer, passed as a pointer to its first byte; C may write it.
+    Buf(Vec<u8>),
 }
 
 /// What the result register holds.
@@ -77,15 +79,24 @@ type FloatFn = unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, f64, f64, f64,
 ///
 /// # Safety
 /// `addr` must be a non-variadic C function whose parameters, in order, are the integer-class
-/// and `double` values of `args` (at most 6 and 8), returning what `ret` says.
-pub unsafe fn call(addr: usize, args: &[CArg], ret: CRet) -> CValue {
+/// and `double` values of `args` (at most 6 and 8), returning what `ret` says; it may write a
+/// buffer only within its length.
+pub unsafe fn call(addr: usize, args: &mut [CArg], ret: CRet) -> CValue {
     let mut ints = [0i64; 6];
     let mut floats = [0f64; 8];
     let (mut ni, mut nf) = (0, 0);
-    for a in args {
+    for a in args.iter_mut() {
         match a {
             CArg::Int(v) if ni < 6 => {
                 ints[ni] = *v;
+                ni += 1;
+            }
+            CArg::Buf(b) if ni < 6 => {
+                // An empty buffer still gets a valid pointer (Vec's dangling one is not one).
+                if b.is_empty() {
+                    b.reserve(1);
+                }
+                ints[ni] = b.as_mut_ptr() as i64;
                 ni += 1;
             }
             CArg::Str(s) if ni < 6 => {

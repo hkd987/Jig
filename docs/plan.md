@@ -269,8 +269,11 @@ Changes to both compilers:
       `net.serve_http_parallel` with a stateless handler; workers in native code, one request
       at a time on the interpreter; `examples/api` answers eight slow requests at once in CI,
       with both compilers, and ThreadSanitizer finds no race in it.
-- [ ] C interop beyond numbers and strings (D35): byte buffers in and out, opaque pointers,
-      structs passed by pointer, and callbacks.
+- [x] C interop beyond numbers and strings (D35): byte buffers in and out, opaque pointers,
+      structs passed by pointer, and callbacks. `List<U8>` and `&mut List<U8>` parameters in
+      both compilers and both interpreters (`tests/run/ffi_buffers`: `memset`, `memcpy`,
+      `memcmp`, and `pipe`'s `int[2]` read by offset); pointers stay `Int`. Callbacks are
+      out, with the reason in D35.
 - [x] The prover models `starts_with`, `ends_with`, `join` and bit operations on
       non-negative integers. Shifts by a constant, masks `2^k - 1` and `~` are exact in both
       provers, the other bit operations bounded (`tests/prove/bits`, with functions that must

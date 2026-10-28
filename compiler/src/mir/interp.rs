@@ -546,7 +546,10 @@ impl<'l, 'a> Interp<'l, 'a> {
                 let (ret, outs) = match callee {
                     Callee::Fn(f) => self.call(*f, vals)?,
                     Callee::Intrinsic(i) => self.intrinsic(i, vals, span)?,
-                    Callee::Ffi(name) => (self.ffi(*name, vals, *ret, span)?, Vec::new()),
+                    Callee::Ffi(name) => {
+                        let muts: Vec<bool> = args.iter().map(|a| matches!(a, Arg::MutRef(_))).collect();
+                        self.ffi(*name, vals, &muts, *ret, span)?
+                    }
                     Callee::Value(op) => match self.operand(op, locals, span)? {
                         Value::Fn(f) => self.call(f, vals)?,
                         Value::Closure(c) => {
@@ -565,15 +568,16 @@ impl<'l, 'a> Interp<'l, 'a> {
         }
     }
 
-    /// Call the C function `name` (see `mir::ffi`).
-    fn ffi(&mut self, name: Symbol, args: Vec<Value>, ret: Ty, span: Span) -> R<Value> {
+    /// Call the C function `name` (see `mir::ffi`). A `List<U8>` goes as a buffer of its
+    /// bytes; one passed `&mut` (`muts`) comes back, as C left it, among the outputs.
+    fn ffi(&mut self, name: Symbol, args: Vec<Value>, muts: &[bool], ret: Ty, span: Span) -> R<(Value, Vec<Value>)> {
         use super::ffi::{CArg, CRet, CValue};
         let Some(addr) = super::ffi::symbol(name.as_str(), self.lw.links) else {
             return Err(
                 self.panic(format!("no C function `{name}` in this process or the libraries `jig.mod` links"), span)
             );
         };
-        let cargs: Vec<CArg> = args
+        let mut cargs: Vec<CArg> = args
             .iter()
             .map(|v| match v {
                 Value::Int(i) => CArg::Int(*i),
@@ -581,6 +585,7 @@ impl<'l, 'a> Interp<'l, 'a> {
                 Value::Bool(b) => CArg::Int(*b as i64),
                 Value::Float(f) => CArg::Float(*f),
                 Value::Str(s) => CArg::Str(super::ffi::c_string(s)),
+                Value::List(xs) => CArg::Buf(xs.iter().map(|x| int_of(x) as u8).collect()),
                 _ => CArg::Int(0),
             })
             .collect();
@@ -593,8 +598,17 @@ impl<'l, 'a> Interp<'l, 'a> {
         };
         // SAFETY: the checker allowed only scalar and string parameters and results, few enough
         // to pass in registers; the declaration states the C function's signature.
-        let r = unsafe { super::ffi::call(addr, &cargs, cret) };
-        Ok(match (r, kind) {
+        let r = unsafe { super::ffi::call(addr, &mut cargs, cret) };
+        let outs = cargs
+            .into_iter()
+            .zip(muts)
+            .filter(|(_, m)| **m)
+            .map(|(a, _)| match a {
+                CArg::Buf(b) => Value::List(Rc::new(b.into_iter().map(|x| Value::Int(x as i64)).collect())),
+                _ => Value::Unit,
+            })
+            .collect();
+        let v = match (r, kind) {
             (CValue::Float(f), _) => Value::Float(f),
             (CValue::Str(s), _) => Value::Str(Rc::from(s.as_str())),
             (CValue::Void, _) => Value::Unit,
@@ -607,7 +621,8 @@ impl<'l, 'a> Interp<'l, 'a> {
                 IntTy::I64 => Value::Int(r),
             },
             (CValue::Int(_), _) => Value::Unit,
-        })
+        };
+        Ok((v, outs))
     }
 
     fn int_kind(&self, ty: Ty) -> Option<IntTy> {

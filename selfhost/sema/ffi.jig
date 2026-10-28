@@ -50,6 +50,12 @@ fn jig_ccall_free(p: Int) effects {ffi}
 
 fn jig_ccall_str(p: Int) -> Str effects {ffi}
 
+fn jig_ccall_buf(n: Int) -> Int effects {ffi}
+
+fn jig_ccall_buf_set(p: Int, i: Int, b: Int) effects {ffi}
+
+fn jig_ccall_buf_get(p: Int, i: Int) -> Int effects {ffi}
+
 /// The 64 bits of a `U64` as an `Int`, and back.
 fn int_bits_of(u: U64) -> Int
   ensures (u < 9223372036854775808) == (result >= 0)
@@ -67,14 +73,17 @@ fn u64_bits_of(i: Int) -> U64
   return if i < 0 { ((i + 9223372036854775807 + 1) as U64) + 9223372036854775808 } else { i as U64 }
 }
 
-/// Call the C function `name` with argument values; `ret` is its result type.
+/// Call the C function `name` with argument values; `ret` is its result type. A `List<U8>`
+/// goes as a buffer of its bytes; one passed `&mut` (`muts`) comes back, as C left it, among
+/// the outputs.
 fn Interp.ffi(
   &mut self,
   name: Str,
   args: List<Value>,
+  muts: List<Bool>,
   ret: Int,
   span: syntax.Span,
-) -> Result<Value, Trap>
+) -> Result<(Value, List<Value>), Trap>
   effects {ffi}
 {
   if !self.links_open {
@@ -100,7 +109,10 @@ fn Interp.ffi(
   var ni = 0
   var nf = 0
   var copies: List<Int> = []
-  for v in args {
+  // Each `&mut` buffer: where it is in C memory and how long.
+  var outs: List<(Int, Int)> = []
+  for k in 0..args.len() {
+    let v = args[k]
     match v {
       Float(f) => if nf < 8 {
         floats[nf] = f
@@ -114,6 +126,17 @@ fn Interp.ffi(
           Str(s) => {
             let p = jig_ccall_strdup(s)
             copies.push(p)
+            p
+          }
+          List(xs) => {
+            let p = jig_ccall_buf(xs.len())
+            for i in 0..xs.len() {
+              jig_ccall_buf_set(p, i, int_v(xs[i]))
+            }
+            copies.push(p)
+            if k < muts.len() && muts[k] {
+              outs.push((p, xs.len()))
+            }
             p
           }
           _ => 0
@@ -166,8 +189,16 @@ fn Interp.ffi(
       }
     }
   }
+  var bufs: List<Value> = []
+  for (p, n) in outs {
+    var xs: List<Value> = []
+    for i in 0..n {
+      xs.push(Value.Int(jig_ccall_buf_get(p, i)))
+    }
+    bufs.push(Value.List(xs))
+  }
   for p in copies {
     jig_ccall_free(p)
   }
-  return Ok(out)
+  return Ok((out, bufs))
 }

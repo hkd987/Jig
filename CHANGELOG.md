@@ -12,7 +12,7 @@ declared effects (a function can take its effects from a function argument, so a
 handler can use files or a database, and the callbacks of `map`, `filter` and the other
 built-in methods can have effects), `Option` and `Result` with `?`, mutable value
 semantics with `&mut` only on parameters, and calls to C libraries behind the `ffi`
-effect. No nil, no zero values, no implicit conversions, no GC.
+effect, with numbers, strings and byte buffers. No nil, no zero values, no implicit conversions, no GC.
 
 **Verification.** Contracts and safety (overflow, bounds, division) proved per function by
 Z3 against callees' contracts (and, read off their bodies, what they write and, for pure

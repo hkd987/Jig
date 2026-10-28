@@ -1194,10 +1194,27 @@ fn Cg.ffi_call(
       Value(op) => {
         let t = self.operand_ty(mf, op)
         let e = self.operand(mf, cx, op, span)
-        ctys.push(self.ffi_cty(t))
-        vals.push(if self.kind(t) == TyKind.Str { "jig_str_data(" + e + ")" } else { e })
+        match self.kind(t) {
+          Str => {
+            ctys.push(self.ffi_cty(t))
+            vals.push("jig_str_data(" + e + ")")
+          }
+          List(_) => {
+            ctys.push("const uint8_t *")
+            vals.push("jig_list_bytes(" + e + ")")
+          }
+          _ => {
+            ctys.push(self.ffi_cty(t))
+            vals.push(e)
+          }
+        }
       }
-      _ => {}
+      // A byte buffer C may write: the list itself, made unique.
+      MutRef(p) => {
+        let e = self.place_expr(mf, cx, p, true, span)
+        ctys.push("uint8_t *")
+        vals.push("jig_list_bytes_mut(&" + e + ")")
+      }
     }
   }
   let rc = self.ffi_cty(ret)

@@ -200,9 +200,10 @@ codes! {
         "A function declared without a body and with the `ffi` effect calls the C function of \
          the same name. Its parameters and result must be `Int`, `I32`, `U8`, `U32`, `U64`, \
          `Float`, `Bool` or `Str` (passed as a NUL-terminated `const char *`; a returned one is \
-         copied), it cannot be generic or a method or take `&mut`, and it takes at most 6 \
-         integer and 8 `Float` arguments. Libraries are linked with `link NAME` lines in \
-         `jig.mod`.";
+         copied); a parameter may also be a byte buffer, `List<U8>` (a `const uint8_t *` to its \
+         bytes) or `&mut List<U8>` (a `uint8_t *` C may write, as many bytes as the list \
+         holds). It cannot be generic or a method, and it takes at most 6 integer-sized and 8 \
+         `Float` arguments. Libraries are linked with `link NAME` lines in `jig.mod`.";
     E0332 = 332, "refined-variant-value", "refined variant used as a function",
         "A variant whose fields are refined (a refinement alias or a `where` clause) checks \
          them where it is built, so it can only be called, not passed as a function. Wrap it \

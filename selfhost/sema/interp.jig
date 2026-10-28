@@ -736,7 +736,18 @@ fn Interp.rvalue(
       let (r, outs) = match callee {
         Fn(f) => self.call(f, &mut vals)?
         Intrinsic(i) => self.intrinsic(i, &mut vals, span)?
-        Ffi(name) => (self.ffi(name, vals, ret, span)?, [])
+        Ffi(name) => {
+          var muts: List<Bool> = []
+          for a in args {
+            muts.push(
+              match a {
+                MutRef(_) => true
+                _ => false
+              },
+            )
+          }
+          self.ffi(name, vals, muts, ret, span)?
+        }
         Value(op) => match self.operand(op, locals, span)? {
           Fn(f) => self.call(f, &mut vals)?
           Closure(f, env) => {

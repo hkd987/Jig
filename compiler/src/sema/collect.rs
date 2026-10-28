@@ -992,8 +992,8 @@ impl Collector<'_> {
         }
     }
 
-    /// A C function's signature: scalars and `Str` only, few enough arguments to pass in
-    /// registers, no generics, methods or `&mut`.
+    /// A C function's signature: scalars, `Str` and byte buffers (`List<U8>`, or `&mut` for
+    /// one C writes) only, few enough arguments to pass in registers, no generics or methods.
     fn check_ffi_signature(&mut self, fid: FnId) {
         let fd = &self.defs.fns[fid];
         let span = fd.name_span;
@@ -1009,12 +1009,15 @@ impl Collector<'_> {
         let params: Vec<(Symbol, Ty, Mode)> = fd.params.iter().map(|p| (p.name, p.ty, p.mode)).collect();
         let ret = fd.ret;
         for (pname, t, mode) in params {
-            if mode == Mode::MutRef {
+            let bytes =
+                matches!(self.tys.kind(t), TyKind::List(e) if matches!(self.tys.kind(*e), TyKind::Int(IntTy::U8, _)));
+            if mode == Mode::MutRef && !bytes {
                 problems.push(format!("`{pname}` is `&mut`"));
             }
             match self.tys.kind(t) {
                 TyKind::Float(_) => floats += 1,
                 TyKind::Int(..) | TyKind::Bool | TyKind::Str => ints += 1,
+                _ if bytes => ints += 1,
                 _ => problems.push(format!("`{pname}` has type `{}`", self.tys.display(t))),
             }
         }
@@ -1033,7 +1036,7 @@ impl Collector<'_> {
                     span,
                     format!("`{name}` cannot be a C function: {}", problems.join(", ")),
                 )
-                .note("C functions take and return `Int`, `I32`, `U8`, `U32`, `U64`, `Float`, `Bool` and `Str`, or return nothing"),
+                .note("C functions take and return `Int`, `I32`, `U8`, `U32`, `U64`, `Float`, `Bool` and `Str`, or return nothing, and take byte buffers as `List<U8>` or `&mut List<U8>`"),
             );
         }
     }

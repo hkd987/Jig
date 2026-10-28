@@ -36,6 +36,8 @@ what to do, not what went wrong.
   `jig fmt --check compiler/std compiler/tests/run compiler/tests/fixtures compiler/tests/prove compiler/tests/props compiler/tests/stdlib examples selfhost site`,
   and `jig check` and `jig test` on each of `examples/*/`, `selfhost/`, `site/` and `compiler/tests/stdlib/`.
 - Format with `cargo fmt` and `jig fmt selfhost` (and any other Jig directory you touched).
+- Never run `jig fmt` on `compiler/tests/ui`: its fixtures keep the layout their `//~`
+  annotations need. Format only the directories CI's `jig fmt --check` lists.
 - Never put a model name or identifier in a commit, comment or document.
 - `step` is a keyword (it declares a feature step): never name a variable, parameter or
   function `step`.

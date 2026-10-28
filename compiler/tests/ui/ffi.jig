@@ -12,6 +12,14 @@ fn bad_ret() -> List<Int> effects {ffi} //~ E0331
 
 fn bad_mut(x: &mut Int) effects {ffi} //~ E0331
 
+fn memchr_like(buf: List<U8>, c: I32, n: Int) -> Int effects {ffi}
+
+fn fill(buf: &mut List<U8>, n: Int) -> Int effects {ffi}
+
+fn bad_mut_list(xs: &mut List<Int>) effects {ffi} //~ E0331
+
+fn bad_buffers(a: List<U8>, b: List<U8>, c: List<U8>, d: List<U8>, e: List<U8>, f: List<U8>, g: List<U8>) effects {ffi} //~ E0331
+
 fn bad_generic<T>(x: T) -> Int effects {ffi} //~ E0331
 
 fn too_many(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int) effects {ffi} //~ E0331
@@ -32,4 +40,9 @@ fn main() effects {io, ffi} {
   bad_mut(&mut n)
   io.println(bad_generic(1).str())
   too_many(1, 2, 3, 4, 5, 6, 7)
+  var bytes: List<U8> = [0 as U8].repeat(4)
+  io.println((memchr_like(bytes, 0, 4) + fill(&mut bytes, 4)).str())
+  var ints = [1]
+  bad_mut_list(&mut ints)
+  bad_buffers(bytes, bytes, bytes, bytes, bytes, bytes, bytes)
 }

@@ -1,0 +1,63 @@
+import "std/io"
+
+// Byte buffers to and from C (D35): a `List<U8>` is read by C, a `&mut List<U8>` written,
+// and a struct or an out-parameter is bytes at known offsets.
+
+fn memset(buf: &mut List<U8>, c: I32, n: Int) -> Int effects {ffi}
+
+fn memcpy(dst: &mut List<U8>, src: List<U8>, n: Int) -> Int effects {ffi}
+
+fn memcmp(a: List<U8>, b: List<U8>, n: Int) -> I32 effects {ffi}
+
+fn pipe(fds: &mut List<U8>) -> I32 effects {ffi}
+
+fn write(fd: I32, buf: List<U8>, n: Int) -> Int effects {ffi}
+
+fn read(fd: I32, buf: &mut List<U8>, n: Int) -> Int effects {ffi}
+
+fn close(fd: I32) -> I32 effects {ffi}
+
+/// The little-endian 32-bit integer at `at` in `b`, for a small non-negative one.
+fn int32_at(b: List<U8>, at: Int) -> I32
+  requires at >= 0 && at <= b.len() - 4
+{
+  let v = b[at] as Int + 256 * b[at + 1] as Int + 65536 * b[at + 2] as Int
+  return if b[at + 3] == 0 { v as I32 } else { -1 }
+}
+
+fn text(b: List<U8>) -> Str {
+  return Str.from_bytes(b).unwrap_or("?")
+}
+
+fn main() effects {io, ffi} {
+  // C writes the buffer it is given.
+  var buf: List<U8> = [0 as U8].repeat(5)
+  let _ = memset(&mut buf, 120, 5)
+  io.println(text(buf))
+  // Only the list passed `&mut` changes, not one that shared its storage.
+  let a: List<U8> = [1, 2, 3]
+  var b = a
+  let _ = memset(&mut b, 0, 3)
+  io.println(a.str() + " " + b.str())
+  var dst: List<U8> = [0 as U8].repeat(4)
+  let _ = memcpy(&mut dst, "abcd".bytes(), 2)
+  io.println(dst.str())
+  let c = memcmp("abc".bytes(), "abd".bytes(), 3)
+  io.println((if c < 0 { "less" } else { "not less" }) + " " + memcmp([], [], 0).str())
+  var empty: List<U8> = []
+  let _ = memset(&mut empty, 0, 0)
+  io.println(empty.len().str())
+  // An out-parameter: `int fds[2]` is eight bytes.
+  var fds: List<U8> = [0 as U8].repeat(8)
+  if pipe(&mut fds) != 0 {
+    io.println("pipe failed")
+    return
+  }
+  let (r, w) = (int32_at(fds, 0), int32_at(fds, 4))
+  io.println(write(w, "hello, C".bytes(), 8).str())
+  var got: List<U8> = [0 as U8].repeat(16)
+  let n = read(r, &mut got, 16)
+  io.println(n.str() + " " + text(got[0..max(n, 0)]))
+  let _ = close(r)
+  let _ = close(w)
+}

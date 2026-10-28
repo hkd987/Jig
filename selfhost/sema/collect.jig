@@ -1154,13 +1154,24 @@ fn Sema.check_ffi_signature(&mut self, fid: Int) {
   var ints = 0
   var floats = 0
   for p in fd.params {
-    if p.mode == Mode.MutRef {
+    let bytes = match self.tys.kinds[p.ty] {
+      List(e) => match self.tys.kinds[e] {
+        Int(k, _) => k == IntTy.U8
+        _ => false
+      }
+      _ => false
+    }
+    if p.mode == Mode.MutRef && !bytes {
       problems.push("`" + p.name + "` is `&mut`")
     }
     match self.tys.kinds[p.ty] {
       Float(_) => floats += 1
       Int(_, _) | Bool | Str => ints += 1
-      _ => problems.push("`" + p.name + "` has type `" + self.tys.display(p.ty) + "`")
+      _ => if bytes {
+        ints += 1
+      } else {
+        problems.push("`" + p.name + "` has type `" + self.tys.display(p.ty) + "`")
+      }
     }
   }
   let scalar = match self.tys.kinds[fd.ret] {
@@ -1180,7 +1191,7 @@ fn Sema.check_ffi_signature(&mut self, fid: Int) {
         fd.name_span,
         "`" + fd.name + "` cannot be a C function: " + problems.join(", "),
       ).note(
-        "C functions take and return `Int`, `I32`, `U8`, `U32`, `U64`, `Float`, `Bool` and `Str`, or return nothing",
+        "C functions take and return `Int`, `I32`, `U8`, `U32`, `U64`, `Float`, `Bool` and `Str`, or return nothing, and take byte buffers as `List<U8>` or `&mut List<U8>`",
       ),
     )
   }

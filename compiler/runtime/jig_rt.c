@@ -2250,6 +2250,15 @@ double jig_ccall_float(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, in
 /* A C string's copy, as an address to pass in an integer register; freed after the call. */
 int64_t jig_ccall_strdup(const char *s) { return (int64_t)(intptr_t)strdup(s); }
 void jig_ccall_free(int64_t p) { free((void *)(intptr_t)p); }
+/* Byte buffers for `List<U8>` and `&mut List<U8>` arguments: allocated, filled, passed, read
+   back and freed with `jig_ccall_free`. */
+int64_t jig_ccall_buf(int64_t n) {
+    void *p = calloc((size_t)(n > 0 ? n : 1), 1);
+    if (!p) jig_oom();
+    return (int64_t)(intptr_t)p;
+}
+void jig_ccall_buf_set(int64_t p, int64_t i, int64_t b) { ((uint8_t *)(intptr_t)p)[i] = (uint8_t)b; }
+int64_t jig_ccall_buf_get(int64_t p, int64_t i) { return ((uint8_t *)(intptr_t)p)[i]; }
 /* The string a C function returned (empty for NULL). */
 const char *jig_ccall_str(int64_t p) { return p ? (const char *)(intptr_t)p : ""; }
 

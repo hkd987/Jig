@@ -242,7 +242,18 @@ impl<'a> Lowerer<'a> {
             b.lower_body_block(bexpr);
         } else if b.lw.defs.fns[f].ffi {
             // A C function: call it with the parameters, then check the contract as usual.
-            let args: Vec<Arg> = b.params.iter().map(|(l, _)| Arg::Value(Operand::local(*l))).collect();
+            // A `&mut` parameter (a byte buffer) goes as a place, so what C writes comes back.
+            let args: Vec<Arg> =
+                b.params
+                    .iter()
+                    .map(|(l, m)| {
+                        if *m == Mode::MutRef {
+                            Arg::MutRef(Place::local(*l))
+                        } else {
+                            Arg::Value(Operand::local(*l))
+                        }
+                    })
+                    .collect();
             let ret = b.ret_ty;
             let name = b.lw.defs.fns[f].name;
             b.assign(Place::local(Local(0)), Rvalue::Call(Callee::Ffi(name), args, ret));

@@ -1829,11 +1829,25 @@ impl<'l, 'a> CGen<'l, 'a> {
         let mut vals = Vec::new();
         let mut ctys = Vec::new();
         for a in args {
-            let Arg::Value(op) = a else { continue };
-            let t = self.operand_ty(mf, op);
-            let e = self.operand(mf, cx, op, span);
-            ctys.push(self.ffi_cty(t));
-            vals.push(if matches!(self.lw.tys.kind(t), TyKind::Str) { format!("jig_str_data({e})") } else { e });
+            match a {
+                Arg::Value(op) => {
+                    let t = self.operand_ty(mf, op);
+                    let e = self.operand(mf, cx, op, span);
+                    let (cty, v) = match self.lw.tys.kind(t) {
+                        TyKind::Str => (self.ffi_cty(t), format!("jig_str_data({e})")),
+                        TyKind::List(_) => ("const uint8_t *", format!("jig_list_bytes({e})")),
+                        _ => (self.ffi_cty(t), e),
+                    };
+                    ctys.push(cty);
+                    vals.push(v);
+                }
+                // A byte buffer C may write: the list itself, made unique.
+                Arg::MutRef(p) => {
+                    let e = self.place_expr(mf, cx, p, true, span);
+                    ctys.push("uint8_t *");
+                    vals.push(format!("jig_list_bytes_mut(&{e})"));
+                }
+            }
         }
         let rc = self.ffi_cty(ret);
         if self.ffi_decls.insert(name) {

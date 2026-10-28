@@ -377,6 +377,20 @@ double jig_rand_float(void);
 /* Element types the runtime itself needs. */
 extern const jig_type jig_type_str;
 extern const jig_type jig_type_u8;
+
+/* A `List<U8>` argument to a C function: its bytes (an empty list gives a valid, empty
+   buffer). And `&mut List<U8>`: the list is made unique first, so what C writes lands in
+   this list only. */
+static inline const uint8_t *jig_list_bytes(const jig_list *l) {
+    static const uint8_t none[1];
+    return l && l->len ? (const uint8_t *)l->data : none;
+}
+static inline uint8_t *jig_list_bytes_mut(jig_list **lp) {
+    static uint8_t none[1];
+    if (!*lp || !(*lp)->len) return none;
+    if ((*lp)->rc != 1) jig_list_make_unique(lp, &jig_type_u8);
+    return (uint8_t *)(*lp)->data;
+}
 extern const jig_type jig_type_char;
 
 #endif

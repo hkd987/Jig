@@ -251,10 +251,13 @@ fn Lw.lower_instance(&mut self, m: Int) {
   match decl.body {
     Some(bexpr) => self.lower_body_block(bexpr)
     None => if fd.ffi {
-      // A C function: call it with the parameters, then check the contract as usual.
+      // A C function: call it with the parameters, then check the contract as usual. A
+      // `&mut` parameter (a byte buffer) goes as a place, so what C writes comes back.
       var cargs: List<Arg> = []
-      for (l, _) in self.fb.params {
-        cargs.push(Arg.Value(op_local(l)))
+      for (l, mode) in self.fb.params {
+        cargs.push(
+          if mode == Mode.MutRef { Arg.MutRef(place_of(l)) } else { Arg.Value(op_local(l)) },
+        )
       }
       self.assign(place_of(0), Rvalue.Call(Callee.Ffi(fd.name), cargs, self.fb.ret_ty))
     }
