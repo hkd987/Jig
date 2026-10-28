@@ -183,6 +183,9 @@ def markers(stderr, code):
 
 def suite_native(r):
     failures = []
+    # The programs use /tmp, which on Windows is a directory of the current drive.
+    if WINDOWS:
+        os.makedirs("/tmp", exist_ok=True)
     for release in [False, True]:
         for src in run_cases():
             name, d = case_dir(r, "native-release" if release else "native-debug", src)
@@ -595,7 +598,7 @@ def net_fetch(r):
     tls, plain = free_addr().split(":")[1], free_addr().split(":")[1]
     server = subprocess.Popen([sys.executable, os.path.join(TESTS, "https_server.py"), certs, tls, plain],
                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    if server.stdout.readline() != b"ready\n":
+    if server.stdout.readline().strip() != b"ready":
         server.kill()
         return ["net: the HTTPS test server did not start"]
     ca = os.path.join(certs, "ca.pem")
@@ -626,6 +629,12 @@ def net_fetch(r):
 
 
 # ---------- lsp ----------
+
+
+def file_uri(path):
+    """The `file://` URI of a path: `file:///C:/...` for a Windows one."""
+    p = path.replace(os.sep, "/")
+    return "file:///" + p if WINDOWS else "file://" + p
 
 
 class LspClient:
@@ -705,7 +714,7 @@ def suite_lsp(r):
     os.makedirs(os.path.join(d, "geom"), exist_ok=True)
     geom = os.path.join(d, "geom", "geom.jig")
     write(geom, "/// A square's area.\npub fn area(side: Int) -> Int {\n  return side * side\n}\n")
-    uri, guri = "file://" + main, "file://" + geom
+    uri, guri = file_uri(main), file_uri(geom)
     c = LspClient(r.jigc)
 
     def check(what, got, want):
@@ -728,13 +737,13 @@ def suite_lsp(r):
     c.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 3}, "contentChanges": [{"text": text}]})
     check("fixed", c.diagnostics(), (uri, []))
     hov = c.request(2, "textDocument/hover", {"textDocument": {"uri": uri}, "position": {"line": 5, "character": 16}})
-    check("hover on a call", hov and hov["result"]["contents"]["value"], "```jig\nfn area(side: Int) -> Int\n```")
+    check("hover on a call", hov and hov["result"] and hov["result"]["contents"]["value"], "```jig\nfn area(side: Int) -> Int\n```")
     hov = c.request(3, "textDocument/hover", {"textDocument": {"uri": uri}, "position": {"line": 6, "character": 14}})
-    check("hover on a local", hov and hov["result"]["contents"]["value"], "```jig\nStr\n```")
+    check("hover on a local", hov and hov["result"] and hov["result"]["contents"]["value"], "```jig\nStr\n```")
     df = c.request(4, "textDocument/definition", {"textDocument": {"uri": uri}, "position": {"line": 5, "character": 16}})
     check("definition in another file", df and df["result"], {"uri": guri, "range": {"start": {"line": 1, "character": 7}, "end": {"line": 1, "character": 11}}})
     df = c.request(5, "textDocument/definition", {"textDocument": {"uri": uri}, "position": {"line": 6, "character": 21}})
-    check("definition of a local", df and df["result"]["range"]["start"], {"line": 5, "character": 6})
+    check("definition of a local", df and df["result"] and df["result"]["range"]["start"], {"line": 5, "character": 6})
     # An unsaved change to one file shows its effect in the file that uses it.
     c.send("textDocument/didOpen", {"textDocument": {"uri": guri, "languageId": "jig", "version": 1, "text": "pub fn area(side: Str) -> Int {\n  return side.len()\n}\n"}})
     pubs = dict([c.diagnostics(), c.diagnostics()])

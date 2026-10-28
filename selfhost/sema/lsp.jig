@@ -105,14 +105,22 @@ fn uri_path(uri: Str) -> Str {
       i += 1
     }
   }
-  return Str.from_bytes(out).unwrap_or(s)
+  let p = Str.from_bytes(out).unwrap_or(s)
+  // A Windows path: `file:///C:/...` (or `/c%3A/...`), its drive in capitals.
+  let q = if p.starts_with("/") && has_drive(p[1..p.len()]) { p[1..p.len()] } else { p }
+  if has_drive(q) {
+    return q[0..1].to_upper() + slashes(q[1..q.len()], true)
+  }
+  return q
 }
 
 /// The `file://` URI of a path, escaping what a URI cannot hold.
 fn path_uri(path: Str) -> Str {
   let digits = "0123456789ABCDEF"
-  var out = "file://"
-  for i in 0..path.len() {
+  // A Windows path's drive: `file:///C:/...`.
+  let drive = has_drive(path)
+  var out = if drive { "file:///" + path[0..2] } else { "file://" }
+  for i in (if drive { 2 } else { 0 })..path.len() {
     let b = path[i]
     let plain = b >= 97 && b <= 122 ||
       b >= 65 && b <= 90 ||

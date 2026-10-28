@@ -1929,9 +1929,18 @@ jig_str *jig_env_var(const jig_str *name, bool *ok) {
 }
 
 int64_t jig_now_ms(void) {
+#ifdef _WIN32
+    /* The precise clock: the C library's moves in steps of about 16 ms. It counts 100 ns
+       intervals since 1601. */
+    FILETIME ft;
+    GetSystemTimePreciseAsFileTime(&ft);
+    uint64_t t = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    return (int64_t)(t / 10000) - INT64_C(11644473600000);
+#else
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
 }
 
 void jig_sleep_ms(int64_t ms, const char *loc) {

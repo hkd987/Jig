@@ -9,13 +9,10 @@ fn memcpy(dst: &mut List<U8>, src: List<U8>, n: Int) -> Int effects {ffi}
 
 fn memcmp(a: List<U8>, b: List<U8>, n: Int) -> I32 effects {ffi}
 
-fn pipe(fds: &mut List<U8>) -> I32 effects {ffi}
+/// `double frexp(double x, int *exp)`: x as a fraction in [0.5, 1) times 2^exp.
+fn frexp(x: Float, exp: &mut List<U8>) -> Float effects {ffi}
 
-fn write(fd: I32, buf: List<U8>, n: Int) -> Int effects {ffi}
-
-fn read(fd: I32, buf: &mut List<U8>, n: Int) -> Int effects {ffi}
-
-fn close(fd: I32) -> I32 effects {ffi}
+fn strncpy(dst: &mut List<U8>, src: Str, n: Int) -> Int effects {ffi}
 
 /// The little-endian 32-bit integer at `at` in `b`, for a small non-negative one.
 fn int32_at(b: List<U8>, at: Int) -> I32
@@ -47,17 +44,12 @@ fn main() effects {io, ffi} {
   var empty: List<U8> = []
   let _ = memset(&mut empty, 0, 0)
   io.println(empty.len().str())
-  // An out-parameter: `int fds[2]` is eight bytes.
-  var fds: List<U8> = [0 as U8].repeat(8)
-  if pipe(&mut fds) != 0 {
-    io.println("pipe failed")
-    return
-  }
-  let (r, w) = (int32_at(fds, 0), int32_at(fds, 4))
-  io.println(write(w, "hello, C".bytes(), 8).str())
+  // An out-parameter: an `int` is four bytes, after a float argument.
+  var exp: List<U8> = [0 as U8].repeat(4)
+  let frac = frexp(40.0, &mut exp)
+  io.println(frac.str() + " " + int32_at(exp, 0).str())
+  // C copies text into the buffer.
   var got: List<U8> = [0 as U8].repeat(16)
-  let n = read(r, &mut got, 16)
-  io.println(n.str() + " " + text(got[0..max(n, 0)]))
-  let _ = close(r)
-  let _ = close(w)
+  let _ = strncpy(&mut got, "hello, C", 16)
+  io.println(text(got[0..8]) + " " + got[8].str())
 }

@@ -468,11 +468,15 @@ fn c_compiler(release: Bool) -> Str effects {env, ffi} {
     }
     None => {}
   }
-  if release && sh("clang --version > " + null_device() + " 2>&1") == 0 {
+  // On Windows, MinGW-w64's `gcc`: Windows has no `cc`, and its `clang` is usually one for
+  // Microsoft's headers and libraries, which the runtime does not use.
+  if on_windows() {
+    return "gcc"
+  }
+  if release && sh("clang --version > /dev/null 2>&1") == 0 {
     return "clang"
   }
-  // MinGW-w64's compiler is `gcc`; Windows has no `cc`.
-  return if on_windows() { "gcc" } else { "cc" }
+  return "cc"
 }
 
 /// `jigc build DIR STD [--release] [-o OUT]`: build `main` of the package in DIR into a native
