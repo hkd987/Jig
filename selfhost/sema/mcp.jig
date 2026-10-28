@@ -214,7 +214,7 @@ fn Sema.first_errors(self, cwd: Str) -> Str {
 }
 
 fn call_tool(name: Str, args: Json, std_dir: Str, cwd: Str) -> Json
-  effects {io, fs, net, clock, env, ffi}
+  effects {io, fs, net, clock, env, ffi, spawn}
 {
   if name == "check" {
     let diags = check_project(arg_path(args, cwd), std_dir, cwd)
@@ -487,7 +487,7 @@ fn rpc_error(id: Json, code: Int, message: Str) -> Str
 }
 
 /// `jigc mcp`: answer requests, one per line, until standard input ends.
-fn mcp_serve(std_dir: Str, cwd: Str) -> Output effects {io, fs, net, clock, env, ffi} {
+fn mcp_serve(std_dir: Str, cwd: Str) -> Output effects {io, fs, net, clock, env, ffi, spawn} {
   let tool_names = [
     "check",
     "test",

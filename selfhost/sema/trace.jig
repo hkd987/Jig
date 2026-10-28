@@ -278,7 +278,7 @@ fn Sema.trace_query(self, q: TraceQuery, cwd: Str) -> (Str, Str) {
 }
 
 /// `jigc trace [PATH] [fn NAME | scenario NAME | uncovered] [--json]`, as `jig trace`.
-fn trace_cmd(o: Opts, std_dir: Str, cwd: Str) -> Output effects {fs, env} {
+fn trace_cmd(o: Opts, std_dir: Str, cwd: Str) -> Output effects {fs, env, spawn} {
   var words: List<Str> = []
   for a in o.rest {
     if !a.starts_with("--") {

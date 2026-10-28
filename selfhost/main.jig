@@ -6,7 +6,7 @@ import "std/os"
 // print the same; `jigc debug ...` prints the dumps the tests compare with `jig debug ...`, and
 // `jigc cc DIR` the one C file that is `bootstrap/jigc.c` for `selfhost` (see `sema/cli.jig`).
 
-fn main() effects {io, fs, net, clock, env, ffi} {
+fn main() effects {io, fs, net, clock, env, ffi, spawn} {
   let args = os.args()
   let o = sema.run_cli(
     args[1..args.len()],

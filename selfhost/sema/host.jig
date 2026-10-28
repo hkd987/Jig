@@ -9,6 +9,11 @@ fn on_windows() -> Bool effects {env} {
   return os.env("OS") == Some("Windows_NT")
 }
 
+/// Whether checking may use several threads: unless `JIG_THREADS` is 1.
+fn threads_allowed() -> Bool effects {env} {
+  return os.env("JIG_THREADS") != Some("1")
+}
+
 /// Does `p` start with a drive, as `C:` does?
 fn has_drive(p: Str) -> Bool
   ensures !result || p.len() >= 2

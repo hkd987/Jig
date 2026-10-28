@@ -243,7 +243,7 @@ fn Lsp.uri_of(self, path: Str) -> Str {
 
 /// The analyses a check of `path`'s project takes, as `jig check` makes them: one from each
 /// package with `main`, then one from `path`'s package if none of those loaded it.
-fn Lsp.analyses(self, path: Str) -> List<Sema> effects {fs, env} {
+fn Lsp.analyses(self, path: Str) -> List<Sema> effects {fs, env, spawn} {
   let dir = dir_of_file(path)
   var out: List<Sema> = []
   var covered: Set<Str> = Set.new()
@@ -288,7 +288,7 @@ fn Sema.placed(self, d: syntax.Diag) -> Option<(SrcFile, Int, Int, Str, Str)> {
 /// Check the project `path` belongs to and publish every file's diagnostics, clearing those
 /// of files that have none now. A dead-code error in a package several analyses loaded counts
 /// only if they all report it, as in `jig check`.
-fn Lsp.check(&mut self, path: Str) effects {io, fs, env} {
+fn Lsp.check(&mut self, path: Str) effects {io, fs, env, spawn} {
   let analyses = self.analyses(path)
   var placed: List<List<(SrcFile, Int, Int, Str, Str)>> = []
   for s in analyses {
@@ -389,7 +389,7 @@ fn Lsp.check(&mut self, path: Str) effects {io, fs, env} {
 }
 
 /// An analysis that loaded `path`: the last check's, else a new one.
-fn Lsp.sema_for(&mut self, path: Str) -> Option<Sema> effects {fs, env} {
+fn Lsp.sema_for(&mut self, path: Str) -> Option<Sema> effects {fs, env, spawn} {
   for s in self.last {
     if s.file_named(path).is_some() {
       return Some(s)
@@ -518,7 +518,7 @@ fn Sema.definition_of(self, p: Int, f: Int, e: Int, at: Int) -> Option<syntax.Sp
 }
 
 /// The hover for `path` at a line and column.
-fn Lsp.hover(&mut self, path: Str, line: Int, col: Int) -> Json effects {fs, env} {
+fn Lsp.hover(&mut self, path: Str, line: Int, col: Int) -> Json effects {fs, env, spawn} {
   let s = match self.sema_for(path) {
     Some(x) => x
     None => {
@@ -557,7 +557,7 @@ fn Lsp.hover(&mut self, path: Str, line: Int, col: Int) -> Json effects {fs, env
 }
 
 /// Where the name at a line and column of `path` is declared.
-fn Lsp.definition(&mut self, path: Str, line: Int, col: Int) -> Json effects {fs, env} {
+fn Lsp.definition(&mut self, path: Str, line: Int, col: Int) -> Json effects {fs, env, spawn} {
   let s = match self.sema_for(path) {
     Some(x) => x
     None => {
@@ -629,7 +629,7 @@ fn capabilities() -> Json {
   )
 }
 
-fn lsp_serve(std_dir: Str) -> Output effects {io, fs, env} {
+fn lsp_serve(std_dir: Str) -> Output effects {io, fs, env, spawn} {
   var lsp = Lsp { std_dir: std_dir, docs: Map.new(), uris: Map.new(), published: [], last: [] }
   var shut = false
   for {

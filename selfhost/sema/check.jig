@@ -228,21 +228,24 @@ fn Sema.end(&mut self) -> Body {
   return b
 }
 
-fn Sema.check_bodies(&mut self) {
+/// Check every body; on several threads when `threads` and the program is big enough.
+fn Sema.check_bodies(&mut self, threads: Bool) effects {spawn} {
   self.imports_used = []
   for _ in self.pkgs {
     self.imports_used.push(Set.new())
   }
   self.bodies = []
-  for fid in 0..self.defs.fns.len() {
-    let fd = self.defs.fns[fid]
-    if fd.iface.is_some() {
-      self.bodies.push(None)
-      continue
+  if !threads || !self.check_fns_parallel() {
+    for fid in 0..self.defs.fns.len() {
+      let fd = self.defs.fns[fid]
+      if fd.iface.is_some() {
+        self.bodies.push(None)
+        continue
+      }
+      self.begin(fd.pkg, fd.file)
+      self.check_fn(fid)
+      self.bodies.push(Some(self.end()))
     }
-    self.begin(fd.pkg, fd.file)
-    self.check_fn(fid)
-    self.bodies.push(Some(self.end()))
   }
   self.test_bodies = []
   for tid in 0..self.defs.tests.len() {

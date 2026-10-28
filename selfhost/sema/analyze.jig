@@ -85,17 +85,19 @@ fn Sema.sort_diags(&mut self) {
 }
 
 /// Check the package in `dir` (an absolute path) with the standard library in `std_dir`.
-fn analyze(dir: Str, std_dir: Str) -> (Sema, Str) effects {fs, env} {
+fn analyze(dir: Str, std_dir: Str) -> (Sema, Str) effects {fs, env, spawn} {
   return analyze_with(dir, std_dir, Map.new())
 }
 
 /// `analyze`, with the files `overlays` names read from it (an editor's unsaved buffers).
-fn analyze_with(dir: Str, std_dir: Str, overlays: Map<Str, Str>) -> (Sema, Str) effects {fs, env} {
+fn analyze_with(dir: Str, std_dir: Str, overlays: Map<Str, Str>) -> (Sema, Str)
+  effects {fs, env, spawn}
+{
   let ld = load_program_with(dir, std_dir, overlays)
   let root = ld.project_root.unwrap_or(dir)
   var s = new_sema(ld)
   s.collect()
-  s.check_bodies()
+  s.check_bodies(threads_allowed())
   s.bind_features()
   s.quiet_after_syntax_errors()
   s.drop_lints_in_modules()
@@ -159,7 +161,7 @@ fn Sema.place(self, root: Str, lo: Int, hi: Int) -> Str {
 }
 
 /// `jigc check DIR STD`: the same lines as `jig debug check DIR`.
-fn check_dump(dir: Str, std_dir: Str) -> Str effects {fs, env} {
+fn check_dump(dir: Str, std_dir: Str) -> Str effects {fs, env, spawn} {
   let (s, root) = analyze(dir, std_dir)
   // One string, appended to in place.
   var out = ""
@@ -217,7 +219,7 @@ fn check_dump(dir: Str, std_dir: Str) -> Str effects {fs, env} {
 
 /// `jigc c DIR STD`: the C program for the package in DIR, the same text as `jig debug c DIR`.
 /// Locations name files relative to `cwd`.
-fn c_dump(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs, env} {
+fn c_dump(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs, env, spawn} {
   let (s, _) = analyze(dir, std_dir)
   if !s.diags.is_empty() {
     return Err(dir + " has errors")
@@ -228,7 +230,7 @@ fn c_dump(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs, env
 /// `jigc c DIR STD proofs`: the C program with the cached proofs (`.jig/proofs` in the project)
 /// removing the checks they discharge, the same text as `jig debug c DIR proofs`.
 fn c_dump_proved(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str>
-  effects {fs, env, ffi, clock}
+  effects {fs, env, ffi, clock, spawn}
 {
   let (s, _) = analyze(dir, std_dir)
   if !s.diags.is_empty() {
@@ -243,7 +245,7 @@ fn c_dump_proved(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str>
 
 /// A release build of DIR as one self-contained C file: `c_dump`'s program with the runtime
 /// (`STD/../runtime`) inlined, so a C compiler alone builds it (`cc FILE -pthread -lm`).
-fn c_unit(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs, env} {
+fn c_unit(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs, env, spawn} {
   let c = c_dump(dir, std_dir, cwd)?
   let header = read_runtime(std_dir, "jig_rt.h")?
   let runtime = read_runtime(std_dir, "jig_rt.c")?
@@ -255,7 +257,7 @@ fn c_unit(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str> effects {fs, env
 /// `jigc sim DIR STD`: run `main` of DIR on the interpreter with simulated effects, printing
 /// its output and then `<exit N>` or `<panic: MESSAGE>` if it did not return.
 fn sim_main(dir: Str, std_dir: Str, cwd: Str) -> Result<Str, Str>
-  effects {io, fs, net, clock, env, ffi}
+  effects {io, fs, net, clock, env, ffi, spawn}
 {
   let (s, _) = analyze(dir, std_dir)
   if !s.diags.is_empty() {
@@ -299,7 +301,7 @@ fn Sema.prove_targets(self, std: Bool) -> List<Int> {
 
 /// `jigc vc DIR STD [std]`: the verification conditions of each function, the same text as
 /// `jig debug vc DIR [std]`.
-fn vc_dump(dir: Str, std_dir: Str, std: Bool) -> Result<Str, Str> effects {fs, env} {
+fn vc_dump(dir: Str, std_dir: Str, std: Bool) -> Result<Str, Str> effects {fs, env, spawn} {
   let (s, root) = analyze(dir, std_dir)
   if !s.diags.is_empty() {
     return Err(dir + " has errors")
@@ -374,7 +376,7 @@ fn vc_dump(dir: Str, std_dir: Str, std: Bool) -> Result<Str, Str> effects {fs, e
 /// proof cache (`.jig/proofs` in the project). Returns the
 /// output and the exit code.
 fn prove_cmd(dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> Output
-  effects {io, fs, net, clock, env, ffi}
+  effects {io, fs, net, clock, env, ffi, spawn}
 {
   let json = flags.contains("--json")
   let verbose = flags.contains("--verbose")
@@ -484,7 +486,7 @@ fn c_compiler(release: Bool) -> Str effects {env, ffi} {
 /// C file, the runtime included; release builds allocate from the runtime's pools and
 /// optimize). Prints the executable's path. Returns the output and the exit code.
 fn build_cmd(dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> Output
-  effects {fs, env, ffi, clock}
+  effects {fs, env, ffi, clock, spawn}
 {
   let (s, _) = analyze(dir, std_dir)
   if !s.diags.is_empty() {

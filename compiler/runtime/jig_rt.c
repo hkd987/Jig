@@ -382,6 +382,8 @@ typedef struct jig_batch {
     struct jig_batch *link;
 } jig_batch;
 
+int jig_sharing;
+
 static pthread_mutex_t batch_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t batch_work = PTHREAD_COND_INITIALIZER;
 static pthread_cond_t batch_idle = PTHREAD_COND_INITIALIZER;
@@ -449,6 +451,8 @@ static void parallel_for(int64_t n, void (*body)(void *, int64_t), void *ctx) {
     }
     jig_batch b = {n, 0, 0, body, ctx, batches};
     batches = &b;
+    /* From before any worker can take an index until every one has finished. */
+    __atomic_add_fetch(&jig_sharing, 1, __ATOMIC_SEQ_CST);
     pthread_cond_broadcast(&batch_work);
     pthread_mutex_unlock(&batch_mu);
     batch_run(&b);
@@ -457,6 +461,7 @@ static void parallel_for(int64_t n, void (*body)(void *, int64_t), void *ctx) {
     while (*pp != &b) pp = &(*pp)->link;
     *pp = b.link;
     while (b.helpers > 0) pthread_cond_wait(&batch_idle, &batch_mu);
+    __atomic_sub_fetch(&jig_sharing, 1, __ATOMIC_SEQ_CST);
     pthread_mutex_unlock(&batch_mu);
 }
 
@@ -2276,6 +2281,8 @@ jig_str *jig_net_serve_parallel(const jig_str *addr, jig_fn *f, jig_handle_call 
     pthread_mutex_lock(&g_shared_mu);
     g_threaded = true;
     pthread_mutex_unlock(&g_shared_mu);
+    /* Handlers run on several threads from here until the server returns. */
+    __atomic_add_fetch(&jig_sharing, 1, __ATOMIC_SEQ_CST);
     serve_queue q = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, NULL, 0, 0, 0, false, f, call};
     int n = serve_workers();
     pthread_t *ts = malloc(sizeof *ts * (size_t)n);
@@ -2320,6 +2327,7 @@ jig_str *jig_net_serve_parallel(const jig_str *addr, jig_fn *f, jig_handle_call 
     pthread_cond_broadcast(&q.ready);
     pthread_mutex_unlock(&q.mu);
     for (int i = 0; i < started; i++) pthread_join(ts[i], NULL);
+    __atomic_sub_fetch(&jig_sharing, 1, __ATOMIC_SEQ_CST);
     free(ts);
     free(q.fds);
     sock_close(fd);
@@ -2617,10 +2625,19 @@ static bool tls_load(void) {
         "/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib", "/usr/local/opt/openssl@3/lib/libssl.3.dylib",
 #endif
     };
+#ifdef _WIN32
+    /* A Windows library exports only its own functions: the ERR_ and X509_ ones are
+       libcrypto's. */
+    static const char *const crypto_names[] = {"libcrypto-3-x64.dll", "libcrypto-3.dll", "libcrypto-1_1-x64.dll"};
+#endif
     pthread_mutex_lock(&g_tls_lock);
     if (!g_tls.ready) {
-        void *h = NULL;
+        void *h = NULL, *crypto = NULL;
         for (size_t i = 0; !h && i < sizeof names / sizeof *names; i++) h = lib_open(names[i]);
+#ifdef _WIN32
+        for (size_t i = 0; h && !crypto && i < sizeof crypto_names / sizeof *crypto_names; i++)
+            crypto = lib_open(crypto_names[i]);
+#endif
         g_tls.ready = -1;
         if (h) {
             void **f[] = {
@@ -2640,6 +2657,7 @@ static bool tls_load(void) {
             bool all = true;
             for (size_t i = 0; i < sizeof syms / sizeof *syms; i++) {
                 *f[i] = lib_sym(h, syms[i]);
+                if (!*f[i] && crypto) *f[i] = lib_sym(crypto, syms[i]);
                 all = all && *f[i];
             }
             g_tls.ready = all ? 1 : -1;

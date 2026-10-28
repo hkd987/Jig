@@ -5,6 +5,7 @@
 import "std/fs"
 import "std/os"
 import "std/strings"
+import "std/task"
 import "syntax"
 
 /// The standard packages: import path and file name.
@@ -421,8 +422,11 @@ fn dummy_span() -> syntax.Span
 
 /// Load the package in `dir` (an absolute path) and everything it imports, reading the
 /// files `overlays` names from it instead of the disk (an editor's unsaved buffers).
-fn load_program_with(dir: Str, std_dir: Str, overlays: Map<Str, Str>) -> Loaded effects {fs, env} {
+fn load_program_with(dir: Str, std_dir: Str, overlays: Map<Str, Str>) -> Loaded
+  effects {fs, env, spawn}
+{
   let project_root = find_project_root(dir)
+  let threads = threads_allowed()
   var ld = Loader {
     std_dir: std_dir
     pkgs: []
@@ -480,9 +484,7 @@ fn load_program_with(dir: Str, std_dir: Str, overlays: Map<Str, Str>) -> Loaded 
       break
     }
     ld.queue = []
-    for p in wave {
-      ld.parse_package(p)
-    }
+    ld.parse_wave(wave, threads)
     for p in wave {
       ld.resolve_imports(p)
     }
@@ -619,12 +621,32 @@ fn source_kind(name: Str) -> Str
   return ""
 }
 
-fn Loader.parse_package(&mut self, p: Int) {
-  for i in 0..self.pkgs[p].files.len() {
-    let f = self.pkgs[p].files[i]
-    let parsed = syntax.parse(f.text, f.base)
-    self.pkgs[p].files[i].ast = parsed.ast
-    for d in parsed.errors {
+/// How much source a wave needs before its files are parsed on several threads.
+const PARALLEL_PARSE_BYTES: Int = 262144
+
+/// Parse every file of the packages in a wave, in order, on several threads when there is
+/// enough source; diagnostics come in the files' order either way.
+fn Loader.parse_wave(&mut self, wave: List<Int>, threads: Bool) effects {spawn} {
+  var slots: List<(Int, Int)> = []
+  var files: List<SrcFile> = []
+  var bytes = 0
+  for p in wave {
+    for i in 0..self.pkgs[p].files.len() {
+      let f = self.pkgs[p].files[i]
+      slots.push((p, i))
+      files.push(f)
+      bytes = min(bytes + f.text.len(), PARALLEL_PARSE_BYTES)
+    }
+  }
+  let parsed = if threads && bytes >= PARALLEL_PARSE_BYTES && files.len() > 1 {
+    task.map(files, fn(f) { syntax.parse(f.text, f.base) })
+  } else {
+    files.map(fn(f) { syntax.parse(f.text, f.base) })
+  }
+  for k in 0..min(slots.len(), parsed.len()) {
+    let (p, i) = slots[k]
+    self.pkgs[p].files[i].ast = parsed[k].ast
+    for d in parsed[k].errors {
       self.diags.push(d)
     }
   }

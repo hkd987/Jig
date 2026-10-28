@@ -87,15 +87,25 @@ void jig_free(void *p);
 /* Objects of a size known at both ends (boxes, closures, list and map headers): no header. */
 void *jig_alloc_obj(size_t n);
 void jig_free_obj(void *p, size_t n);
+/* Nonzero while threads may share values: a batch of tasks runs, or a parallel server has
+ * started. */
+extern int jig_sharing;
 #ifdef JIG_ATOMIC_RC
-/* Programs that run tasks share values between threads, so counts change atomically. A
- * count of 1 still means only this thread holds the value: nobody else can raise it. */
+/* Programs that run tasks share values between threads, so counts change atomically while
+ * they can (jig_sharing); before and after, one thread holds every value and plain
+ * arithmetic is enough. A count of 1 still means only this thread holds the value: nobody
+ * else can raise it. */
+static inline bool jig_shared(void) { return __builtin_expect(__atomic_load_n(&jig_sharing, __ATOMIC_RELAXED) != 0, 0); }
 static inline void jig_rc_inc(int64_t *rc) {
-    if (*rc >= 0) __atomic_fetch_add(rc, 1, __ATOMIC_RELAXED);
+    if (*rc >= 0) {
+        if (jig_shared()) __atomic_fetch_add(rc, 1, __ATOMIC_RELAXED);
+        else (*rc)++;
+    }
 }
 static inline bool jig_rc_dec(int64_t *rc) {
     if (*rc < 0) return false;
-    return __atomic_sub_fetch(rc, 1, __ATOMIC_ACQ_REL) == 0;
+    if (jig_shared()) return __atomic_sub_fetch(rc, 1, __ATOMIC_ACQ_REL) == 0;
+    return --(*rc) == 0;
 }
 #else
 static inline void jig_rc_inc(int64_t *rc) {

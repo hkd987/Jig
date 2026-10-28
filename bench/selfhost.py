@@ -41,6 +41,10 @@ def corpus(path, copies):
     return text.count("\n") * copies
 
 
+# Both compilers check on one thread here: the measure is the work, not the machine.
+os.environ["JIG_THREADS"] = "1"
+
+
 def output(cmd):
     r = subprocess.run(cmd, capture_output=True)
     if r.returncode != 0:

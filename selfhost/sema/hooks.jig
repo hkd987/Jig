@@ -25,7 +25,7 @@ fn hook_cwd(input: Json, cwd: Str) -> Str {
 
 /// After an edit to a `.jig` file: check the project and feed its errors back (exit code 2
 /// shows standard error to the agent).
-fn post_edit(input: Json, std_dir: Str, cwd: Str) -> Output effects {fs, env, ffi, clock} {
+fn post_edit(input: Json, std_dir: Str, cwd: Str) -> Output effects {fs, env, ffi, clock, spawn} {
   let file = match input.get("tool_input") {
     Some(t) => match t.get("file_path") {
       Some(f) => f.as_str().unwrap_or("")
@@ -130,7 +130,7 @@ fn project_packages(dir: Str) -> List<Str> effects {fs} {
 
 /// Before `git commit`: the project must check, test and format cleanly.
 fn pre_commit(input: Json, std_dir: Str, cwd: Str) -> Output
-  effects {io, fs, net, clock, env, ffi}
+  effects {io, fs, net, clock, env, ffi, spawn}
 {
   let cmd = match input.get("tool_input") {
     Some(t) => match t.get("command") {
@@ -213,7 +213,7 @@ fn pre_commit(input: Json, std_dir: Str, cwd: Str) -> Output
 
 /// `jigc hook post-edit|pre-commit`, as `jig hook`.
 fn hook_cmd(args: List<Str>, std_dir: Str, cwd: Str) -> Output
-  effects {io, fs, net, clock, env, ffi}
+  effects {io, fs, net, clock, env, ffi, spawn}
 {
   let which = args.first().unwrap_or("")
   if which == "post-edit" {

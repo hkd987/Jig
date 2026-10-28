@@ -183,9 +183,9 @@ def markers(stderr, code):
 
 def suite_native(r):
     failures = []
-    # The programs use /tmp, which on Windows is a directory of the current drive.
+    # The programs use /tmp, which on Windows is a directory of the drive they run on.
     if WINDOWS:
-        os.makedirs("/tmp", exist_ok=True)
+        os.makedirs(os.path.splitdrive(r.work)[0] + "\\tmp", exist_ok=True)
     for release in [False, True]:
         for src in run_cases():
             name, d = case_dir(r, "native-release" if release else "native-debug", src)

@@ -80,7 +80,7 @@ fn hex_lower(v: Int) -> Str
 /// `jigc test [PATH] [FILTER] [--json]`: run the package's tests and scenarios on the
 /// interpreter, as `jig test` does.
 fn test_cmd(dir: Str, std_dir: Str, cwd: Str, filter: Str, json: Bool) -> Output
-  effects {io, fs, net, clock, env, ffi}
+  effects {io, fs, net, clock, env, ffi, spawn}
 {
   let (s, _) = analyze(dir, std_dir)
   if !s.diags.is_empty() {
@@ -211,7 +211,7 @@ fn shell_quote(s: Str) -> Str
 /// or build it (debug) and run the executable, as `jig run` does. What the program prints goes
 /// out as it runs; the output is jigc's own, and the exit code the program's.
 fn run_cmd(o: Opts, std_dir: Str, cwd: Str, args: List<Str>) -> Output
-  effects {io, fs, net, clock, env, ffi}
+  effects {io, fs, net, clock, env, ffi, spawn}
 {
   let dir = absolute_path(o.path, cwd)
   let (s, _) = analyze(dir, std_dir)
@@ -337,7 +337,7 @@ fn result_output(r: Result<Str, Str>) -> Output
 
 /// Run `jigc ARGS` (without the program name) in `cwd`: what it prints, and its exit code.
 pub fn run_cli(args: List<Str>, cwd: Str, std_dir: Str) -> Output
-  effects {io, fs, net, clock, env, ffi}
+  effects {io, fs, net, clock, env, ffi, spawn}
 {
   if args.is_empty() {
     return output("", usage(), 2)
