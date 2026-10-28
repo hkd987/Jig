@@ -103,7 +103,8 @@ so far (see `bench/` and `docs/gates/`):
 
 ## Known gaps
 
-Jig is an alpha. What it does not do yet:
+Jig is an alpha. What it does not do yet (phase 5 of [the plan](docs/plan.md) closes these;
+[`docs/gates/phase5.md`](docs/gates/phase5.md) tracks each one):
 
 - **Libraries.** The standard library has files, TCP and HTTP serving, time, randomness,
   tasks and text helpers, but no JSON, regular expressions, hashing, date formatting or TLS

@@ -222,6 +222,57 @@ and 0.1.0-alpha is ready to tag (`.github/workflows/release.yml`).
       byte for byte with gcc and clang. CI checks that fixed point without Rust
       (`bootstrap/update.sh --check`) and `cargo test` fails when the file is stale.
 
+## Phase 5 · Closing the gaps
+
+Goal: everything the README lists as a known gap works in Jig, in both compilers, with tests,
+contracts that prove and an example or a page that uses it. What cannot be closed in this
+phase stays open in [`gates/phase5.md`](gates/phase5.md) with the reason.
+
+**Gate:** every item below checked, or open in the gate report with its reason.
+
+Pure Jig in the standard library (both compilers get it as it is; every new function proves,
+keeping the standard library over 80%):
+
+- [ ] `std/html`: pages as trees of nodes rendered with every text and attribute value
+      escaped.
+- [ ] Docs site (option 1, D32): `site/` is a Jig program that renders `docs/*.md` to HTML
+      with `std/html` (headings with GitHub's anchors, paragraphs, lists, tables, fenced and
+      inline code, emphasis, links rewritten for the site), deployed to GitHub Pages by
+      `.github/workflows/pages.yml`.
+- [ ] `std/time` dates: UTC calendar dates from timestamps and back, ISO 8601 formatting and
+      parsing.
+- [ ] `std/json`: a `Json` value, `parse` and `str`.
+- [ ] `std/hash`: SHA-256 and HMAC-SHA-256, checked against the published test vectors.
+- [ ] `std/regex`: literals, `.`, classes, anchors, `* + ? {m,n}`, groups, alternation and
+      captures, matched in time linear in the input.
+
+Changes to both compilers:
+
+- [ ] Built-in methods (`map`, `filter`, `fold`, `any`, `all`, `sort_by`, ...) take functions
+      with effects, as effect parameters do (D31).
+- [ ] An HTTP client and TLS (D33): `http` and `https` requests from `std/net`, TLS through the
+      system's OpenSSL, linked only by programs that use it; simulated in tests.
+- [ ] Concurrent serving (D34): a server that answers connections in parallel.
+- [ ] C interop beyond numbers and strings (D35): byte buffers in and out, opaque pointers,
+      structs passed by pointer, and callbacks.
+- [ ] The prover models `starts_with`, `ends_with`, `join` and bit operations on
+      non-negative integers.
+- [ ] Table invariants (D29): invariants over every element of a list, checked where an
+      element changes and assumed by the prover, applied to the compiler's arenas.
+- [ ] Checker speed: `jig check` on 100k lines under 100 ms with jigc.
+- [ ] Float-heavy code within 10% of Rust (nbody).
+
+Tools and platforms:
+
+- [ ] macOS in CI and in the release.
+- [ ] Editor support (D36): `jig lsp` (diagnostics, types on hover, go to definition,
+      formatting) and a VS Code extension.
+- [ ] Modules: a package index on the site. Modules already resolve by URL and git tag, as
+      Go's do; hosting a registry service is outside what this repository can deploy.
+- [ ] Windows: the runtime is POSIX (sockets, threads, `dlopen`), so it needs a port.
+- [ ] Agent benchmark: three runs per task and language, to separate the turn counts from
+      the noise.
+
 ## Working rules
 
 - Every change keeps `cargo test`, `jig check` on all examples, and the formatter idempotence
