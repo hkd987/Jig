@@ -1,8 +1,9 @@
 name: Release
 
-# Pushing a tag such as v0.1.0-alpha publishes a GitHub pre-release with the Linux x86-64
-# `jig` binary, the agent plugin and the C bootstrap (D28). `jig` is jigc, built from the C
-# bootstrap (D6); the Rust compiler runs only the tests, as the reference.
+# Pushing a tag such as v0.1.0-alpha publishes a GitHub pre-release with the `jig` binary for
+# Linux x86-64 and macOS on Apple silicon, the agent plugin and the C bootstrap (D28). `jig`
+# is jigc, built from the C bootstrap (D6); the Rust compiler runs only the tests, as the
+# reference.
 on:
   push:
     tags: ["v*"]
@@ -11,7 +12,7 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,20 +24,47 @@ jobs:
         run: cargo test --locked
       - name: The bootstrap is a fixed point
         run: sh bootstrap/update.sh --check
+
+  package:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-linux
+          - os: macos-latest
+            target: arm64-macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
       - name: Package
         run: |
           CC=clang sh bootstrap/install.sh "$PWD/dist/prefix"
-          name="jig-${GITHUB_REF_NAME}-x86_64-linux"
+          name="jig-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp dist/prefix/bin/jig README.md CHANGELOG.md LICENSE "dist/$name/"
           cp -r plugin docs "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
-          cp bootstrap/jigc.c dist/jigc.c
-          # The notes are the changelog's first section.
-          awk '/^## /{n++} n==1' CHANGELOG.md > dist/notes.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jig-${{ matrix.target }}
+          path: dist/*.tar.gz
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          cp bootstrap/jigc.c dist/jigc.c
+          # The notes are the changelog's first section.
+          awk '/^## /{n++} n==1' CHANGELOG.md > dist/notes.md
           gh release create "$GITHUB_REF_NAME" --prerelease --title "Jig $GITHUB_REF_NAME" \
             --notes-file dist/notes.md dist/*.tar.gz dist/jigc.c

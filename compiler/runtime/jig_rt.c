@@ -1831,7 +1831,18 @@ static struct addrinfo *net_resolve(const jig_str *addr, bool listen, const char
     return res;
 }
 
+#ifndef MSG_NOSIGNAL
+/* Without MSG_NOSIGNAL (macOS), writing to a peer that has gone must fail, not end the
+   program with SIGPIPE: ignore the signal instead. */
+#include <signal.h>
+#define MSG_NOSIGNAL 0
+#define JIG_NO_SIGPIPE() signal(SIGPIPE, SIG_IGN)
+#else
+#define JIG_NO_SIGPIPE() ((void)0)
+#endif
+
 static bool net_send_all(int fd, const char *p, size_t n) {
+    JIG_NO_SIGPIPE();
     while (n) {
         ssize_t k = send(fd, p, n, MSG_NOSIGNAL);
         if (k < 0 && errno == EINTR) continue;

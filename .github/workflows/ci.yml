@@ -59,6 +59,22 @@ jobs:
       - name: The test suites, with jigc as the only compiler (${{ matrix.cc }})
         run: CC=${{ matrix.cc }} python3 bootstrap/suites.py
 
+  macos:
+    # jigc on macOS (Apple silicon): the checked-in C builds with the system's clang, jigc
+    # reproduces it, and it passes the test suites on its own.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bootstrap/jigc.c is a fixed point
+        run: sh bootstrap/update.sh --check
+      - name: Install the pinned Z3 solver
+        run: |
+          python3 -m venv "$HOME/z3"
+          "$HOME/z3/bin/pip" install -q z3-solver==5.3.2.0
+          echo "$HOME/z3/bin" >> "$GITHUB_PATH"
+      - name: The test suites, with jigc as the only compiler
+        run: python3 bootstrap/suites.py
+
   postgres:
     # examples/postgres against a real database, with the jig that bootstrap/install.sh
     # installs: on the interpreter and built natively.
