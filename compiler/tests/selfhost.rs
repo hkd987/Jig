@@ -465,6 +465,7 @@ fn jigc_checker_matches_bootstrap() {
     }
     cases.push((root.join("selfhost"), root.join("selfhost")));
     cases.push((root.join("site"), root.join("site")));
+    cases.push((root.join("compiler/tests/stdlib"), root.join("compiler/tests/stdlib")));
     for (i, f) in singles.iter().enumerate() {
         let d = work.join(format!("single{i}"));
         std::fs::create_dir_all(&d).unwrap();
@@ -1197,6 +1198,7 @@ fn jigc_tests_match_bootstrap() {
     entries.sort();
     cases.extend(entries.into_iter().filter(|p| p.is_dir()));
     cases.push(root.join("compiler/tests/props"));
+    cases.push(root.join("compiler/tests/stdlib"));
     cases.push(root.join("selfhost"));
     cases.push(root.join("site"));
     let originals = cases.len();

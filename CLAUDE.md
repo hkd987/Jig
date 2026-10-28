@@ -18,7 +18,7 @@ what to do, not what went wrong.
   `selfhost/sema/load.jig` (whose `std_packages` states the count), and the package lists in
   `selfhost/sema/analyze.jig` and `selfhost/sema/prove.jig`, all in the same order. Every
   contract in the standard library must prove, and 80% of its functions completely
-  (`compiler/tests/prove.rs`).
+  (`compiler/tests/prove.rs`). Its tests go in `compiler/tests/stdlib/`.
 
 ## Rules
 
@@ -33,8 +33,8 @@ what to do, not what went wrong.
 - Before committing, run what CI runs, one run at a time, and do not edit `selfhost/`,
   `compiler/std/` or `compiler/runtime/` while it runs (the tests read them):
   `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`,
-  `jig fmt --check compiler/std compiler/tests/run compiler/tests/fixtures compiler/tests/prove compiler/tests/props examples selfhost site`,
-  and `jig check` and `jig test` on each of `examples/*/`, `selfhost/` and `site/`.
+  `jig fmt --check compiler/std compiler/tests/run compiler/tests/fixtures compiler/tests/prove compiler/tests/props compiler/tests/stdlib examples selfhost site`,
+  and `jig check` and `jig test` on each of `examples/*/`, `selfhost/`, `site/` and `compiler/tests/stdlib/`.
 - Format with `cargo fmt` and `jig fmt selfhost` (and any other Jig directory you touched).
 - Never put a model name or identifier in a commit, comment or document.
 

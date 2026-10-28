@@ -9,3 +9,248 @@ pub fn now_ns() -> Int effects {clock}
 pub fn sleep(ms: Int)
   requires ms >= 0
   effects {clock}
+
+// ---- calendar dates in UTC, written in Jig ----
+// Dates are proleptic Gregorian, years 0 to 9999, from milliseconds since the Unix epoch
+// (`now_ms()`). Leap seconds are not counted, as Unix time does not count them.
+
+/// The first and last milliseconds `utc` takes: 0000-01-01T00:00:00.000Z and
+/// 9999-12-31T23:59:59.999Z.
+pub const MIN_MS: Int = -62167219200000
+pub const MAX_MS: Int = 253402300799999
+
+const DAY_MS: Int = 86400000
+
+/// A moment in UTC, as calendar fields.
+pub struct DateTime {
+  pub year: Int
+  pub month: Int
+  pub day: Int
+  pub hour: Int
+  pub minute: Int
+  pub second: Int
+  pub ms: Int
+  invariant year >= 0 && year <= 9999 && month >= 1 && month <= 12 && day >= 1 && day <= 31
+  invariant hour >= 0 && hour < 24 && minute >= 0 && minute < 60 && second >= 0 && second < 60
+  invariant ms >= 0 && ms < 1000
+}
+
+/// Whether `year` has a February 29th.
+pub fn is_leap(year: Int) -> Bool
+  ensures result == (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0))
+{
+  return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+/// How many days `month` (1 to 12) of `year` has.
+pub fn days_in_month(year: Int, month: Int) -> Int
+  requires month >= 1 && month <= 12
+  ensures result >= 28 && result <= 31
+{
+  if month == 2 {
+    return if is_leap(year) { 29 } else { 28 }
+  }
+  if month == 4 || month == 6 || month == 9 || month == 11 {
+    return 30
+  }
+  return 31
+}
+
+/// Days from 1970-01-01 to the date.
+fn days_from_civil(year: Int, month: Int, day: Int) -> Int
+  requires year >= 0 && year <= 9999 && month >= 1 && month <= 12 && day >= 1 && day <= 31
+  ensures result >= -719528 && result <= 2932896
+{
+  let y = if month <= 2 { year - 1 } else { year }
+  let era = (if y >= 0 { y } else { y - 399 }) / 400
+  let yoe = y - era * 400
+  let mp = (month + 9) % 12
+  let doy = (153 * mp + 2) / 5 + day - 1
+  let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+  return era * 146097 + doe - 719468
+}
+
+/// The date (year, month, day) `days` after 1970-01-01.
+fn civil_from_days(days: Int) -> (Int, Int, Int)
+  requires days >= -719528 && days <= 2932896
+  ensures result.0 >= 0 && result.0 <= 9999
+  ensures result.1 >= 1 && result.1 <= 12 && result.2 >= 1 && result.2 <= 31
+{
+  let z = days + 719468
+  let era = (if z >= 0 { z } else { z - 146096 }) / 146097
+  let doe = z - era * 146097
+  let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+  let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+  assert(doy >= 0 && doy <= 365)
+  let mp = (5 * doy + 2) / 153
+  assert(mp >= 0 && mp <= 11)
+  let day = doy - (153 * mp + 2) / 5 + 1
+  let month = if mp < 10 { mp + 3 } else { mp - 9 }
+  let year = yoe + era * 400 + (if month <= 2 { 1 } else { 0 })
+  return (year, month, day)
+}
+
+/// The calendar fields of `ms` milliseconds after the Unix epoch.
+pub fn utc(ms: Int) -> DateTime
+  requires ms >= MIN_MS && ms <= MAX_MS
+{
+  let days = if ms >= 0 { ms / DAY_MS } else { (ms + 1) / DAY_MS - 1 }
+  let rest = ms - days * DAY_MS
+  let (year, month, day) = civil_from_days(days)
+  return DateTime {
+    year: year
+    month: month
+    day: day
+    hour: rest / 3600000
+    minute: rest / 60000 % 60
+    second: rest / 1000 % 60
+    ms: rest % 1000
+  }
+}
+
+/// Milliseconds since the Unix epoch of `d`.
+pub fn unix_ms(d: DateTime) -> Int
+  ensures result >= MIN_MS && result <= MAX_MS + 31 * DAY_MS
+{
+  let days = days_from_civil(d.year, d.month, d.day)
+  return days * DAY_MS + d.hour * 3600000 + d.minute * 60000 + d.second * 1000 + d.ms
+}
+
+/// The day of the week of `ms`: 1 for Monday to 7 for Sunday.
+pub fn weekday(ms: Int) -> Int
+  requires ms >= MIN_MS && ms <= MAX_MS
+  ensures result >= 1 && result <= 7
+{
+  let days = if ms >= 0 { ms / DAY_MS } else { (ms + 1) / DAY_MS - 1 }
+  // 1970-01-01 was a Thursday.
+  return (days % 7 + 10) % 7 + 1
+}
+
+/// `n` in decimal, padded with zeros to `width` digits.
+fn pad(n: Int, width: Int) -> Str
+  requires n >= 0 && width >= 0 && width <= 10
+  ensures result.len() >= width
+{
+  let s = n.str()
+  return if s.len() >= width { s } else { "0".repeat(width - s.len()) + s }
+}
+
+/// `ms` in ISO 8601: `2026-10-28T09:15:00.000Z`.
+pub fn iso(ms: Int) -> Str
+  requires ms >= MIN_MS && ms <= MAX_MS
+  ensures result.len() >= 24
+{
+  let d = utc(ms)
+  return pad(d.year, 4) +
+    "-" +
+    pad(d.month, 2) +
+    "-" +
+    pad(d.day, 2) +
+    "T" +
+    pad(d.hour, 2) +
+    ":" +
+    pad(d.minute, 2) +
+    ":" +
+    pad(d.second, 2) +
+    "." +
+    pad(d.ms, 3) +
+    "Z"
+}
+
+/// `ms` as HTTP writes dates (RFC 9110): `Wed, 28 Oct 2026 09:15:00 GMT`.
+pub fn http_date(ms: Int) -> Str
+  requires ms >= MIN_MS && ms <= MAX_MS
+  ensures result.len() >= 29
+{
+  let d = utc(ms)
+  let days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+  let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+  return days[weekday(ms) - 1] +
+    ", " +
+    pad(d.day, 2) +
+    " " +
+    months[d.month - 1] +
+    " " +
+    pad(d.year, 4) +
+    " " +
+    pad(d.hour, 2) +
+    ":" +
+    pad(d.minute, 2) +
+    ":" +
+    pad(d.second, 2) +
+    " GMT"
+}
+
+/// The value of the digit at `at` in `s`, or -1.
+fn digit(s: Str, at: Int) -> Int
+  requires at >= 0 && at < s.len()
+  ensures result >= -1 && result <= 9
+{
+  let b = s[at]
+  return if b >= 48 && b <= 57 { b as Int - 48 } else { -1 }
+}
+
+/// The two-digit number at `at` in `s`, or -1.
+fn two(s: Str, at: Int) -> Int
+  requires at >= 0 && at < s.len() - 1
+  ensures result >= -1 && result <= 99
+{
+  let (a, b) = (digit(s, at), digit(s, at + 1))
+  return if a < 0 || b < 0 { -1 } else { a * 10 + b }
+}
+
+/// The moment an ISO 8601 date or date and time names: `2026-10-28`,
+/// `2026-10-28T09:15:00Z`, with optional milliseconds (`.250`) and a `Z` or `+hh:mm` /
+/// `-hh:mm` offset (none means UTC).
+pub fn parse_iso(s: Str) -> Option<Int>
+  ensures result.is_none() ||
+    result.unwrap() >= MIN_MS - DAY_MS && result.unwrap() <= MAX_MS + DAY_MS
+{
+  if s.len() < 10 || s[4] != 45 || s[7] != 45 {
+    return None
+  }
+  let (c, y2, mo, d) = (two(s, 0), two(s, 2), two(s, 5), two(s, 8))
+  if c < 0 || y2 < 0 || mo < 1 || mo > 12 || d < 1 {
+    return None
+  }
+  let y = c * 100 + y2
+  if d > days_in_month(y, mo) {
+    return None
+  }
+  var ms = days_from_civil(y, mo, d) * DAY_MS
+  if s.len() == 10 {
+    return Some(ms)
+  }
+  if s.len() < 19 || (s[10] != 84 && s[10] != 32) || s[13] != 58 || s[16] != 58 {
+    return None
+  }
+  let (h, mi, se) = (two(s, 11), two(s, 14), two(s, 17))
+  if h < 0 || h > 23 || mi < 0 || mi > 59 || se < 0 || se > 59 {
+    return None
+  }
+  ms += h * 3600000 + mi * 60000 + se * 1000
+  var i = 19
+  if i < s.len() && s[i] == 46 {
+    if i + 4 > s.len() {
+      return None
+    }
+    let (f1, f2) = (digit(s, i + 1), two(s, i + 2))
+    if f1 < 0 || f2 < 0 {
+      return None
+    }
+    ms += f1 * 100 + f2
+    i += 4
+  }
+  if i == s.len() || i + 1 == s.len() && s[i] == 90 {
+    return Some(ms)
+  }
+  if i + 6 != s.len() || (s[i] != 43 && s[i] != 45) || s[i + 3] != 58 {
+    return None
+  }
+  let (oh, om) = (two(s, i + 1), two(s, i + 4))
+  if oh < 0 || oh > 23 || om < 0 || om > 59 {
+    return None
+  }
+  let offset = oh * 3600000 + om * 60000
+  return Some(if s[i] == 43 { ms - offset } else { ms + offset })
+}

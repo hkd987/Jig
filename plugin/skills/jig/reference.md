@@ -446,7 +446,7 @@ its position; `Str.to_int` and `to_float` ignore surrounding spaces and accept a
 | `std/io` (`io`) | `print(s) println(s) eprintln(s) read_line() -> Option<Str> read_all() -> Str` |
 | `std/fs` (`fs`) | `read(path) -> Result<Str, Str> write(path, s) -> Result<(), Str> exists(path) -> Bool list(dir) -> Result<List<Str>, Str>` |
 | `std/os` (`env`) | `args() -> List<Str> env(name) -> Option<Str> exit(code) -> Never` |
-| `std/time` (`clock`) | `now_ms() -> Int now_ns() -> Int sleep(ms)` |
+| `std/time` (`clock`) | `now_ms() -> Int now_ns() -> Int sleep(ms)`; pure, for UTC dates in years 0 to 9999 (`MIN_MS` to `MAX_MS`): `utc(ms) -> DateTime` (`year month day hour minute second ms`) `unix_ms(d) iso(ms) http_date(ms) -> Str parse_iso(s) -> Option<Int> weekday(ms)` (1 is Monday) `is_leap(year) days_in_month(year, month)` |
 | `std/rand` (`rand`) | `int(lo, hi) -> Int float() -> Float` |
 | `std/math` (pure) | `PI E sin(x) cos(x) tan(x) exp(x) ln(x) log10(x) pow(x, y) gcd(a, b) clamp(x, lo, hi) sign(x) isqrt(n) pow_mod(b, e, m)` |
 | `std/lists` (pure) | `sum(xs) max_of(xs) min_of(xs) -> Option<T> reversed(xs) take(xs, n) drop(xs, n) zip(xs, ys) enumerate(xs) flatten(xss) find(xs, f) -> Option<T> position(xs, f) -> Option<Int> count(xs, f) partition(xs, f) -> (List<T>, List<T>) dedup(xs) unique(xs) chunks(xs, n) binary_search(xs, x) -> Option<Int>` |

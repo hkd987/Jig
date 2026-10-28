@@ -240,8 +240,9 @@ keeping the standard library over 80%):
       inline code, emphasis, links rewritten for the site), deployed to GitHub Pages by
       `.github/workflows/pages.yml`. Both compilers build the same site, every internal link
       and anchor resolves, and its tests cover the Markdown it reads.
-- [ ] `std/time` dates: UTC calendar dates from timestamps and back, ISO 8601 formatting and
-      parsing.
+- [x] `std/time` dates: UTC calendar dates from timestamps and back, ISO 8601 formatting and
+      parsing, and HTTP dates. Every new function proves; `compiler/tests/stdlib` checks
+      known moments and that every moment reads back from its ISO 8601 text.
 - [ ] `std/json`: a `Json` value, `parse` and `str`.
 - [ ] `std/hash`: SHA-256 and HMAC-SHA-256, checked against the published test vectors.
 - [ ] `std/regex`: literals, `.`, classes, anchors, `* + ? {m,n}`, groups, alternation and

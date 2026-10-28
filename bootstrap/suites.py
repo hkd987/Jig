@@ -308,7 +308,7 @@ def suite_docs(r):
 def suite_projects(r):
     failures = []
     ex = os.path.join(ROOT, "examples")
-    for d in [os.path.join(ex, n) for n in sorted_entries(ex)] + [os.path.join(ROOT, "selfhost"), os.path.join(ROOT, "site")]:
+    for d in [os.path.join(ex, n) for n in sorted_entries(ex)] + [os.path.join(ROOT, "selfhost"), os.path.join(ROOT, "site"), os.path.join(ROOT, "compiler/tests/stdlib")]:
         if not os.path.isdir(d):
             continue
         for cmd in ["check", "test"]:
@@ -316,7 +316,7 @@ def suite_projects(r):
             if code != 0:
                 failures.append("%s %s: exit %d\n%s%s" % (cmd, os.path.relpath(d, ROOT), code, out, err))
     dirs = ["compiler/std", "compiler/tests/run", "compiler/tests/fixtures", "compiler/tests/prove"]
-    dirs += ["compiler/tests/props", "examples", "selfhost", "site"]
+    dirs += ["compiler/tests/props", "compiler/tests/stdlib", "examples", "selfhost", "site"]
     code, out, err = r.run(["fmt", "--check"] + dirs)
     if code != 0:
         failures.append("fmt --check: %s%s" % (out, err))

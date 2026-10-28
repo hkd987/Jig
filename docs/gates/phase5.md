@@ -8,7 +8,7 @@ Some rows are research rather than implementation; they say so.
 | --- | --- | --- |
 | HTML rendering in the standard library | `std/html` | done: 5 of its 7 functions prove completely; `examples/ssr` and the site use it |
 | Docs site | `site/`, a Jig program, deployed to GitHub Pages (D32) | done: 14 pages, built the same by both compilers in CI; deploying waits on Pages being turned on |
-| Dates and times | `std/time` calendar dates and ISO 8601 | open |
+| Dates and times | `std/time` calendar dates and ISO 8601 | done: UTC dates in years 0 to 9999, ISO 8601 both ways, HTTP dates; every function proves; a round-trip property test |
 | JSON | `std/json` | open |
 | Hashing | `std/hash`: SHA-256, HMAC-SHA-256 | open |
 | Regular expressions | `std/regex`, linear-time matching | open |
