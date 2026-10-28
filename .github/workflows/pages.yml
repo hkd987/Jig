@@ -1,0 +1,44 @@
+name: Pages
+
+# The documentation site: site/, a Jig program, renders the repository's Markdown documents
+# into _site, and GitHub Pages serves it. Deploying needs Pages turned on (Settings → Pages →
+# Source: GitHub Actions) and the repository variable PAGES set to `on`; until then the site
+# is still built and uploaded on every push, so a broken build shows.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install jig
+        run: sh bootstrap/install.sh "$HOME/.local" && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build the site
+        run: mkdir -p _site && jig run site -- _site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    if: vars.PAGES == 'on'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

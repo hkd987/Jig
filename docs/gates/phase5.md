@@ -6,8 +6,8 @@ Some rows are research rather than implementation; they say so.
 
 | Gap | Plan | Status |
 | --- | --- | --- |
-| HTML rendering in the standard library | `std/html` | open |
-| Docs site | `site/`, a Jig program, deployed to GitHub Pages (D32) | open |
+| HTML rendering in the standard library | `std/html` | done: 5 of its 7 functions prove completely; `examples/ssr` and the site use it |
+| Docs site | `site/`, a Jig program, deployed to GitHub Pages (D32) | done: 14 pages, built the same by both compilers in CI; deploying waits on Pages being turned on |
 | Dates and times | `std/time` calendar dates and ISO 8601 | open |
 | JSON | `std/json` | open |
 | Hashing | `std/hash`: SHA-256, HMAC-SHA-256 | open |

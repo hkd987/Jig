@@ -1,0 +1,73 @@
+import "std/html"
+
+fn same(t: Str) -> Str {
+  return t
+}
+
+/// `src` rendered, without the page around it.
+fn md(src: Str) -> Str {
+  var out = ""
+  for n in to_html(src, same).body {
+    out += html.render(n)
+  }
+  return out
+}
+
+test "headings get GitHub's anchors, unique in the page" {
+  assert(slug("Phase 1 · Core language") == "phase-1--core-language")
+  assert(slug("Structs, enums, aliases, constants") == "structs-enums-aliases-constants")
+  assert(slug("`std/net` and B1.") == "stdnet-and-b1")
+  let doc = to_html("# Title\n\n## Effects\n\n### Effects\n\n## `jig` tools", same)
+  assert(doc.title == "Title")
+  assert(
+    doc.toc ==
+      [(2, "Effects", "effects"), (3, "Effects", "effects-1"), (2, "jig tools", "jig-tools")],
+  )
+  assert(
+    md("## A *b*") == "<h2 id=\"a-b\">A <em>b</em><a class=\"anchor\" href=\"#a-b\">#</a></h2>",
+  )
+}
+
+test "paragraphs, inline code, emphasis, links and escapes" {
+  assert(
+    md("Some `a < b` and **bold** text.") ==
+      "<p>Some <code>a &lt; b</code> and <strong>bold</strong> text.</p>",
+  )
+  assert(
+    md("a *b* [c `d`](x.md#y) \\*e\\*") ==
+      "<p>a <em>b</em> <a href=\"x.md#y\">c <code>d</code></a> *e*</p>",
+  )
+  assert(md("one\ntwo\n\nthree") == "<p>one\ntwo</p><p>three</p>")
+  assert(md("``a ` b``") == "<p><code>a ` b</code></p>")
+  assert(md("x * y, 2*3 [not a link]") == "<p>x * y, 2*3 [not a link]</p>")
+}
+
+test "lists nest by indentation, with task boxes and continuation lines" {
+  let src = "- [x] done\n      still done\n- [ ] open\n  - inner `x`\n- plain\n\n1. one\n2. two"
+  let want = "<ul><li><input type=\"checkbox\" disabled=\"\" checked=\"\"> done\nstill done</li>" +
+    "<li><input type=\"checkbox\" disabled=\"\"> open<ul><li>inner <code>x</code></li></ul></li>" +
+    "<li>plain</li></ul><ol><li>one</li><li>two</li></ol>"
+  assert(md(src) == want)
+}
+
+test "tables keep alignment and read escaped pipes" {
+  let src = "| a | b |\n| --- | ---: |\n| `x \\| y` | 2 |"
+  let want = "<div class=\"table\"><table><tr><th>a</th><th style=\"text-align: right\">b</th></tr>" +
+    "<tr><td><code>x | y</code></td><td style=\"text-align: right\">2</td></tr></table></div>"
+  assert(md(src) == want)
+}
+
+test "fenced code is kept as written, Jig highlighted; comments are dropped" {
+  assert(md("```\n$ jig run <x>\n```") == "<pre><code>$ jig run &lt;x&gt;</code></pre>")
+  assert(
+    md("<!-- note -->\n```jig\nfn f() -> Int { // one\n  return 1\n}\n```") ==
+      "<pre><code class=\"language-jig\"><span class=\"k\">fn</span> f() -&gt; <span class=\"t\">Int</span> { " +
+        "<span class=\"c\">// one</span>\n  <span class=\"k\">return</span> <span class=\"n\">1</span>\n}</code></pre>",
+  )
+  assert(md("```\nfn f() {}\n```").contains("<span class=\"k\">fn</span>"))
+}
+
+test "markup in a document is text on the page"(s: Str) {
+  let page = md(s)
+  assert(!page.contains("<script") && !page.contains("<img"))
+}

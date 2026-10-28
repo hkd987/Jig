@@ -233,12 +233,13 @@ phase stays open in [`gates/phase5.md`](gates/phase5.md) with the reason.
 Pure Jig in the standard library (both compilers get it as it is; every new function proves,
 keeping the standard library over 80%):
 
-- [ ] `std/html`: pages as trees of nodes rendered with every text and attribute value
-      escaped.
-- [ ] Docs site (option 1, D32): `site/` is a Jig program that renders `docs/*.md` to HTML
+- [x] `std/html`: pages as trees of nodes rendered with every text and attribute value
+      escaped. Its constructors, `escape` and the opening tag prove; `examples/ssr` uses it.
+- [x] Docs site (option 1, D32): `site/` is a Jig program that renders `docs/*.md` to HTML
       with `std/html` (headings with GitHub's anchors, paragraphs, lists, tables, fenced and
       inline code, emphasis, links rewritten for the site), deployed to GitHub Pages by
-      `.github/workflows/pages.yml`.
+      `.github/workflows/pages.yml`. Both compilers build the same site, every internal link
+      and anchor resolves, and its tests cover the Markdown it reads.
 - [ ] `std/time` dates: UTC calendar dates from timestamps and back, ISO 8601 formatting and
       parsing.
 - [ ] `std/json`: a `Json` value, `parse` and `str`.

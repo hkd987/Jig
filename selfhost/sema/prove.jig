@@ -626,7 +626,20 @@ fn Sema.global_key(self, std_dir: Str, solver: Str) -> Str
   h.str(VC_VERSION)
   h.str(JIG_VERSION)
   h.str(solver)
-  for p in ["io", "fs", "os", "time", "rand", "math", "task", "sim", "net", "lists", "strings"] {
+  for p in [
+    "io",
+    "fs",
+    "os",
+    "time",
+    "rand",
+    "math",
+    "task",
+    "sim",
+    "net",
+    "lists",
+    "strings",
+    "html",
+  ] {
     h.str("std/" + p)
     h.str(p + ".jig")
     h.str(read_std(std_dir, p + ".jig").unwrap_or(""))

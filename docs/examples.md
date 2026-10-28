@@ -19,7 +19,7 @@ jig run examples/http -- :8080 # run it (then: curl localhost:8080)
 | [kv](../examples/kv) | A key-value store over HTTP; the store is the server's state | `jig run examples/kv -- :8080` |
 | [postgres](../examples/postgres) | Notes in a Postgres table, through libpq behind the `ffi` effect; SQL built and tested as pure code | `jig run examples/postgres -- list` |
 | [guestbook](../examples/guestbook) | A web app on Postgres: an HTTP handler that queries the database, tested against fakes | `jig test examples/guestbook` |
-| [ssr](../examples/ssr) | Pages rendered on the server: an HTML engine package, a router package with `:params`, a blog served over HTTP | `jig run examples/ssr -- :8080` |
+| [ssr](../examples/ssr) | Pages rendered on the server with `std/html`, a router package with `:params`, a blog served over HTTP | `jig run examples/ssr -- :8080` |
 | [greet](../examples/greet) | TCP client and server with `net.request` and `net.serve` | `jig test examples/greet` |
 | [wordfreq](../examples/wordfreq) | Reading standard input, maps, sorting | `echo "a b a" \| jig run examples/wordfreq` |
 | [calc](../examples/calc) | A tokenizer, a recursive-descent parser and an evaluator | `echo "2 * (3 + 4)" \| jig run examples/calc` |
@@ -234,15 +234,16 @@ $ curl localhost:8080/
 
 ## Pages rendered on the server
 
-`examples/ssr` is a small blog in three packages. `ui` is the render engine: a page is a
-tree of `ui.Node`s (text, or an element with attributes and children) that components,
-plain functions, build, and `ui.document` renders it to HTML. Text and attribute values are
-escaped as they are rendered, so a post titled `Escaping <, > and &`, or a request for
-`/<script>`, shows as written; a property test checks that no text can open a tag or end
-an attribute. `router` matches a path against patterns such as `/posts/:id`, capturing and
-decoding the `:name` segments and ignoring the query string. The site is pages built from
-those, picked by `router.find` and served by `net.serve_http`; the tests render each page,
-and run the server on simulated requests. Every safety obligation in it proves.
+`examples/ssr` is a small blog: pages are trees of `std/html` nodes (text, or an element
+with attributes and children) that components, plain functions, build, and
+`html.document` renders them. Text and attribute values are escaped as they are rendered,
+so a post titled `Escaping <, > and &`, or a request for `/<script>`, shows as written; a
+property test checks that no text can open a tag or end an attribute. Its `router`
+package matches a path against patterns such as `/posts/:id`, capturing and decoding the
+`:name` segments and ignoring the query string; `router.find` picks the page and
+`net.serve_http` serves it. The tests render each page and run the server on simulated
+requests. Every safety obligation in it proves. The [documentation site](https://hkd987.github.io/Jig/)
+is built the same way, by `site/`, a Jig program.
 
 ```
 $ jig run examples/ssr -- :8080 &

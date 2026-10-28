@@ -21,6 +21,8 @@ compiler compiles itself: `jigc`, the Jig compiler written in Jig (`selfhost/`),
 own sources into C that rebuilds it byte for byte. The language may still change; the
 [decisions](docs/decisions.md) say which choices are provisional.
 
+- [Documentation site](https://hkd987.github.io/Jig/): these documents as web pages, built by
+  `site/`, a Jig program
 - [Language reference](docs/reference.md) (about 6,000 tokens: it fits in an agent's context)
 - [Build plan](docs/plan.md) and the gate reports in [`docs/gates`](docs/gates)
 - [Decisions](docs/decisions.md)
@@ -70,7 +72,7 @@ compilers, show what Jig code looks like:
 - [kv](examples/kv): a key-value store over HTTP
 - [postgres](examples/postgres): notes in a Postgres table, through libpq behind the `ffi` effect
 - [guestbook](examples/guestbook): a web app on Postgres, its handler tested against a fake database
-- [ssr](examples/ssr): pages rendered on the server, with an HTML engine and a router as packages
+- [ssr](examples/ssr): pages rendered on the server with `std/html`, and a router package
 - [todo](examples/todo): a command-line app on files, every effect in its signatures
 - [stack](examples/stack) and [vending](examples/vending): contracts that all prove
 - [cart](examples/cart) and [bank](examples/bank): behaviour written first as `.feature` scenarios

@@ -1,0 +1,114 @@
+// HTML pages as trees of nodes, rendered to text with every text and attribute value
+// escaped, so no data can open a tag, close one or end an attribute. Tag and attribute
+// names are written as they are given: they come from the program, not from its data.
+
+/// A piece of a page.
+pub enum Node {
+  Text(text: Str)
+  Element(tag: Str, attrs: List<(Str, Str)>, children: List<Node>)
+}
+
+/// Text, shown as written.
+pub fn text(s: Str) -> Node
+  ensures result == Node.Text(s)
+{
+  return Node.Text(s)
+}
+
+/// An element with attributes (name and value) and children.
+pub fn el(tag: Str, attrs: List<(Str, Str)>, children: List<Node>) -> Node
+  ensures result == Node.Element(tag, attrs, children)
+{
+  return Node.Element(tag, attrs, children)
+}
+
+/// An element with children and no attributes.
+pub fn tag(name: Str, children: List<Node>) -> Node
+  ensures result == Node.Element(name, [], children)
+{
+  return Node.Element(name, [], children)
+}
+
+/// The character reference for byte `b`, or "" if it needs none.
+fn reference(b: U8) -> Str
+  ensures result.is_empty() || result.len() >= 4
+{
+  if b == 38 {
+    return "&amp;"
+  }
+  if b == 60 {
+    return "&lt;"
+  }
+  if b == 62 {
+    return "&gt;"
+  }
+  if b == 34 {
+    return "&quot;"
+  }
+  if b == 39 {
+    return "&#39;"
+  }
+  return ""
+}
+
+/// `s` with `&`, `<`, `>`, `"` and `'` replaced by character references.
+pub fn escape(s: Str) -> Str
+  ensures result.len() >= s.len()
+{
+  var out = ""
+  var start = 0
+  for i in 0..s.len() invariant start >= 0 && start <= i && out.len() >= start {
+    let r = reference(s[i])
+    if !r.is_empty() {
+      out += s[start..i] + r
+      start = i + 1
+    }
+  }
+  return out + s[start..s.len()]
+}
+
+/// Elements HTML writes without children or a closing tag.
+pub fn is_void(tag: Str) -> Bool {
+  return tag == "meta" ||
+    tag == "link" ||
+    tag == "br" ||
+    tag == "hr" ||
+    tag == "img" ||
+    tag == "input"
+}
+
+/// The opening tag of an element: its name and attributes, values escaped.
+fn open_tag(name: Str, attrs: List<(Str, Str)>) -> Str
+  ensures result.len() >= name.len() + 2
+{
+  var out = "<" + name
+  for i in 0..attrs.len() invariant out.len() >= name.len() + 1 {
+    out += " " + attrs[i].0 + "=\"" + escape(attrs[i].1) + "\""
+  }
+  return out + ">"
+}
+
+/// `n` as HTML.
+pub fn render(n: Node) -> Str {
+  return match n {
+    Text(s) => escape(s)
+    Element(name, attrs, children) => {
+      var out = open_tag(name, attrs)
+      if !is_void(name) {
+        for c in children {
+          out += render(c)
+        }
+        out += "</" + name + ">"
+      }
+      out
+    }
+  }
+}
+
+/// A whole document: the doctype, then `<html>` with a head (the charset, `title`, then
+/// `head`) and `body`.
+pub fn document(title: Str, head: List<Node>, body: List<Node>) -> Str {
+  var h = [el("meta", [("charset", "utf-8")], []), tag("title", [text(title)])]
+  h.extend(head)
+  return "<!doctype html>\n" + render(tag("html", [tag("head", h), tag("body", body)])) + "\n"
+}

@@ -1,0 +1,6 @@
+<p class="lead" title="a &quot;quoted&quot; &lt;title&gt;">1 &lt; 2 &amp; 3 &gt; 2, it&#39;s <b>bold</b><br></p>
+&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;
+|plain ünïcode|
+true false
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Hi &amp; bye</title><link rel="stylesheet" href="s.css"></head><body><p class="lead" title="a &quot;quoted&quot; &lt;title&gt;">1 &lt; 2 &amp; 3 &gt; 2, it&#39;s <b>bold</b><br></p></body></html>

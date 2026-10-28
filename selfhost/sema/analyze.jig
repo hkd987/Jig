@@ -385,7 +385,20 @@ fn prove_cmd(dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> Output
     // A package importing every standard package, as the bootstrap compiler's `analyze_std`.
     root = join_path(os.env("TMPDIR").unwrap_or("/tmp"), "jigc-std-" + time.now_ns().str())
     var src = ""
-    for p in ["io", "fs", "os", "time", "rand", "math", "task", "sim", "net", "lists", "strings"] {
+    for p in [
+      "io",
+      "fs",
+      "os",
+      "time",
+      "rand",
+      "math",
+      "task",
+      "sim",
+      "net",
+      "lists",
+      "strings",
+      "html",
+    ] {
       src += "import \"std/" + p + "\"\n"
     }
     let _ = system("mkdir -p '" + root + "'")

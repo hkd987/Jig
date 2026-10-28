@@ -1,0 +1,178 @@
+import "std/fs"
+import "std/html"
+import "std/io"
+import "std/os"
+import "markdown"
+
+// `site OUT`, run from the repository root, builds the documentation site into the
+// directory OUT: one page per Markdown document, the README as the home page. Links between
+// the documents stay on the site; links to code and other files go to GitHub. GitHub Pages
+// serves what it builds (.github/workflows/pages.yml).
+
+const REPO: Str = "https://github.com/hkd987/Jig"
+
+/// The documents on the site: their path in the repository and their page.
+fn pages() -> List<(Str, Str)> {
+  return [
+    ("README.md", "index.html"),
+    ("docs/reference.md", "reference.html"),
+    ("docs/examples.md", "examples.html"),
+    ("docs/plan.md", "plan.html"),
+    ("docs/decisions.md", "decisions.html"),
+    ("CHANGELOG.md", "changelog.html"),
+    ("docs/gates/phase1.md", "phase1.html"),
+    ("docs/gates/phase2.md", "phase2.html"),
+    ("docs/gates/phase3.md", "phase3.html"),
+    ("docs/gates/phase4.md", "phase4.html"),
+    ("docs/gates/phase5.md", "phase5.html"),
+    ("selfhost/README.md", "selfhost.html"),
+    ("bootstrap/README.md", "bootstrap.html"),
+    ("plugin/README.md", "plugin.html"),
+  ]
+}
+
+/// The navigation bar's pages.
+fn nav() -> List<(Str, Str)> {
+  return [
+    ("Reference", "reference.html"),
+    ("Examples", "examples.html"),
+    ("Plan", "plan.html"),
+    ("Decisions", "decisions.html"),
+    ("Changelog", "changelog.html"),
+  ]
+}
+
+/// `path` with its `.` and `..` segments resolved: `docs/../examples` is `examples`.
+fn normalize(path: Str) -> Str {
+  var parts: List<Str> = []
+  for p in path.split("/") {
+    if p == ".." {
+      let _ = parts.pop()
+    } else if p != "." && !p.is_empty() {
+      parts.push(p)
+    }
+  }
+  return parts.join("/")
+}
+
+/// The directory of `path` (`docs/gates` for `docs/gates/phase1.md`), "" at the top.
+fn dir_of(path: Str) -> Str {
+  let parts = path.split("/")
+  return parts[0..parts.len() - 1].join("/")
+}
+
+/// Where a link to `target` in the document at `src` goes on the site: a page of the site,
+/// or the file on GitHub.
+fn rewrite(src: Str, target: Str) -> Str {
+  if target.starts_with("http://") || target.starts_with("https://") || target.starts_with("#") {
+    return target
+  }
+  let (path, anchor) = match target.find("#") {
+    Some(i) => (target[0..i], target[i..target.len()])
+    None => (target, "")
+  }
+  let dir = dir_of(src)
+  let full = normalize(if dir.is_empty() { path } else { dir + "/" + path })
+  for p in pages() {
+    if p.0 == full {
+      return p.1 + anchor
+    }
+  }
+  let last = full.split("/")
+  let kind = if last[last.len() - 1].contains(".") { "blob" } else { "tree" }
+  return REPO + "/" + kind + "/main/" + full + anchor
+}
+
+/// The page around a document: navigation, the document's contents beside it, a footer.
+fn layout(doc: markdown.Doc, src: Str, page: Str) -> Str {
+  var links = [html.el("a", [("class", "home"), ("href", "index.html")], [html.text("Jig")])]
+  for n in nav() {
+    let attrs = if n.1 == page {
+      [("href", n.1), ("aria-current", "page")]
+    } else {
+      [("href", n.1)]
+    }
+    links.push(html.el("a", attrs, [html.text(n.0)]))
+  }
+  links.push(html.el("a", [("href", REPO)], [html.text("GitHub")]))
+  var toc: List<html.Node> = []
+  for h in doc.toc {
+    let item = html.el("a", [("href", "#" + h.2)], [html.text(h.1)])
+    toc.push(html.el("li", [("class", "l" + h.0.str())], [item]))
+  }
+  var body = [html.tag("header", [html.tag("nav", links)])]
+  var main = [html.tag("article", doc.body)]
+  if toc.len() > 2 {
+    main.push(
+      html.el("aside", [], [html.tag("p", [html.text("On this page")]), html.tag("ul", toc)]),
+    )
+  }
+  body.push(html.tag("main", main))
+  let source = html.el("a", [("href", REPO + "/blob/main/" + src)], [html.text(src)])
+  let made = html.el("a", [("href", REPO + "/tree/main/site")], [html.text("a Jig program")])
+  body.push(
+    html.tag(
+      "footer",
+      [html.text("From "), source, html.text(", rendered by "), made, html.text(".")],
+    ),
+  )
+  let title = if doc.title.is_empty() || page == "index.html" {
+    "Jig"
+  } else {
+    doc.title + " · Jig"
+  }
+  let head = [
+    html.el("meta", [("name", "viewport"), ("content", "width=device-width, initial-scale=1")], []),
+    html.el("link", [("rel", "stylesheet"), ("href", "style.css")], []),
+  ]
+  return html.document(title, head, body)
+}
+
+/// Every file of the site, made from the documents `read` returns: (name, contents).
+fn build(read: fn(Str) -> Result<Str, Str>) -> Result<List<(Str, Str)>, Str> effects {read} {
+  var out: List<(Str, Str)> = []
+  for p in pages() {
+    let src = p.0
+    let text = match read(src) {
+      Ok(t) => t
+      Err(e) => {
+        return Err(src + ": " + e)
+      }
+    }
+    let doc = markdown.to_html(text, fn(t) { rewrite(src, t) })
+    out.push((p.1, layout(doc, src, p.1)))
+  }
+  match read("site/style.css") {
+    Ok(css) => out.push(("style.css", css))
+    Err(e) => {
+      return Err("site/style.css: " + e)
+    }
+  }
+  return Ok(out)
+}
+
+fn main() effects {io, fs, env} {
+  let args = os.args()
+  if args.len() != 2 {
+    io.eprintln("usage: site OUT (run from the repository root; OUT must exist)")
+    os.exit(2)
+  }
+  let dir = args[1]
+  let built = match build(fn(path) { fs.read(path) }) {
+    Ok(b) => b
+    Err(e) => {
+      io.eprintln(e)
+      os.exit(1)
+    }
+  }
+  for f in built {
+    match fs.write(dir + "/" + f.0, f.1) {
+      Ok(_) => {}
+      Err(e) => {
+        io.eprintln(e)
+        os.exit(1)
+      }
+    }
+  }
+  io.println("wrote " + built.len().str() + " files to " + dir)
+}

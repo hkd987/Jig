@@ -1,0 +1,233 @@
+import "std/html"
+
+// Blocks to HTML. Headings get the anchors GitHub gives them, so links written for GitHub
+// (`reference.md#effects`) work on the site too; fenced code marked `jig` is highlighted.
+
+/// A document as HTML: its title (the first top-level heading), its body, and its second-
+/// and third-level headings (level, text, anchor) for a table of contents.
+pub struct Doc {
+  pub title: Str
+  pub body: List<html.Node>
+  pub toc: List<(Int, Str, Str)>
+}
+
+/// The anchor GitHub gives a heading: lower case, spaces as hyphens, punctuation dropped.
+fn slug(text: Str) -> Str {
+  var out = ""
+  for c in text.chars() {
+    if c.is_alpha() || c.is_digit() {
+      out += c.str().to_lower()
+    } else if c == '-' || c == '_' {
+      out += c.str()
+    } else if c == ' ' {
+      out += "-"
+    }
+  }
+  return out
+}
+
+const KEYWORDS: Str = " fn let var if else for in return match struct enum interface type const import pub test step requires ensures invariant effects unit true false break continue old forall exists where self Self link module "
+
+fn is_ident_byte(b: U8) -> Bool {
+  return b >= 97 && b <= 122 || b >= 65 && b <= 90 || b >= 48 && b <= 57 || b == 95
+}
+
+/// A span of class `c` around `s`.
+fn span(c: Str, s: Str) -> html.Node {
+  return html.el("span", [("class", c)], [html.text(s)])
+}
+
+/// Jig code with keywords, types, strings, numbers and comments in spans.
+fn highlight(code: Str) -> List<html.Node> {
+  var out: List<html.Node> = []
+  var i = 0
+  var start = 0
+  for i < code.len() invariant i >= 0 && start >= 0 && start <= i && i <= code.len() {
+    let b = code[i]
+    var end = i
+    var class = ""
+    if b == 47 && i + 1 < code.len() && code[i + 1] == 47 {
+      end = i
+      for end < code.len() && code[end] != 10 invariant end >= i && end <= code.len() {
+        end += 1
+      }
+      class = "c"
+    } else if b == 34 {
+      end = i + 1
+      for end < code.len() && code[end] != 34 && code[end] != 10
+        invariant end > i && end <= code.len()
+      {
+        end += if code[end] == 92 && end + 1 < code.len() { 2 } else { 1 }
+      }
+      end = min(end + 1, code.len())
+      class = "s"
+    } else if is_ident_byte(b) {
+      end = i
+      for end < code.len() && is_ident_byte(code[end]) invariant end >= i && end <= code.len() {
+        end += 1
+      }
+      let word = code[i..end]
+      class = if b >= 48 && b <= 57 {
+        "n"
+      } else if KEYWORDS.contains(" " + word + " ") {
+        "k"
+      } else if b >= 65 && b <= 90 {
+        "t"
+      } else {
+        ""
+      }
+    }
+    if class.is_empty() {
+      i = max(end, i + 1)
+      continue
+    }
+    if start < i {
+      out.push(html.text(code[start..i]))
+    }
+    out.push(span(class, code[i..end]))
+    i = max(end, i + 1)
+    start = i
+  }
+  if start < code.len() {
+    out.push(html.text(code[start..code.len()]))
+  }
+  return out
+}
+
+/// Whether a fenced block is Jig: marked `jig`, or unmarked and declaring something.
+fn is_jig(lang: Str, code: Str) -> Bool {
+  if !lang.is_empty() {
+    return lang == "jig"
+  }
+  for w in ["fn ", "struct ", "enum ", "interface ", "import \"", "test \"", "type ", "unit "] {
+    if code.starts_with(w) || code.contains("\n" + w) || code.contains("\npub " + w) {
+      return true
+    }
+  }
+  return false
+}
+
+/// A heading's anchor, unique in its document: GitHub's slug, then `-1`, `-2`, ... for later
+/// headings with the same one.
+fn unique(base: Str, seen: &mut Map<Str, Int>) -> Str {
+  return match seen.get(base) {
+    Some(n) => {
+      seen.insert(base, n + 1)
+      base + "-" + n.str()
+    }
+    None => {
+      seen.insert(base, 1)
+      base
+    }
+  }
+}
+
+fn item_nodes(it: Item, link: fn(Str) -> Str, seen: &mut Map<Str, Int>) -> html.Node {
+  var text = it.text
+  var kids: List<html.Node> = []
+  if text.starts_with("[x] ") || text.starts_with("[ ] ") {
+    var attrs = [("type", "checkbox"), ("disabled", "")]
+    if text.starts_with("[x]") {
+      attrs.push(("checked", ""))
+    }
+    kids.push(html.el("input", attrs, []))
+    text = text[3..text.len()]
+  }
+  kids.extend(inline(text, link))
+  for b in it.nested {
+    kids.extend(block_nodes(b, link, &mut seen))
+  }
+  return html.tag("li", kids)
+}
+
+/// One block as nodes (a heading's anchor recorded in `seen`).
+fn block_nodes(b: Block, link: fn(Str) -> Str, seen: &mut Map<Str, Int>) -> List<html.Node> {
+  return match b {
+    Heading(level, text) => {
+      let content = inline(text, link)
+      let id = unique(slug(plain(content)), &mut seen)
+      var kids = content
+      kids.push(html.el("a", [("class", "anchor"), ("href", "#" + id)], [html.text("#")]))
+      [html.el("h" + level.str(), [("id", id)], kids)]
+    }
+    Para(text) => [html.tag("p", inline(text, link))]
+    Code(lang, code) => {
+      let body = if is_jig(lang, code) { highlight(code) } else { [html.text(code)] }
+      let attrs = if lang.is_empty() { [] } else { [("class", "language-" + lang)] }
+      [html.tag("pre", [html.el("code", attrs, body)])]
+    }
+    Items(ordered, items) => {
+      var lis: List<html.Node> = []
+      for it in items {
+        lis.push(item_nodes(it, link, &mut seen))
+      }
+      [html.tag(if ordered { "ol" } else { "ul" }, lis)]
+    }
+    Table(head, align, rows) => {
+      var ths: List<html.Node> = []
+      for i in 0..head.len() {
+        ths.push(cell("th", head[i], if i < align.len() { align[i] } else { "" }, link))
+      }
+      var trs = [html.tag("tr", ths)]
+      for r in rows {
+        var tds: List<html.Node> = []
+        for i in 0..r.len() {
+          tds.push(cell("td", r[i], if i < align.len() { align[i] } else { "" }, link))
+        }
+        trs.push(html.tag("tr", tds))
+      }
+      [html.el("div", [("class", "table")], [html.tag("table", trs)])]
+    }
+  }
+}
+
+fn cell(name: Str, text: Str, align: Str, link: fn(Str) -> Str) -> html.Node {
+  let attrs = if align.is_empty() { [] } else { [("style", "text-align: " + align)] }
+  return html.el(name, attrs, inline(text, link))
+}
+
+/// A Markdown document as HTML, link targets passed through `link`.
+pub fn to_html(src: Str, link: fn(Str) -> Str) -> Doc {
+  let blocks = parse(src)
+  var seen: Map<Str, Int> = Map.new()
+  var body: List<html.Node> = []
+  var toc: List<(Int, Str, Str)> = []
+  var title = ""
+  for b in blocks {
+    let nodes = block_nodes(b, link, &mut seen)
+    match b {
+      Heading(level, text) => {
+        let words = plain(inline(text, link))
+        if level == 1 && title.is_empty() {
+          title = words
+        }
+        if level == 2 || level == 3 {
+          let id = match nodes.first() {
+            Some(n) => anchor_of(n)
+            None => ""
+          }
+          toc.push((level, words, id))
+        }
+      }
+      _ => {}
+    }
+    body.extend(nodes)
+  }
+  return Doc { title: title, body: body, toc: toc }
+}
+
+/// The `id` of an element.
+fn anchor_of(n: html.Node) -> Str {
+  return match n {
+    Element(_, attrs, _) => {
+      var id = ""
+      for a in attrs {
+        if a.0 == "id" {
+          id = a.1
+        }
+      }
+      id
+    }
+    Text(_) => ""
+  }
+}

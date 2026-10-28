@@ -1,0 +1,246 @@
+// Markdown, the part of it this repository's documents use: headings, paragraphs, lists
+// (nested by indentation, with task boxes), tables, fenced code, and HTML comments, which
+// are dropped. `parse` turns a document into blocks; `inline.jig` reads the text in them.
+
+/// A block of a document.
+enum Block {
+  Heading(level: Int, text: Str)
+  Para(text: Str)
+  Code(lang: Str, code: Str)
+  Items(ordered: Bool, items: List<Item>)
+  Table(head: List<Str>, align: List<Str>, rows: List<List<Str>>)
+}
+
+/// A list item: its text, then the lists nested under it.
+struct Item {
+  text: Str
+  nested: List<Block>
+}
+
+/// How many spaces `l` starts with.
+fn indent(l: Str) -> Int
+  ensures result >= 0 && result <= l.len()
+{
+  var n = 0
+  for n < l.len() && l[n] == 32 invariant n >= 0 && n <= l.len() {
+    n += 1
+  }
+  return n
+}
+
+/// A list item's marker at the start of `l`: its indent, whether it is numbered, and where
+/// the item's text starts.
+fn marker(l: Str) -> Option<(Int, Bool, Int)> {
+  let n = indent(l)
+  if n + 1 < l.len() && (l[n] == 45 || l[n] == 42) && l[n + 1] == 32 {
+    return Some((n, false, n + 2))
+  }
+  var d = n
+  for d < l.len() && l[d] >= 48 && l[d] <= 57 invariant d >= n && d <= l.len() {
+    d += 1
+  }
+  if d > n && d + 1 < l.len() && l[d] == 46 && l[d + 1] == 32 {
+    return Some((n, true, d + 2))
+  }
+  return None
+}
+
+/// The level and text of a heading line (`## Title`).
+fn heading(t: Str) -> Option<(Int, Str)> {
+  var n = 0
+  for n < t.len() && n < 7 && t[n] == 35 invariant n >= 0 && n <= t.len() {
+    n += 1
+  }
+  if n == 0 || n > 6 || n >= t.len() || t[n] != 32 {
+    return None
+  }
+  return Some((n, t[n + 1..t.len()].trim()))
+}
+
+/// Whether `l` is a table's rule line (`| --- | ---: |`).
+fn is_rule(l: Str) -> Bool {
+  let t = l.trim()
+  if !t.starts_with("|") || !t.contains("-") {
+    return false
+  }
+  for b in t.bytes() {
+    if b != 124 && b != 45 && b != 58 && b != 32 {
+      return false
+    }
+  }
+  return true
+}
+
+/// The cells of a table row: split on `|` (not `\|`), trimmed, with `\|` read as `|`.
+fn cells(l: Str) -> List<Str> {
+  var t = l.trim()
+  if t.starts_with("|") {
+    t = t[1..t.len()]
+  }
+  if t.ends_with("|") && !t.ends_with("\\|") {
+    t = t[0..t.len() - 1]
+  }
+  var out: List<Str> = []
+  var start = 0
+  for i in 0..t.len() invariant start >= 0 && start <= i {
+    if t[i] == 124 && (i == 0 || t[i - 1] != 92) {
+      out.push(t[start..i].trim().replace("\\|", "|"))
+      start = i + 1
+    }
+  }
+  out.push(t[start..t.len()].trim().replace("\\|", "|"))
+  return out
+}
+
+/// A column's alignment from its rule cell: "left", "right", "center" or "".
+fn alignment(cell: Str) -> Str {
+  let left = cell.starts_with(":")
+  let right = cell.ends_with(":")
+  return if left && right { "center" } else if right { "right" } else if left { "left" } else { "" }
+}
+
+/// Whether `l` starts a block other than a paragraph (or is blank), ending a paragraph.
+fn starts_block(l: Str) -> Bool {
+  let t = l.trim()
+  return t.is_empty() ||
+    t.starts_with("```") ||
+    t.starts_with("<!--") ||
+    t.starts_with("|") ||
+    heading(t).is_some() ||
+    marker(l).is_some()
+}
+
+/// The list starting at line `start`, whose items are indented `base` spaces, and the line
+/// after it.
+fn list_at(lines: List<Str>, start: Int, base: Int) -> (Block, Int) {
+  let ordered = match marker(lines[start]) {
+    Some(m) => m.1
+    None => false
+  }
+  var items: List<Item> = []
+  var i = start
+  for i < lines.len() {
+    match marker(lines[i]) {
+      Some((ind, ord, at)) if ind == base && ord == ordered => {
+        let first = lines[i]
+        var text = first[at..first.len()]
+        var nested: List<Block> = []
+        i += 1
+        for i < lines.len() && !lines[i].trim().is_empty() {
+          let l = lines[i]
+          match marker(l) {
+            Some((deeper, _, _)) if deeper > base => {
+              let (b, next) = list_at(lines, i, deeper)
+              nested.push(b)
+              i = max(next, i + 1)
+            }
+            Some(_) => {
+              break
+            }
+            None => {
+              if starts_block(l) && indent(l) <= base {
+                break
+              }
+              text += "\n" + l.trim()
+              i += 1
+            }
+          }
+        }
+        items.push(Item { text: text, nested: nested })
+        // A blank line ends the list unless the next item of this list follows it.
+        var j = i
+        for j < lines.len() && lines[j].trim().is_empty() {
+          j += 1
+        }
+        if j > i && j < lines.len() {
+          match marker(lines[j]) {
+            Some((ind2, ord2, _)) if ind2 == base && ord2 == ordered => i = j
+            _ => {
+              break
+            }
+          }
+        }
+      }
+      _ => {
+        break
+      }
+    }
+  }
+  return (Block.Items(ordered, items), i)
+}
+
+/// The blocks of a Markdown document.
+fn parse(src: Str) -> List<Block> {
+  let lines = src.lines()
+  var out: List<Block> = []
+  var i = 0
+  for i < lines.len() {
+    let l = lines[i]
+    let t = l.trim()
+    if t.is_empty() {
+      i += 1
+      continue
+    }
+    if t.starts_with("```") {
+      let lang = t[3..t.len()].trim()
+      let pad = indent(l)
+      var code: List<Str> = []
+      i += 1
+      for i < lines.len() && !lines[i].trim().starts_with("```") {
+        let c = lines[i]
+        code.push(if indent(c) >= pad { c[pad..c.len()] } else { c.trim() })
+        i += 1
+      }
+      out.push(Block.Code(lang, code.join("\n")))
+      i += 1
+      continue
+    }
+    if t.starts_with("<!--") {
+      for i < lines.len() && !lines[i].contains("-->") {
+        i += 1
+      }
+      i += 1
+      continue
+    }
+    match heading(t) {
+      Some((n, text)) => {
+        out.push(Block.Heading(n, text))
+        i += 1
+        continue
+      }
+      None => {}
+    }
+    if t.starts_with("|") && i + 1 < lines.len() && is_rule(lines[i + 1]) {
+      let head = cells(l)
+      var align: List<Str> = []
+      for c in cells(lines[i + 1]) {
+        align.push(alignment(c))
+      }
+      var rows: List<List<Str>> = []
+      i += 2
+      for i < lines.len() && lines[i].trim().starts_with("|") {
+        rows.push(cells(lines[i]))
+        i += 1
+      }
+      out.push(Block.Table(head, align, rows))
+      continue
+    }
+    match marker(l) {
+      Some((ind, _, _)) => {
+        let (b, next) = list_at(lines, i, ind)
+        out.push(b)
+        i = max(next, i + 1)
+        continue
+      }
+      None => {}
+    }
+    var para = [t]
+    i += 1
+    for i < lines.len() && !starts_block(lines[i]) {
+      para.push(lines[i].trim())
+      i += 1
+    }
+    out.push(Block.Para(para.join("\n")))
+  }
+  return out
+}

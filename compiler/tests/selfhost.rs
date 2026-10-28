@@ -103,7 +103,7 @@ fn jigc_matches_bootstrap() {
     let exe = jigc().to_path_buf();
 
     let mut files = Vec::new();
-    for d in ["compiler", "examples", "selfhost", "bench"] {
+    for d in ["compiler", "examples", "selfhost", "bench", "site"] {
         jig_files(&root.join(d), &mut files);
     }
     assert!(files.len() > 50);
@@ -464,6 +464,7 @@ fn jigc_checker_matches_bootstrap() {
         }
     }
     cases.push((root.join("selfhost"), root.join("selfhost")));
+    cases.push((root.join("site"), root.join("site")));
     for (i, f) in singles.iter().enumerate() {
         let d = work.join(format!("single{i}"));
         std::fs::create_dir_all(&d).unwrap();
@@ -552,6 +553,7 @@ fn jigc_back_end_matches_bootstrap() {
         cases.extend(entries.into_iter().filter(|p| p.is_dir()));
     }
     cases.push(root.join("selfhost"));
+    cases.push(root.join("site"));
     let failures: Vec<String> = cases.iter().filter_map(|d| compare_c(exe, &std_dir, d)).collect();
     assert!(failures.is_empty(), "{} programs differ:\n{}", failures.len(), failures.join("\n"));
 }
@@ -1057,7 +1059,7 @@ fn jigc_formatter_matches_bootstrap() {
     let root = repo_root();
     let exe = jigc();
     let mut files = Vec::new();
-    for d in ["compiler", "examples", "selfhost", "bench"] {
+    for d in ["compiler", "examples", "selfhost", "bench", "site"] {
         jig_files(&root.join(d), &mut files);
     }
     let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("selfhost-fmt");
@@ -1196,6 +1198,7 @@ fn jigc_tests_match_bootstrap() {
     cases.extend(entries.into_iter().filter(|p| p.is_dir()));
     cases.push(root.join("compiler/tests/props"));
     cases.push(root.join("selfhost"));
+    cases.push(root.join("site"));
     let originals = cases.len();
     for d in &cases {
         failures.extend(compare_tests(exe, &std_dir, d));

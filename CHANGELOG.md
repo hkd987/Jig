@@ -29,9 +29,13 @@ shared benchmark suite; a 100k-line project checks in about 70 ms with the Rust 
 four threads (jigc, which `jig` now runs, takes about 210 ms on one).
 
 **Standard library.** `std/io`, `fs`, `net` (TCP request/response, HTTP serving for
-browsers and HTTP clients, and a simulator),
+browsers and HTTP clients, and a simulator), `html` (pages as node trees, escaped when
+rendered),
 `time`, `rand`, `os`, `task` (fork-join), `math`, `lists`, `strings`; 91% of its functions
 have contracts that prove.
+
+**Documentation.** A documentation site, built from the repository's Markdown by `site/`,
+a Jig program, and deployed to GitHub Pages.
 
 **Agents.** A Claude Code plugin: the reference as a skill, `jig check` after every edit, a
 commit gate, a proof-hint skill, spec-first commands and MCP tools. Opt-in, local-only

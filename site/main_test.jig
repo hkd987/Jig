@@ -1,0 +1,28 @@
+test "links between documents stay on the site; others go to GitHub" {
+  assert(rewrite("README.md", "docs/reference.md") == "reference.html")
+  assert(rewrite("docs/examples.md", "reference.md#effects") == "reference.html#effects")
+  assert(rewrite("docs/plan.md", "gates/phase4.md") == "phase4.html")
+  assert(rewrite("docs/gates/phase4.md", "phase3.md") == "phase3.html")
+  assert(rewrite("docs/examples.md", "../examples/http") == REPO + "/tree/main/examples/http")
+  assert(rewrite("README.md", "LICENSE") == REPO + "/tree/main/LICENSE")
+  assert(rewrite("README.md", "bench/run.py") == REPO + "/blob/main/bench/run.py")
+  assert(rewrite("docs/plan.md", "#phase-5") == "#phase-5")
+  assert(rewrite("README.md", "https://example.com/a.md") == "https://example.com/a.md")
+}
+
+test "every page is built, with the stylesheet, from what `read` returns" {
+  let built = build(fn(path) {
+    if path == "site/style.css" {
+      Ok("body {}")
+    } else {
+      Ok("# " + path + "\n\nSee [the reference](docs/reference.md).")
+    }
+  })
+  let files = built.unwrap()
+  assert(files.len() == pages().len() + 1)
+  assert(files[0].0 == "index.html" && files[0].1.contains("<title>Jig</title>"))
+  assert(files[1].1.contains("<title>docs/reference.md · Jig</title>"))
+  assert(files[1].1.contains("<a href=\"reference.html\" aria-current=\"page\">Reference</a>"))
+  assert(files[files.len() - 1] == ("style.css", "body {}"))
+  assert(build(fn(_) { Err("missing") }) == Err("README.md: missing"))
+}

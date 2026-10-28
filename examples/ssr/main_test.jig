@@ -1,3 +1,4 @@
+import "std/html"
 import "std/sim"
 
 fn get(path: Str) -> Str {
@@ -41,4 +42,10 @@ test "the server renders each request, counting them" {
   assert(answers[1].starts_with("HTTP/1.1 405 Method Not Allowed\r\n"))
   assert(answers[2].contains("<h1>Hello from Jig</h1>") && answers[2].contains("request 3"))
   assert(sim.stdout() == "listening on :8080\nserved 3 requests\n")
+}
+
+test "no text opens a tag or ends an attribute"(s: Str) {
+  let e = html.escape(s)
+  assert(!e.contains("<") && !e.contains(">") && !e.contains("\"") && !e.contains("'"))
+  assert(html.render(html.tag("p", [html.text(s)])) == "<p>" + e + "</p>")
 }

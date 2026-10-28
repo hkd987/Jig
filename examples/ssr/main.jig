@@ -1,14 +1,14 @@
+import "std/html"
 import "std/io"
 import "std/lists"
 import "std/net"
 import "std/os"
 import "router"
-import "ui"
 
 // `ssr [ADDR [N]]` serves a small blog over HTTP on ADDR (default :8080), forever or for N
-// requests, every page rendered on the server: the pages are components built from `ui`'s
-// nodes, and `router` picks the page for a path. Whatever a post or a path holds is text
-// on the page, never markup.
+// requests, every page rendered on the server: the pages are components built from
+// `std/html`'s nodes, and `router` picks the page for a path. Whatever a post or a path
+// holds is text on the page, never markup.
 
 struct Post {
   id: Int
@@ -41,22 +41,27 @@ fn routes() -> List<(Str, Page)> {
   return [("/", Page.Home), ("/posts/:id", Page.Article), ("/about", Page.About)]
 }
 
-/// What every page shares: the navigation, the title, then `content`, then a footer that
-/// says which request this is.
-fn layout(title: Str, content: List<ui.Node>, visit: Int) -> Str {
-  let nav = ui.tag("nav", [ui.link("/", "Posts"), ui.text(" | "), ui.link("/about", "About")])
-  var body = [nav, ui.tag("h1", [ui.text(title)])]
-  body.extend(content)
-  body.push(ui.tag("footer", [ui.text("request " + visit.str())]))
-  return ui.document(title, body)
+/// A link to `href`.
+fn link(href: Str, label: Str) -> html.Node {
+  return html.el("a", [("href", href)], [html.text(label)])
 }
 
-fn home(ps: List<Post>) -> List<ui.Node> {
-  var items: List<ui.Node> = []
+/// What every page shares: the navigation, the title, then `content`, then a footer that
+/// says which request this is.
+fn layout(title: Str, content: List<html.Node>, visit: Int) -> Str {
+  let nav = html.tag("nav", [link("/", "Posts"), html.text(" | "), link("/about", "About")])
+  var body = [nav, html.tag("h1", [html.text(title)])]
+  body.extend(content)
+  body.push(html.tag("footer", [html.text("request " + visit.str())]))
+  return html.document(title, [], body)
+}
+
+fn home(ps: List<Post>) -> List<html.Node> {
+  var items: List<html.Node> = []
   for p in ps {
-    items.push(ui.tag("li", [ui.link("/posts/" + p.id.str(), p.title)]))
+    items.push(html.tag("li", [link("/posts/" + p.id.str(), p.title)]))
   }
-  return [ui.tag("ul", items)]
+  return [html.tag("ul", items)]
 }
 
 /// The post whose id is `id`.
@@ -75,17 +80,17 @@ fn post(id: Option<Str>) -> Option<Post> {
 fn view(path: Str, visit: Int) -> (Str, Str) {
   let missing = (
     "404 Not Found",
-    layout("Not found", [ui.tag("p", [ui.text("Nothing at " + path)])], visit),
+    layout("Not found", [html.tag("p", [html.text("Nothing at " + path)])], visit),
   )
   return match router.find(routes(), path) {
     Some((Home, _)) => ("200 OK", layout("Posts", home(posts()), visit))
     Some((Article, params)) => match post(params.get("id")) {
-      Some(p) => ("200 OK", layout(p.title, [ui.tag("p", [ui.text(p.body)])], visit))
+      Some(p) => ("200 OK", layout(p.title, [html.tag("p", [html.text(p.body)])], visit))
       None => missing
     }
     Some((About, _)) => {
       let about = "A blog in Jig: a render engine, a router and net.serve_http."
-      ("200 OK", layout("About", [ui.tag("p", [ui.text(about)])], visit))
+      ("200 OK", layout("About", [html.tag("p", [html.text(about)])], visit))
     }
     None => missing
   }

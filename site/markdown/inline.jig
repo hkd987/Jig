@@ -1,0 +1,145 @@
+import "std/html"
+
+// The text inside a block: code spans, `**strong**`, `*emphasis*`, links and backslash
+// escapes. Everything else is text, which `std/html` escapes when the page is rendered.
+
+/// Where `t` next occurs in `s` at or after `from`.
+fn find_from(s: Str, t: Str, from: Int) -> Option<Int>
+  requires from >= 0 && from <= s.len()
+{
+  return match s[from..s.len()].find(t) {
+    Some(k) => Some(from + k)
+    None => None
+  }
+}
+
+/// How many backticks start at `i`.
+fn ticks(s: Str, i: Int) -> Int
+  requires i >= 0 && i <= s.len()
+  ensures result >= 0 && result <= s.len() - i
+{
+  var n = 0
+  for i + n < s.len() && s[i + n] == 96 invariant n >= 0 && n <= s.len() - i {
+    n += 1
+  }
+  return n
+}
+
+/// Whether byte `b` is ASCII punctuation, which a backslash makes literal.
+fn is_punct(b: U8) -> Bool {
+  return b >= 33 && b <= 47 || b >= 58 && b <= 64 || b >= 91 && b <= 96 || b >= 123 && b <= 126
+}
+
+/// A code span's text: line breaks as spaces, and one space trimmed from each end when both
+/// have one.
+fn code_text(c: Str) -> Str {
+  let t = c.replace("\n", " ")
+  if t.len() >= 2 && t.starts_with(" ") && t.ends_with(" ") && !t.trim().is_empty() {
+    return t[1..t.len() - 1]
+  }
+  return t
+}
+
+/// The inline Markdown in `s` as nodes, link targets passed through `link`.
+fn inline(s: Str, link: fn(Str) -> Str) -> List<html.Node> {
+  var out: List<html.Node> = []
+  var buf = ""
+  var i = 0
+  var start = 0
+  for i < s.len() invariant i >= 0 && start >= 0 && start <= i && i <= s.len() {
+    let b = s[i]
+    if b == 92 && i + 1 < s.len() && is_punct(s[i + 1]) {
+      buf += s[start..i]
+      start = i + 1
+      i += 2
+      continue
+    }
+    if b == 96 {
+      let n = ticks(s, i)
+      let close = find_from(s, "`".repeat(n), i + n)
+      match close {
+        Some(j) if ticks(s, j) == n => {
+          buf += s[start..i]
+          if !buf.is_empty() {
+            out.push(html.text(buf))
+            buf = ""
+          }
+          out.push(html.tag("code", [html.text(code_text(s[i + n..j]))]))
+          i = j + n
+          start = i
+        }
+        _ => i += n
+      }
+      continue
+    }
+    if b == 42 && i + 1 < s.len() && s[i + 1] == 42 {
+      match find_from(s, "**", i + 2) {
+        Some(j) if j > i + 2 => {
+          buf += s[start..i]
+          if !buf.is_empty() {
+            out.push(html.text(buf))
+            buf = ""
+          }
+          out.push(html.tag("strong", inline(s[i + 2..j], link)))
+          i = j + 2
+          start = i
+        }
+        _ => i += 2
+      }
+      continue
+    }
+    if b == 42 && i + 1 < s.len() && s[i + 1] != 32 {
+      match find_from(s, "*", i + 1) {
+        Some(j) if j > i + 1 && s[j - 1] != 32 => {
+          buf += s[start..i]
+          if !buf.is_empty() {
+            out.push(html.text(buf))
+            buf = ""
+          }
+          out.push(html.tag("em", inline(s[i + 1..j], link)))
+          i = j + 1
+          start = i
+        }
+        _ => i += 1
+      }
+      continue
+    }
+    if b == 91 {
+      match find_from(s, "](", i + 1) {
+        Some(j) => match find_from(s, ")", j + 2) {
+          Some(k) if !s[i + 1..j].contains("]") => {
+            buf += s[start..i]
+            if !buf.is_empty() {
+              out.push(html.text(buf))
+              buf = ""
+            }
+            out.push(html.el("a", [("href", link(s[j + 2..k]))], inline(s[i + 1..j], link)))
+            i = k + 1
+            start = i
+          }
+          _ => i += 1
+        }
+        None => i += 1
+      }
+      continue
+    }
+    i += 1
+  }
+  buf += s[start..s.len()]
+  if !buf.is_empty() {
+    out.push(html.text(buf))
+  }
+  return out
+}
+
+/// The text of nodes, without their markup.
+fn plain(nodes: List<html.Node>) -> Str {
+  var out = ""
+  for n in nodes {
+    out += match n {
+      Text(t) => t
+      Element(_, _, children) => plain(children)
+    }
+  }
+  return out
+}

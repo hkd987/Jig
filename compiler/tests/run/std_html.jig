@@ -1,0 +1,27 @@
+import "std/html"
+import "std/io"
+
+// std/html: elements, attributes, void elements, escaping and a whole document.
+
+fn main() effects {io} {
+  let page = html.el(
+    "p",
+    [("class", "lead"), ("title", "a \"quoted\" <title>")],
+    [
+      html.text("1 < 2 & 3 > 2, it's "),
+      html.tag("b", [html.text("bold")]),
+      html.el("br", [], [html.text("dropped")]),
+    ],
+  )
+  io.println(html.render(page))
+  io.println(html.escape("<script>alert('x')</script>"))
+  io.println(html.render(html.text("")) + "|" + html.escape("plain ünïcode") + "|")
+  io.println(html.is_void("img").str() + " " + html.is_void("div").str())
+  io.print(
+    html.document(
+      "Hi & bye",
+      [html.el("link", [("rel", "stylesheet"), ("href", "s.css")], [])],
+      [page],
+    ),
+  )
+}
