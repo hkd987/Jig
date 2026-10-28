@@ -177,7 +177,11 @@ fn analysis_of(dir: Str, std_dir: Str, cwd: Str) -> Analysis effects {fs, env} {
 fn absolute_path(start: Str, cwd: Str) -> Str
   ensures !result.is_empty()
 {
-  let full = if start.starts_with("/") { start } else { join_path(cwd, start) }
+  // On Windows (a working directory with a drive), names may be separated by `\`.
+  let path = slashes(start, has_drive(cwd) || has_drive(start))
+  let full = if is_absolute(path) { path } else { join_path(cwd, path) }
+  // A Windows path keeps its drive, `C:`, as the first name.
+  let drive = has_drive(full)
   var parts: List<Str> = []
   for seg in full.split("/") {
     if seg.is_empty() || seg == "." {
@@ -188,6 +192,9 @@ fn absolute_path(start: Str, cwd: Str) -> Str
       continue
     }
     parts.push(seg)
+  }
+  if drive && !parts.is_empty() {
+    return parts[0] + "/" + parts[1..parts.len()].join("/")
   }
   return "/" + parts.join("/")
 }

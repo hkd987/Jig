@@ -8,6 +8,8 @@ fn jig_ccall_open(lib: Str) -> Bool effects {ffi}
 
 fn jig_ccall_find(name: Str) -> Bool effects {ffi}
 
+fn jig_ccall_order(floats: Int, argc: Int) effects {ffi}
+
 fn jig_ccall_int(
   a: Int,
   b: Int,
@@ -89,7 +91,13 @@ fn Interp.ffi(
   if !self.links_open {
     self.links_open = true
     for l in self.lw.s.links {
-      for file in ["lib" + l + ".so", "lib" + l + ".so.6", "lib" + l + ".dylib"] {
+      for file in [
+        "lib" + l + ".so",
+        "lib" + l + ".so.6",
+        "lib" + l + ".dylib",
+        l + ".dll",
+        "lib" + l + ".dll",
+      ] {
         if jig_ccall_open(file) {
           break
         }
@@ -108,6 +116,8 @@ fn Interp.ffi(
   var floats = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   var ni = 0
   var nf = 0
+  // Which arguments are floats, for Windows, which passes arguments by position.
+  var float_bits = 0
   var copies: List<Int> = []
   // Each `&mut` buffer: where it is in C memory and how long.
   var outs: List<(Int, Int)> = []
@@ -117,6 +127,9 @@ fn Interp.ffi(
       Float(f) => if nf < 8 {
         floats[nf] = f
         nf += 1
+        if k < 14 {
+          float_bits = float_bits | (1 << k)
+        }
       }
       _ => if ni < 6 {
         ints[ni] = match v {
@@ -145,6 +158,7 @@ fn Interp.ffi(
       }
     }
   }
+  jig_ccall_order(float_bits, args.len())
   let (a, b, c, d, e, f) = (ints[0], ints[1], ints[2], ints[3], ints[4], ints[5])
   let fs = floats
   let kind = self.lw.s.tys.kinds[ret]

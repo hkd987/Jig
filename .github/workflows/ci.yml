@@ -78,6 +78,34 @@ jobs:
       - name: The test suites, with jigc as the only compiler
         run: python3 bootstrap/suites.py
 
+  windows:
+    # jigc on Windows (x86-64): the checked-in C builds with MinGW-w64's gcc, jigc reproduces
+    # it there too, and it passes the test suites with nothing but Windows' own shell.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out with the files' own line endings
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-openssl
+      - name: MinGW-w64's gcc and OpenSSL on the path
+        shell: pwsh
+        run: echo "${{ steps.msys2.outputs.msys2-location }}\mingw64\bin" >> $env:GITHUB_PATH
+      - name: Build jig.exe from bootstrap/jigc.c
+        run: gcc -O2 -fno-math-errno -std=gnu11 -w -pthread bootstrap/jigc.c -lm -lws2_32 -static -o jig.exe
+      - name: bootstrap/jigc.c is a fixed point
+        run: ./jig.exe cc selfhost compiler/std > jigc1.c && cmp bootstrap/jigc.c jigc1.c
+      - name: Install the pinned Z3 solver
+        run: pip install -q z3-solver==5.3.2.0
+      - name: The test suites, with jigc as the only compiler
+        run: python bootstrap/suites.py --jigc jig.exe
+
   postgres:
     # examples/postgres against a real database, with the jig that bootstrap/install.sh
     # installs: on the interpreter and built natively.

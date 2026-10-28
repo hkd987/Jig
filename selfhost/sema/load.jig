@@ -69,7 +69,7 @@ fn join_path(a: Str, b: Str) -> Str
 fn parent_dir(d: Str) -> Option<Str>
   ensures result.is_none() || !result.unwrap().is_empty()
 {
-  if d == "/" || d.is_empty() {
+  if d == "/" || d.is_empty() || (d.len() == 3 && has_drive(d) && d[2] == '/') {
     return None
   }
   var i = d.len() - 1
@@ -79,7 +79,8 @@ fn parent_dir(d: Str) -> Option<Str>
   if d[i] != '/' {
     return None
   }
-  return Some(if i == 0 { "/" } else { d[0..i] })
+  // The root: `/`, or a drive's (`C:/`).
+  return Some(if i == 0 { "/" } else if i == 2 && has_drive(d) { d[0..3] } else { d[0..i] })
 }
 
 fn find_project_root(start: Str) -> Option<Str> effects {fs} {
@@ -175,7 +176,7 @@ fn parse_mod(text: Str) -> ModFile {
 fn path_join(a: Str, b: Str) -> Str
   ensures result == b || result.len() >= a.len() + b.len()
 {
-  if b.starts_with("/") || a.is_empty() {
+  if is_absolute(b) || a.is_empty() {
     return b
   }
   return join_path(a, b)
@@ -189,7 +190,7 @@ fn cache_dir() -> Str effects {env} {
     }
     None => {}
   }
-  return path_join(path_join(os.env("HOME").unwrap_or("."), ".jig"), "mod")
+  return path_join(path_join(home_dir(), ".jig"), "mod")
 }
 
 /// A version's parts: numbers, or text where a part is not one.

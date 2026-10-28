@@ -18,7 +18,7 @@ fn traces_dir() -> Str
 {
   return match os.env("JIG_HOME") {
     Some(h) => path_join(h, "traces")
-    None => path_join(os.env("HOME").unwrap_or("."), ".jig/traces")
+    None => path_join(home_dir(), ".jig/traces")
   }
 }
 
@@ -123,7 +123,7 @@ fn traces_cmd(args: List<Str>) -> Output effects {fs, env, ffi} {
     }
   }
   if args.len() == 1 && args[0] == "off" {
-    let _ = system("rm -f " + shell_quote(join_path(d, CONSENT)))
+    remove_file(join_path(d, CONSENT))
     return output("trace collection is off (recorded traces stay in " + d + ")\n", "", 0)
   }
   if args.is_empty() || (args.len() == 1 && args[0] == "status") {

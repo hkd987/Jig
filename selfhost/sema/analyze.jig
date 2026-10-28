@@ -409,12 +409,12 @@ fn prove_cmd(dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> Output
     ] {
       src += "import \"std/" + p + "\"\n"
     }
-    let _ = system("mkdir -p '" + root + "'")
+    make_dirs(root)
     let _ = fs.write(join_path(root, "main.jig"), src + "\nfn main() {\n}\n")
   }
   var (s, _) = analyze(root, std_dir)
   if std {
-    let _ = system("rm -rf '" + root + "'")
+    remove_tree(root)
     // The imports are there to load the packages.
     var kept: List<syntax.Diag> = []
     for d in s.diags {
@@ -468,10 +468,11 @@ fn c_compiler(release: Bool) -> Str effects {env, ffi} {
     }
     None => {}
   }
-  if release && system("clang --version > /dev/null 2>&1") == 0 {
+  if release && sh("clang --version > " + null_device() + " 2>&1") == 0 {
     return "clang"
   }
-  return "cc"
+  // MinGW-w64's compiler is `gcc`; Windows has no `cc`.
+  return if on_windows() { "gcc" } else { "cc" }
 }
 
 /// `jigc build DIR STD [--release] [-o OUT]`: build `main` of the package in DIR into a native
@@ -568,7 +569,7 @@ fn build_sema(s: Sema, dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> Ou
       out = flags[i + 1]
     }
   }
-  let _ = system("mkdir -p '" + build_dir + "'")
+  make_dirs(build_dir)
   let src = join_path(build_dir, name + ".c")
   match fs.write(src, program) {
     Ok(_) => {}
@@ -578,15 +579,21 @@ fn build_sema(s: Sema, dir: Str, std_dir: Str, cwd: Str, flags: List<Str>) -> Ou
   }
   var cmd = c_compiler(release) +
     (if release { " -O2 -fno-math-errno" } else { " -O0 -g -fno-math-errno" }) +
-    " -std=gnu11 -w -pthread '" +
-    src +
-    "'"
+    " -std=gnu11 -w -pthread " +
+    sh_path(src)
   for l in links {
     cmd += " -l" + l
   }
   let log = src + ".log"
-  cmd += " -lm -o '" + out + "' > '" + log + "' 2>&1"
-  if system(cmd) != 0 {
+  // On Windows, sockets are Winsock's, a library of its own, and the program is linked
+  // statically so that it runs without MinGW's libraries.
+  cmd += (if on_windows() { " -lm -lws2_32 -static -o " } else { " -lm -o " }) +
+    sh_path(out) +
+    " > " +
+    sh_path(log) +
+    " 2>&1"
+  out = exe_name(out)
+  if sh(cmd) != 0 {
     let msg = fs.read(log).unwrap_or("")
     return output("", note + "error: C compiler failed:\n" + msg, 1)
   }

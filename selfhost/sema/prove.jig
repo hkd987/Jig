@@ -283,15 +283,22 @@ fn solver_path() -> Str effects {env} {
 
 /// Run the solver on a script; its standard output.
 fn run_solver(script: Str) -> Result<Str, Str> effects {fs, env, ffi, clock} {
-  let dir = os.env("TMPDIR").unwrap_or("/tmp")
-  let stem = join_path(dir, "jigc-prove-" + time.now_ns().str())
+  let stem = join_path(temp_dir(), "jigc-prove-" + time.now_ns().str())
   let input = stem + ".smt2"
   let output = stem + ".out"
   fs.write(input, script)?
-  let cmd = solver_path() + " -smt2 '" + input + "' > '" + output + "' 2>/dev/null"
-  let _ = system(cmd)
+  let _ = sh(
+    sh_word(solver_path()) +
+      " -smt2 " +
+      sh_path(input) +
+      " > " +
+      sh_path(output) +
+      " 2> " +
+      null_device(),
+  )
   let out = fs.read(output)
-  let _ = system("rm -f '" + input + "' '" + output + "'")
+  remove_file(input)
+  remove_file(output)
   return match out {
     Ok(o) => Ok(o)
     Err(_) => Err("cannot run the SMT solver `" + solver_path() + "` (install z3 or set JIG_Z3)")
@@ -568,7 +575,7 @@ fn prove_program(
   reports = replay_failures(g.s, reports, cwd)
   match cache_dir {
     Some(d) => {
-      let _ = system("mkdir -p '" + d + "'")
+      make_dirs(d)
       for (idx, key, base) in todo {
         // Timeouts are not cached: a faster machine (or a longer timeout) may prove them.
         var timeout = false
@@ -595,11 +602,10 @@ const JIG_VERSION: Str = "0.1.0-alpha"
 
 /// The solver's version line, part of every proof cache key.
 fn solver_version() -> Option<Str> effects {fs, env, ffi, clock} {
-  let dir = os.env("TMPDIR").unwrap_or("/tmp")
-  let out = join_path(dir, "jigc-solver-" + time.now_ns().str() + ".txt")
-  let code = system(solver_path() + " --version > '" + out + "' 2>/dev/null")
+  let out = join_path(temp_dir(), "jigc-solver-" + time.now_ns().str() + ".txt")
+  let code = sh(sh_word(solver_path()) + " --version > " + sh_path(out) + " 2> " + null_device())
   let text = fs.read(out)
-  let _ = system("rm -f '" + out + "'")
+  remove_file(out)
   if code != 0 {
     return None
   }

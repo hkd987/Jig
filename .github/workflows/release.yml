@@ -1,9 +1,9 @@
 name: Release
 
 # Pushing a tag such as v0.1.0-alpha publishes a GitHub pre-release with the `jig` binary for
-# Linux x86-64 and macOS on Apple silicon, the agent plugin and the C bootstrap (D28). `jig`
-# is jigc, built from the C bootstrap (D6); the Rust compiler runs only the tests, as the
-# reference.
+# Linux x86-64, macOS on Apple silicon and Windows x86-64, the agent plugin and the C bootstrap
+# (D28). `jig` is jigc, built from the C bootstrap (D6); the Rust compiler runs only the tests,
+# as the reference.
 on:
   push:
     tags: ["v*"]
@@ -50,8 +50,39 @@ jobs:
           name: jig-${{ matrix.target }}
           path: dist/*.tar.gz
 
+  package-windows:
+    needs: test
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out with the files' own line endings
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc
+      - name: MinGW-w64's gcc on the path
+        shell: pwsh
+        run: echo "${{ steps.msys2.outputs.msys2-location }}\mingw64\bin" >> $env:GITHUB_PATH
+      - name: Package
+        run: |
+          name="jig-${GITHUB_REF_NAME}-x86_64-windows"
+          mkdir -p "dist/$name"
+          gcc -O2 -fno-math-errno -std=gnu11 -w -pthread bootstrap/jigc.c -lm -lws2_32 -static -o "dist/$name/jig.exe"
+          cp README.md CHANGELOG.md LICENSE "dist/$name/"
+          cp -r plugin docs "dist/$name/"
+          (cd dist && 7z a -tzip "$name.zip" "$name" > /dev/null)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jig-x86_64-windows
+          path: dist/*.zip
+
   publish:
-    needs: package
+    needs: [package, package-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -73,4 +104,4 @@ jobs:
           # The notes are the changelog's first section.
           awk '/^## /{n++} n==1' CHANGELOG.md > dist/notes.md
           gh release create "$GITHUB_REF_NAME" --prerelease --title "Jig $GITHUB_REF_NAME" \
-            --notes-file dist/notes.md dist/*.tar.gz dist/*.vsix dist/jigc.c
+            --notes-file dist/notes.md dist/*.tar.gz dist/*.zip dist/*.vsix dist/jigc.c

@@ -1,0 +1,100 @@
+// The system jigc runs on: POSIX, or Windows, which always sets `OS` to `Windows_NT`. jigc
+// runs the C compiler, the SMT solver and git through the system's shell: `sh` on POSIX,
+// `cmd.exe` on Windows. Paths are kept with `/` between names on both; a Windows path starts
+// with its drive (`C:/Users/me`), and is written with `\` only where `cmd.exe` reads it.
+
+import "std/os"
+
+fn on_windows() -> Bool effects {env} {
+  return os.env("OS") == Some("Windows_NT")
+}
+
+/// Does `p` start with a drive, as `C:` does?
+fn has_drive(p: Str) -> Bool
+  ensures !result || p.len() >= 2
+{
+  if p.len() < 2 || p[1] != ':' {
+    return false
+  }
+  let c = p[0]
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+fn is_absolute(p: Str) -> Bool {
+  return p.starts_with("/") || has_drive(p)
+}
+
+/// `p` with `/` between names, from a Windows path that may use `\` (only for paths that are
+/// Windows ones: on POSIX, `\` is a character in a name).
+fn slashes(p: Str, windows: Bool) -> Str {
+  return if windows { p.replace("\\", "/") } else { p }
+}
+
+/// Run a shell command; its exit status, or a negative number if it could not run.
+fn sh(cmd: Str) -> Int effects {env, ffi} {
+  if on_windows() {
+    // cmd.exe drops the first and the last quote of a command that starts with one.
+    return system("\"" + cmd + "\"") as Int
+  }
+  let status = system(cmd) as Int
+  if status < 0 {
+    return status
+  }
+  // Exited: its code; killed by a signal: 101.
+  return if status % 128 == 0 { status / 256 % 256 } else { 101 }
+}
+
+/// `s` as one word of a shell command.
+fn sh_word(s: Str) -> Str effects {env} {
+  // Windows names cannot hold `"`.
+  return if on_windows() { "\"" + s + "\"" } else { shell_quote(s) }
+}
+
+/// A path as one word of a shell command, with `\` between names on Windows.
+fn sh_path(p: Str) -> Str effects {env} {
+  return if on_windows() { "\"" + p.replace("/", "\\") + "\"" } else { shell_quote(p) }
+}
+
+/// Where a command's output goes to be thrown away.
+fn null_device() -> Str effects {env} {
+  return if on_windows() { "NUL" } else { "/dev/null" }
+}
+
+/// Create a directory and its missing parents.
+fn make_dirs(d: Str) effects {env, ffi} {
+  let w = sh_path(d)
+  let _ = sh(if on_windows() { "if not exist " + w + " mkdir " + w } else { "mkdir -p " + w })
+}
+
+fn remove_file(p: Str) effects {env, ffi} {
+  let w = sh_path(p)
+  let _ = sh(if on_windows() { "if exist " + w + " del /f /q " + w } else { "rm -f " + w })
+}
+
+/// Remove a directory and everything in it.
+fn remove_tree(p: Str) effects {env, ffi} {
+  let w = sh_path(p)
+  let _ = sh(if on_windows() { "if exist " + w + " rmdir /s /q " + w } else { "rm -rf " + w })
+}
+
+/// Where temporary files go.
+fn temp_dir() -> Str effects {env} {
+  if on_windows() {
+    return slashes(os.env("TEMP").unwrap_or(os.env("TMP").unwrap_or(".")), true)
+  }
+  return os.env("TMPDIR").unwrap_or("/tmp")
+}
+
+/// The user's home directory.
+fn home_dir() -> Str effects {env} {
+  let windows = on_windows()
+  return match os.env("HOME") {
+    Some(h) => slashes(h, windows)
+    None => if windows { slashes(os.env("USERPROFILE").unwrap_or("."), true) } else { "." }
+  }
+}
+
+/// What a native executable built as `out` is called: Windows' C compilers add `.exe`.
+fn exe_name(out: Str) -> Str effects {env} {
+  return if on_windows() && !out.ends_with(".exe") { out + ".exe" } else { out }
+}

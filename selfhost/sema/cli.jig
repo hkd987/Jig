@@ -228,16 +228,15 @@ fn run_cmd(o: Opts, std_dir: Str, cwd: Str, args: List<Str>) -> Output
       io.eprintln(b.err[0..b.err.len() - 1])
     }
     let exe = b.out.trim()
-    var cmd = shell_quote(exe)
+    var cmd = sh_path(exe)
     for a in args {
-      cmd += " " + shell_quote(a)
+      cmd += " " + sh_word(a)
     }
-    let status = system(cmd) as Int
+    let status = sh(cmd)
     if status < 0 {
       return output("", "error: cannot run " + exe + "\n", 1)
     }
-    // Exited: its code; killed by a signal: 101.
-    return output("", "", if status % 128 == 0 { status / 256 % 256 } else { 101 })
+    return output("", "", status)
   }
   var argv = [o.path]
   argv.extend(args)

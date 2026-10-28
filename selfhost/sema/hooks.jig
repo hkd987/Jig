@@ -36,7 +36,7 @@ fn post_edit(input: Json, std_dir: Str, cwd: Str) -> Output effects {fs, env, ff
   if !file.ends_with(".jig") && !file.ends_with(".feature") {
     return output("", "", 0)
   }
-  let path = if file.starts_with("/") { file } else { join_path(hook_cwd(input, cwd), file) }
+  let path = if is_absolute(file) { file } else { join_path(hook_cwd(input, cwd), file) }
   let errors = check_project(path, std_dir, cwd)
   let tdir = traces_dir()
   if traces_enabled(tdir) {

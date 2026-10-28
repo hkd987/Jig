@@ -34,16 +34,17 @@ fn create_dir_all(path: Str) -> Result<(), Str> effects {fs, ffi} {
 fn git(args: List<Str>, dir: Str) -> Result<Str, Str> effects {fs, env, ffi, clock} {
   var cmd = "git"
   if !dir.is_empty() {
-    cmd += " -C " + shell_quote(dir)
+    cmd += " -C " + sh_path(dir)
   }
   for a in args {
-    cmd += " " + shell_quote(a)
+    cmd += " " + sh_word(a)
   }
-  let tmp = join_path(os.env("TMPDIR").unwrap_or("/tmp"), "jigc-git-" + time.now_ns().str())
-  let status = system(cmd + " > " + shell_quote(tmp + ".out") + " 2> " + shell_quote(tmp + ".err"))
+  let tmp = join_path(temp_dir(), "jigc-git-" + time.now_ns().str())
+  let status = sh(cmd + " > " + sh_path(tmp + ".out") + " 2> " + sh_path(tmp + ".err"))
   let out = fs.read(tmp + ".out").unwrap_or("").trim()
   let err = fs.read(tmp + ".err").unwrap_or("").trim()
-  let _ = system("rm -f " + shell_quote(tmp + ".out") + " " + shell_quote(tmp + ".err"))
+  remove_file(tmp + ".out")
+  remove_file(tmp + ".err")
   if status != 0 {
     return Err("git " + args.join(" ") + " failed: " + err)
   }
@@ -105,7 +106,7 @@ fn get_modules(root: Str) -> Result<Str, Str> effects {fs, env, ffi, clock} {
       }
       let name = m.dir[parent.len() + 1..m.dir.len()]
       let tmp = join_path(parent, ".tmp-" + (getpid() as Int).str() + "-" + name)
-      let _ = system("rm -rf " + shell_quote(tmp))
+      remove_tree(tmp)
       let _ = git(
         ["clone", "--quiet", "--depth", "1", "--branch", m.version, base + m.path, tmp],
         "",

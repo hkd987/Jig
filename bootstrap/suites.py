@@ -34,11 +34,15 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TESTS = os.path.join(ROOT, "compiler", "tests")
 
 
+WINDOWS = os.name == "nt"
+
+
 def build_jigc(out):
-    cc = os.environ.get("CC", "cc")
+    cc = os.environ.get("CC", "gcc" if WINDOWS else "cc")
     src = os.path.join(ROOT, "bootstrap", "jigc.c")
-    subprocess.run([cc, "-O2", "-fno-math-errno", "-std=gnu11", "-w", "-pthread", src, "-lm", "-o", out], check=True)
-    return out
+    libs = ["-lm", "-lws2_32", "-static"] if WINDOWS else ["-lm"]
+    subprocess.run([cc, "-O2", "-fno-math-errno", "-std=gnu11", "-w", "-pthread", src] + libs + ["-o", out], check=True)
+    return out + ".exe" if WINDOWS else out
 
 
 class Runner:
@@ -119,13 +123,13 @@ def suite_ui(r):
                 for f in sorted(files):
                     if f.endswith((".jig", ".feature")):
                         p = os.path.join(dirpath, f)
-                        rel = os.path.relpath(p, case)
+                        rel = os.path.relpath(p, case).replace(os.sep, "/")
                         for line, code in expected_in(open(p, encoding="utf-8").read()):
                             expected[(rel, line, code)] = expected.get((rel, line, code), 0) + 1
             start = "app" if os.path.isdir(os.path.join(case, "app")) else "."
         elif name.endswith(".jig"):
             src = open(path, encoding="utf-8").read()
-            with open(os.path.join(case, "main.jig"), "w", encoding="utf-8") as f:
+            with open(os.path.join(case, "main.jig"), "w", encoding="utf-8", newline="") as f:
                 f.write(src)
             for line, code in expected_in(src):
                 expected[("main.jig", line, code)] = expected.get(("main.jig", line, code), 0) + 1
@@ -291,7 +295,7 @@ def suite_docs(r):
                 body += line + "\n"
         body += "\n"
     d = r.scratch("cookbook")
-    with open(os.path.join(d, "main.jig"), "w", encoding="utf-8") as f:
+    with open(os.path.join(d, "main.jig"), "w", encoding="utf-8", newline="") as f:
         f.write("\n".join(sorted(imports)) + "\n\n" + body)
     _, out, _ = r.run(["test", "--json", "."], cwd=d)
     # Snippets are fragments, so dead code is expected; nothing else is.
@@ -333,7 +337,7 @@ def git(d, *args):
 
 def write(path, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, "w", encoding="utf-8", newline="") as f:
         f.write(text)
 
 
@@ -342,7 +346,9 @@ def suite_modules(r):
         print("modules: skipped (no git)")
         return []
     w = r.scratch("modules")
-    env = {"JIG_HOME": os.path.join(w, "home"), "JIG_GIT_BASE": "file://%s/remotes/" % w}
+    # A file URL names a Windows path as file:///C:/...
+    base = ("file:///" if WINDOWS else "file://") + w.replace(os.sep, "/") + "/remotes/"
+    env = {"JIG_HOME": os.path.join(w, "home"), "JIG_GIT_BASE": base}
     lib = os.path.join(w, "remotes/example.com/greetlib")
     write(os.path.join(lib, "jig.mod"), "module example.com/greetlib\n")
     write(os.path.join(lib, "greet/greet.jig"),

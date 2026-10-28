@@ -4,9 +4,21 @@
 #endif
 #include "jig_rt.h"
 
-#include <dirent.h>
+#ifdef _WIN32
+/* Windows, through MinGW-w64: winpthreads gives pthreads, clock_gettime and nanosleep, the
+   C library gives dirent and stat, and sockets are Winsock's (link with -lws2_32). */
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <direct.h>
+#include <fcntl.h>
+#include <io.h>
+#else
 #include <netdb.h>
 #include <sys/socket.h>
+#endif
+#include <dirent.h>
 #include <pthread.h>
 #include <errno.h>
 #include <math.h>
@@ -16,6 +28,93 @@
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+
+/* ---------- platform ----------
+   What differs between POSIX and Windows: sockets (a handle type, how they close, time out
+   and report errors), the processor count, reading a line, searching memory, waiting
+   forever, and opening libraries. */
+
+static void jig_oom(void) __attribute__((noreturn, cold));
+
+#ifdef _WIN32
+typedef SOCKET jig_sock;
+#define BAD_SOCK INVALID_SOCKET
+#define sock_close(s) closesocket(s)
+#define SHUT_WR SD_SEND
+#define MSG_NOSIGNAL 0
+
+/* The last socket call's error, worded by the system (without its final period). */
+static const char *sock_error(void) {
+    static __thread char buf[256];
+    DWORD n = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL,
+                             (DWORD)WSAGetLastError(), 0, buf, sizeof buf, NULL);
+    while (n > 0 && (buf[n - 1] == '\r' || buf[n - 1] == '\n' || buf[n - 1] == ' ' || buf[n - 1] == '.')) n--;
+    buf[n] = 0;
+    return n ? buf : "socket error";
+}
+static bool sock_interrupted(void) { return WSAGetLastError() == WSAEINTR; }
+static bool sock_timed_out(void) { return WSAGetLastError() == WSAETIMEDOUT; }
+static void sock_timeouts(jig_sock s, int secs) {
+    DWORD ms = (DWORD)secs * 1000;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&ms, sizeof ms);
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&ms, sizeof ms);
+}
+static long cpu_count(void) {
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return (long)si.dwNumberOfProcessors;
+}
+/* POSIX getline: a line with its '\n', in *line (grown as needed); -1 at the end of input. */
+static ssize_t read_line(char **line, size_t *cap, FILE *f) {
+    size_t n = 0;
+    int c;
+    while ((c = fgetc(f)) != EOF) {
+        if (n + 2 > *cap) {
+            size_t m = *cap ? 2 * *cap : 128;
+            char *p = realloc(*line, m);
+            if (!p) jig_oom();
+            *line = p;
+            *cap = m;
+        }
+        (*line)[n++] = (char)c;
+        if (c == '\n') break;
+    }
+    if (n == 0) return -1;
+    (*line)[n] = 0;
+    return (ssize_t)n;
+}
+static void *memmem(const void *hay, size_t n, const void *needle, size_t m) {
+    const char *h = hay, *k = needle;
+    if (m == 0) return (void *)h;
+    for (size_t i = 0; m <= n && i <= n - m; i++)
+        if (h[i] == k[0] && memcmp(h + i, k, m) == 0) return (void *)(h + i);
+    return NULL;
+}
+#define pause() Sleep(INFINITE)
+static void *lib_open(const char *name) { return (void *)LoadLibraryA(name); }
+static void *lib_sym(void *h, const char *name) { return (void *)GetProcAddress((HMODULE)h, name); }
+#else
+typedef int jig_sock;
+#define BAD_SOCK (-1)
+#define sock_close(s) close(s)
+static const char *sock_error(void) { return strerror(errno); }
+static bool sock_interrupted(void) { return errno == EINTR; }
+static bool sock_timed_out(void) { return errno == EAGAIN || errno == EWOULDBLOCK; }
+static void sock_timeouts(jig_sock s, int secs) {
+    struct timeval tv = {secs, 0};
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+}
+static long cpu_count(void) { return sysconf(_SC_NPROCESSORS_ONLN); }
+#define read_line getline
+/* `dlsym` and `dlopen` are weak references, so a program that never opens a library needs no
+   extra one (where they are missing, nothing is found). */
+#include <dlfcn.h>
+#pragma weak dlsym
+#pragma weak dlopen
+static void *lib_open(const char *name) { return dlopen ? dlopen(name, RTLD_NOW | RTLD_GLOBAL) : NULL; }
+static void *lib_sym(void *h, const char *name) { return dlsym ? dlsym(h, name) : NULL; }
+#endif
 
 /* ---------- process ---------- */
 
@@ -49,6 +148,26 @@ static void flush_out(void) {
 void jig_init(int argc, char **argv) {
     g_argc = argc;
     g_argv = argv;
+#ifdef _WIN32
+    /* Bytes in and out as they are, with no '\r' added or taken away. */
+    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+    _setmode(_fileno(stderr), _O_BINARY);
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+    /* The working directory as POSIX shells give it, in PWD, with '/' between names: from
+       PWD when it starts with a drive, else (unset, or an MSYS shell's `/c/...`, which other
+       Windows programs cannot open) from the system. */
+    char cwd[4096];
+    const char *pwd = getenv("PWD");
+    bool drive = pwd && ((pwd[0] | 32) >= 'a' && (pwd[0] | 32) <= 'z') && pwd[1] == ':';
+    if (drive ? strlen(pwd) < sizeof cwd : _getcwd(cwd, sizeof cwd) != NULL) {
+        if (drive) strcpy(cwd, pwd);
+        for (char *p = cwd; *p; p++)
+            if (*p == '\\') *p = '/';
+        _putenv_s("PWD", cwd);
+    }
+#endif
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     g_rng = ((uint64_t)ts.tv_nsec * 0x9e3779b97f4a7c15ull) ^ ((uint64_t)getpid() << 32) ^ (uint64_t)ts.tv_sec;
@@ -298,7 +417,7 @@ static void *batch_worker(void *arg) {
 
 static int worker_count(void) {
     const char *e = getenv("JIG_THREADS");
-    long n = e ? atol(e) : sysconf(_SC_NPROCESSORS_ONLN);
+    long n = e ? atol(e) : cpu_count();
     return n > 1 ? (int)(n - 1) : 0;
 }
 
@@ -1672,7 +1791,7 @@ jig_str *jig_read_line(bool *ok) {
     flush_out();
     char *line = NULL;
     size_t cap = 0;
-    ssize_t n = getline(&line, &cap, stdin);
+    ssize_t n = read_line(&line, &cap, stdin);
     if (n < 0) {
         free(line);
         *ok = false;
@@ -1867,21 +1986,22 @@ static struct addrinfo *net_resolve(const jig_str *addr, bool listen, const char
     return res;
 }
 
-#ifndef MSG_NOSIGNAL
+#if !defined(MSG_NOSIGNAL)
 /* Without MSG_NOSIGNAL (macOS), writing to a peer that has gone must fail, not end the
    program with SIGPIPE: ignore the signal instead. */
 #include <signal.h>
 #define MSG_NOSIGNAL 0
 #define JIG_NO_SIGPIPE() signal(SIGPIPE, SIG_IGN)
 #else
+/* Linux, and Windows, which has no SIGPIPE. */
 #define JIG_NO_SIGPIPE() ((void)0)
 #endif
 
-static bool net_send_all(int fd, const char *p, size_t n) {
+static bool net_send_all(jig_sock fd, const char *p, size_t n) {
     JIG_NO_SIGPIPE();
     while (n) {
-        ssize_t k = send(fd, p, n, MSG_NOSIGNAL);
-        if (k < 0 && errno == EINTR) continue;
+        ssize_t k = send(fd, p, n > (1u << 30) ? (1u << 30) : (int)n, MSG_NOSIGNAL);
+        if (k < 0 && sock_interrupted()) continue;
         if (k <= 0) return false;
         p += k;
         n -= (size_t)k;
@@ -1889,12 +2009,12 @@ static bool net_send_all(int fd, const char *p, size_t n) {
     return true;
 }
 
-static jig_str *net_read_all(int fd) {
+static jig_str *net_read_all(jig_sock fd) {
     jig_buf b = {0};
     char tmp[1 << 14];
     for (;;) {
         ssize_t k = recv(fd, tmp, sizeof tmp, 0);
-        if (k < 0 && errno == EINTR) continue;
+        if (k < 0 && sock_interrupted()) continue;
         if (k <= 0) break;
         jig_buf_push(&b, tmp, (int64_t)k);
     }
@@ -1906,23 +2026,24 @@ jig_str *jig_net_request(const jig_str *addr, const jig_str *req, bool *ok) {
     struct addrinfo *res = net_resolve(addr, false, &err);
     *ok = false;
     if (!res) return net_err(addr, err);
-    int fd = -1;
+    jig_sock fd = BAD_SOCK;
     for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
         fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) continue;
+        if (fd == BAD_SOCK) continue;
         if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
-        close(fd);
-        fd = -1;
+        sock_close(fd);
+        fd = BAD_SOCK;
     }
     freeaddrinfo(res);
-    if (fd < 0) return net_err(addr, strerror(errno));
+    if (fd == BAD_SOCK) return net_err(addr, sock_error());
     if (!net_send_all(fd, jig_str_data(req), (size_t)jig_str_len(req))) {
-        close(fd);
-        return net_err(addr, strerror(errno));
+        jig_str *e = net_err(addr, sock_error());
+        sock_close(fd);
+        return e;
     }
     shutdown(fd, SHUT_WR);
     jig_str *reply = net_read_all(fd);
-    close(fd);
+    sock_close(fd);
     *ok = true;
     return reply;
 }
@@ -2001,7 +2122,7 @@ static const char *http_refusal(int status) {
 }
 
 /* A connection's HTTP request: read until it is complete, refused or the client stops. */
-static jig_str *net_read_http(int fd, int *refuse) {
+static jig_str *net_read_http(jig_sock fd, int *refuse) {
     jig_buf b = {0};
     char tmp[1 << 14];
     *refuse = 0;
@@ -2013,11 +2134,26 @@ static jig_str *net_read_http(int fd, int *refuse) {
             break;
         }
         ssize_t k = recv(fd, tmp, sizeof tmp, 0);
-        if (k < 0 && errno == EINTR) continue;
+        if (k < 0 && sock_interrupted()) continue;
         if (k <= 0) break;
         jig_buf_push(&b, tmp, (int64_t)k);
     }
     return jig_buf_to_str(&b);
+}
+
+/* A socket listening at `res` (freed), or BAD_SOCK with the reason in *e. */
+static jig_sock net_listen(const jig_str *addr, struct addrinfo *res, int backlog, jig_str **e) {
+    jig_sock fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    int one = 1;
+    if (fd != BAD_SOCK) setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof one);
+    if (fd == BAD_SOCK || bind(fd, res->ai_addr, res->ai_addrlen) != 0 || listen(fd, backlog) != 0) {
+        *e = net_err(addr, sock_error());
+        if (fd != BAD_SOCK) sock_close(fd);
+        freeaddrinfo(res);
+        return BAD_SOCK;
+    }
+    freeaddrinfo(res);
+    return fd;
 }
 
 static jig_str *net_serve_loop(const jig_str *addr, void *state, jig_fn *f, jig_serve_call call, int64_t limit,
@@ -2027,27 +2163,20 @@ static jig_str *net_serve_loop(const jig_str *addr, void *state, jig_fn *f, jig_
     struct addrinfo *res = net_resolve(addr, true, &err);
     *ok = false;
     if (!res) return net_err(addr, err);
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    int one = 1;
-    if (fd >= 0) setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    if (fd < 0 || bind(fd, res->ai_addr, res->ai_addrlen) != 0 || listen(fd, 64) != 0) {
-        jig_str *e = net_err(addr, strerror(errno));
-        if (fd >= 0) close(fd);
-        freeaddrinfo(res);
-        return e;
-    }
-    freeaddrinfo(res);
+    jig_str *e = NULL;
+    jig_sock fd = net_listen(addr, res, 64, &e);
+    if (fd == BAD_SOCK) return e;
     for (int64_t served = 0; limit == 0 || served < limit; served++) {
         /* What the program printed shows before the server waits. */
         flush_out();
-        int c = accept(fd, NULL, NULL);
-        if (c < 0) {
-            if (errno == EINTR) {
+        jig_sock c = accept(fd, NULL, NULL);
+        if (c == BAD_SOCK) {
+            if (sock_interrupted()) {
                 served--;
                 continue;
             }
-            jig_str *e = net_err(addr, strerror(errno));
-            close(fd);
+            e = net_err(addr, sock_error());
+            sock_close(fd);
             return e;
         }
         int refuse = 0;
@@ -2060,10 +2189,10 @@ static jig_str *net_serve_loop(const jig_str *addr, void *state, jig_fn *f, jig_
             net_send_all(c, jig_str_data(reply), (size_t)jig_str_len(reply));
             jig_str_release(reply);
         }
-        close(c);
+        sock_close(c);
         jig_str_release(req);
     }
-    close(fd);
+    sock_close(fd);
     *ok = true;
     return NULL;
 }
@@ -2084,7 +2213,7 @@ jig_str *jig_net_serve_http(const jig_str *addr, void *state, jig_fn *f, jig_ser
 typedef struct {
     pthread_mutex_t mu;
     pthread_cond_t ready;
-    int *fds;
+    jig_sock *fds;
     int64_t head, len, cap;
     bool done;
     jig_fn *f;
@@ -2100,11 +2229,9 @@ static void *serve_worker(void *arg) {
             pthread_mutex_unlock(&q->mu);
             return NULL;
         }
-        int c = q->fds[q->head++];
+        jig_sock c = q->fds[q->head++];
         pthread_mutex_unlock(&q->mu);
-        struct timeval tv = {NET_TIMEOUT, 0};
-        setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-        setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+        sock_timeouts(c, NET_TIMEOUT);
         int refuse = 0;
         jig_str *req = net_read_http(c, &refuse);
         if (refuse) {
@@ -2115,14 +2242,14 @@ static void *serve_worker(void *arg) {
             net_send_all(c, jig_str_data(reply), (size_t)jig_str_len(reply));
             jig_str_release(reply);
         }
-        close(c);
+        sock_close(c);
         jig_str_release(req);
     }
 }
 
 static int serve_workers(void) {
     const char *e = getenv("JIG_THREADS");
-    long n = e ? atol(e) : 2 * sysconf(_SC_NPROCESSORS_ONLN);
+    long n = e ? atol(e) : 2 * cpu_count();
     return n < 1 ? 1 : n > 256 ? 256 : (int)n;
 }
 
@@ -2134,16 +2261,9 @@ jig_str *jig_net_serve_parallel(const jig_str *addr, jig_fn *f, jig_handle_call 
     *ok = false;
     *served = 0;
     if (!res) return net_err(addr, err);
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    int one = 1;
-    if (fd >= 0) setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    if (fd < 0 || bind(fd, res->ai_addr, res->ai_addrlen) != 0 || listen(fd, 128) != 0) {
-        jig_str *e = net_err(addr, strerror(errno));
-        if (fd >= 0) close(fd);
-        freeaddrinfo(res);
-        return e;
-    }
-    freeaddrinfo(res);
+    jig_str *e = NULL;
+    jig_sock fd = net_listen(addr, res, 128, &e);
+    if (fd == BAD_SOCK) return e;
     pthread_mutex_lock(&g_shared_mu);
     g_threaded = true;
     pthread_mutex_unlock(&g_shared_mu);
@@ -2157,15 +2277,14 @@ jig_str *jig_net_serve_parallel(const jig_str *addr, jig_fn *f, jig_handle_call 
     int started = 0;
     while (started < n && pthread_create(&ts[started], &attr, serve_worker, &q) == 0) started++;
     pthread_attr_destroy(&attr);
-    jig_str *e = NULL;
     for (int64_t accepted = 0; started > 0 && (limit == 0 || accepted < limit);) {
         SHARED_LOCK();
         flush_out();
         SHARED_UNLOCK();
-        int c = accept(fd, NULL, NULL);
-        if (c < 0) {
-            if (errno == EINTR) continue;
-            e = net_err(addr, strerror(errno));
+        jig_sock c = accept(fd, NULL, NULL);
+        if (c == BAD_SOCK) {
+            if (sock_interrupted()) continue;
+            e = net_err(addr, sock_error());
             break;
         }
         pthread_mutex_lock(&q.mu);
@@ -2194,7 +2313,7 @@ jig_str *jig_net_serve_parallel(const jig_str *addr, jig_fn *f, jig_handle_call 
     for (int i = 0; i < started; i++) pthread_join(ts[i], NULL);
     free(ts);
     free(q.fds);
-    close(fd);
+    sock_close(fd);
     if (e) return e;
     *ok = true;
     return NULL;
@@ -2230,23 +2349,110 @@ double jig_rand_float(void) { return (double)(next_rand() >> 11) / (double)(1ull
    and those of the libraries opened here, then called through one signature that fills every
    argument register (six integer, eight floating point). That is how the x86-64 System V and
    AArch64 conventions pass arguments to a non-variadic C function, whatever its parameters;
-   the checker limits C functions to what fits. `dlsym` and `dlopen` are weak references, so
-   a program that never does this needs no extra library (where they are missing, nothing is
-   found). */
-
-#include <dlfcn.h>
-#pragma weak dlsym
-#pragma weak dlopen
+   the checker limits C functions to what fits. */
 
 static void *g_ccall_fn;
 
-bool jig_ccall_open(const char *lib) { return dlopen && dlopen(lib, RTLD_NOW | RTLD_GLOBAL) != NULL; }
+#ifdef _WIN32
+/* Windows has no global symbol table: a name is looked up in the program, the libraries
+   opened here, then the C runtime's and the system's. */
+static void *g_ccall_libs[64];
+static int g_ccall_nlibs;
 
-bool jig_ccall_find(const char *name) {
-    g_ccall_fn = dlsym ? dlsym(RTLD_DEFAULT, name) : NULL;
-    return g_ccall_fn != NULL;
+bool jig_ccall_open(const char *lib) {
+    void *h = lib_open(lib);
+    if (h && g_ccall_nlibs < 64) g_ccall_libs[g_ccall_nlibs++] = h;
+    return h != NULL;
 }
 
+bool jig_ccall_find(const char *name) {
+    static const char *const system_libs[] = {"ucrtbase.dll", "msvcrt.dll", "kernel32.dll", "ws2_32.dll"};
+    g_ccall_fn = lib_sym(GetModuleHandleA(NULL), name);
+    for (int i = 0; !g_ccall_fn && i < g_ccall_nlibs; i++) g_ccall_fn = lib_sym(g_ccall_libs[i], name);
+    for (size_t i = 0; !g_ccall_fn && i < sizeof system_libs / sizeof *system_libs; i++) {
+        HMODULE h = GetModuleHandleA(system_libs[i]);
+        if (h) g_ccall_fn = lib_sym(h, name);
+    }
+    return g_ccall_fn != NULL;
+}
+#else
+bool jig_ccall_open(const char *lib) { return lib_open(lib) != NULL; }
+
+bool jig_ccall_find(const char *name) {
+    g_ccall_fn = lib_sym(RTLD_DEFAULT, name);
+    return g_ccall_fn != NULL;
+}
+#endif
+
+/* The next call's arguments in order: bit k of `floats` is set when argument k is a float.
+   System V and AArch64 need no order (integers and floats have registers of their own);
+   Windows x64 passes argument k in register k of its kind, then on the stack. */
+static int64_t g_ccall_floats, g_ccall_argc;
+void jig_ccall_order(int64_t floats, int64_t argc) {
+    g_ccall_floats = floats;
+    g_ccall_argc = argc;
+}
+
+#ifdef _WIN32
+typedef union {
+    int64_t i;
+    double f;
+} ccall_slot;
+
+/* Calls g_ccall_fn with the arguments in their places: the first four typed as they are,
+   the rest as their 64 bits, which is all a stack slot holds. */
+#define CCALL_REST int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t
+#define CCALL_RESTV s[4].i, s[5].i, s[6].i, s[7].i, s[8].i, s[9].i, s[10].i, s[11].i, s[12].i, s[13].i
+#define CCALL(R, A, B, C, D, a, b, c, d) return ((R(*)(A, B, C, D, CCALL_REST))g_ccall_fn)(a, b, c, d, CCALL_RESTV)
+#define CCALL4(R)                                                                                                \
+    switch (m & 15) {                                                                                            \
+    case 0: CCALL(R, int64_t, int64_t, int64_t, int64_t, s[0].i, s[1].i, s[2].i, s[3].i);                       \
+    case 1: CCALL(R, double, int64_t, int64_t, int64_t, s[0].f, s[1].i, s[2].i, s[3].i);                        \
+    case 2: CCALL(R, int64_t, double, int64_t, int64_t, s[0].i, s[1].f, s[2].i, s[3].i);                        \
+    case 3: CCALL(R, double, double, int64_t, int64_t, s[0].f, s[1].f, s[2].i, s[3].i);                         \
+    case 4: CCALL(R, int64_t, int64_t, double, int64_t, s[0].i, s[1].i, s[2].f, s[3].i);                        \
+    case 5: CCALL(R, double, int64_t, double, int64_t, s[0].f, s[1].i, s[2].f, s[3].i);                         \
+    case 6: CCALL(R, int64_t, double, double, int64_t, s[0].i, s[1].f, s[2].f, s[3].i);                         \
+    case 7: CCALL(R, double, double, double, int64_t, s[0].f, s[1].f, s[2].f, s[3].i);                          \
+    case 8: CCALL(R, int64_t, int64_t, int64_t, double, s[0].i, s[1].i, s[2].i, s[3].f);                        \
+    case 9: CCALL(R, double, int64_t, int64_t, double, s[0].f, s[1].i, s[2].i, s[3].f);                         \
+    case 10: CCALL(R, int64_t, double, int64_t, double, s[0].i, s[1].f, s[2].i, s[3].f);                        \
+    case 11: CCALL(R, double, double, int64_t, double, s[0].f, s[1].f, s[2].i, s[3].f);                         \
+    case 12: CCALL(R, int64_t, int64_t, double, double, s[0].i, s[1].i, s[2].f, s[3].f);                        \
+    case 13: CCALL(R, double, int64_t, double, double, s[0].f, s[1].i, s[2].f, s[3].f);                         \
+    case 14: CCALL(R, int64_t, double, double, double, s[0].i, s[1].f, s[2].f, s[3].f);                         \
+    default: CCALL(R, double, double, double, double, s[0].f, s[1].f, s[2].f, s[3].f);                          \
+    }
+
+/* The arguments in their places: integers and floats, each in its own order, merged. */
+static unsigned ccall_slots(ccall_slot *s, const int64_t *ints, const double *floats) {
+    int ni = 0, nf = 0;
+    for (int k = 0; k < 14; k++) {
+        bool f = k < g_ccall_argc && ((g_ccall_floats >> k) & 1);
+        if (f) s[k].f = nf < 8 ? floats[nf++] : 0.0;
+        else s[k].i = ni < 6 && k < g_ccall_argc ? ints[ni++] : 0;
+    }
+    return (unsigned)g_ccall_floats;
+}
+
+int64_t jig_ccall_int(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, double x0, double x1,
+                      double x2, double x3, double x4, double x5, double x6, double x7) {
+    const int64_t ints[6] = {a, b, c, d, e, f};
+    const double floats[8] = {x0, x1, x2, x3, x4, x5, x6, x7};
+    ccall_slot s[14];
+    unsigned m = ccall_slots(s, ints, floats);
+    CCALL4(int64_t)
+}
+
+double jig_ccall_float(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, double x0, double x1,
+                       double x2, double x3, double x4, double x5, double x6, double x7) {
+    const int64_t ints[6] = {a, b, c, d, e, f};
+    const double floats[8] = {x0, x1, x2, x3, x4, x5, x6, x7};
+    ccall_slot s[14];
+    unsigned m = ccall_slots(s, ints, floats);
+    CCALL4(double)
+}
+#else
 typedef int64_t (*jig_ccall_int_fn)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, double, double, double,
                                     double, double, double, double, double);
 typedef double (*jig_ccall_float_fn)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, double, double, double,
@@ -2261,6 +2467,7 @@ double jig_ccall_float(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, in
                        double x2, double x3, double x4, double x5, double x6, double x7) {
     return ((jig_ccall_float_fn)g_ccall_fn)(a, b, c, d, e, f, x0, x1, x2, x3, x4, x5, x6, x7);
 }
+#endif
 
 /* A C string's copy, as an address to pass in an integer register; freed after the call. */
 int64_t jig_ccall_strdup(const char *s) { return (int64_t)(intptr_t)strdup(s); }
@@ -2287,32 +2494,30 @@ int64_t jig_ccall_listen(const char *addr) {
     jig_str *a = jig_str_new(addr, (int64_t)strlen(addr));
     const char *err = NULL;
     struct addrinfo *res = net_resolve(a, true, &err);
-    jig_str_release(a);
     if (!res) {
+        jig_str_release(a);
         snprintf(g_ccall_net_err, sizeof g_ccall_net_err, "%s: %s", addr, err);
         return -1;
     }
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    int one = 1;
-    if (fd >= 0) setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    if (fd < 0 || bind(fd, res->ai_addr, res->ai_addrlen) != 0 || listen(fd, 64) != 0) {
-        snprintf(g_ccall_net_err, sizeof g_ccall_net_err, "%s: %s", addr, strerror(errno));
-        if (fd >= 0) close(fd);
-        freeaddrinfo(res);
+    jig_str *e = NULL;
+    jig_sock fd = net_listen(a, res, 64, &e);
+    jig_str_release(a);
+    if (fd == BAD_SOCK) {
+        snprintf(g_ccall_net_err, sizeof g_ccall_net_err, "%.*s", (int)jig_str_len(e), jig_str_data(e));
+        jig_str_release(e);
         return -1;
     }
-    freeaddrinfo(res);
-    return fd;
+    return (int64_t)fd;
 }
 
 int64_t jig_ccall_accept(int64_t fd, const char *addr) {
     flush_out();
     for (;;) {
-        int c = accept((int)fd, NULL, NULL);
-        if (c >= 0) return c;
-        if (errno != EINTR) {
-            snprintf(g_ccall_net_err, sizeof g_ccall_net_err, "%s: %s", addr, strerror(errno));
-            close((int)fd);
+        jig_sock c = accept((jig_sock)fd, NULL, NULL);
+        if (c != BAD_SOCK) return (int64_t)c;
+        if (!sock_interrupted()) {
+            snprintf(g_ccall_net_err, sizeof g_ccall_net_err, "%s: %s", addr, sock_error());
+            sock_close((jig_sock)fd);
             return -1;
         }
     }
@@ -2320,7 +2525,7 @@ int64_t jig_ccall_accept(int64_t fd, const char *addr) {
 
 /* The connection's request, read to its end (valid until the next call). */
 const char *jig_ccall_request(int64_t conn) {
-    jig_str *r = net_read_all((int)conn);
+    jig_str *r = net_read_all((jig_sock)conn);
     size_t n = (size_t)jig_str_len(r);
     free(g_ccall_request);
     g_ccall_request = malloc(n + 1);
@@ -2335,7 +2540,7 @@ const char *jig_ccall_request(int64_t conn) {
    interpreter frames it again to tell which. */
 const char *jig_ccall_request_http(int64_t conn) {
     int refuse = 0;
-    jig_str *r = net_read_http((int)conn, &refuse);
+    jig_str *r = net_read_http((jig_sock)conn, &refuse);
     size_t n = (size_t)jig_str_len(r);
     free(g_ccall_request);
     g_ccall_request = malloc(n + 1);
@@ -2347,11 +2552,11 @@ const char *jig_ccall_request_http(int64_t conn) {
 }
 
 void jig_ccall_answer(int64_t conn, const char *reply) {
-    net_send_all((int)conn, reply, strlen(reply));
-    close((int)conn);
+    net_send_all((jig_sock)conn, reply, strlen(reply));
+    sock_close((jig_sock)conn);
 }
 
-void jig_ccall_close(int64_t fd) { close((int)fd); }
+void jig_ccall_close(int64_t fd) { sock_close((jig_sock)fd); }
 
 const char *jig_ccall_net_error(void) { return g_ccall_net_err; }
 
@@ -2396,14 +2601,17 @@ static pthread_mutex_t g_tls_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static bool tls_load(void) {
     static const char *const names[] = {
+#ifdef _WIN32
+        "libssl-3-x64.dll", "libssl-3.dll", "libssl-1_1-x64.dll",
+#else
         "libssl.so.3", "libssl.so.1.1", "libssl.so", "libssl.3.dylib",
         "/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib", "/usr/local/opt/openssl@3/lib/libssl.3.dylib",
+#endif
     };
     pthread_mutex_lock(&g_tls_lock);
     if (!g_tls.ready) {
         void *h = NULL;
-        for (size_t i = 0; dlopen && dlsym && !h && i < sizeof names / sizeof *names; i++)
-            h = dlopen(names[i], RTLD_NOW | RTLD_GLOBAL);
+        for (size_t i = 0; !h && i < sizeof names / sizeof *names; i++) h = lib_open(names[i]);
         g_tls.ready = -1;
         if (h) {
             void **f[] = {
@@ -2422,7 +2630,7 @@ static bool tls_load(void) {
             };
             bool all = true;
             for (size_t i = 0; i < sizeof syms / sizeof *syms; i++) {
-                *f[i] = dlsym(h, syms[i]);
+                *f[i] = lib_sym(h, syms[i]);
                 all = all && *f[i];
             }
             g_tls.ready = all ? 1 : -1;
@@ -2448,19 +2656,19 @@ static jig_str *tls_err(const jig_str *addr, const char *what, void *ssl) {
     return net_err(addr, msg);
 }
 
-static int net_connect(const jig_str *addr, const char **err) {
+static jig_sock net_connect(const jig_str *addr, const char **err) {
     struct addrinfo *res = net_resolve(addr, false, err);
-    if (!res) return -1;
-    int fd = -1;
+    if (!res) return BAD_SOCK;
+    jig_sock fd = BAD_SOCK;
     for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
         fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) continue;
+        if (fd == BAD_SOCK) continue;
         if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
-        close(fd);
-        fd = -1;
+        sock_close(fd);
+        fd = BAD_SOCK;
     }
     freeaddrinfo(res);
-    if (fd < 0) *err = strerror(errno);
+    if (fd == BAD_SOCK) *err = sock_error();
     return fd;
 }
 
@@ -2468,30 +2676,29 @@ jig_str *jig_net_fetch(const jig_str *addr, const jig_str *req, bool tls, bool *
     *ok = false;
     if (tls && !tls_load()) return net_err(addr, "TLS needs OpenSSL (libssl), which was not found");
     const char *err = NULL;
-    int fd = net_connect(addr, &err);
-    if (fd < 0) return net_err(addr, err);
-    struct timeval tv = {NET_TIMEOUT, 0};
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    jig_sock fd = net_connect(addr, &err);
+    if (fd == BAD_SOCK) return net_err(addr, err);
+    sock_timeouts(fd, NET_TIMEOUT);
     jig_buf b = {0};
     char tmp[1 << 14];
     if (!tls) {
         if (!net_send_all(fd, jig_str_data(req), (size_t)jig_str_len(req))) {
-            close(fd);
-            return net_err(addr, strerror(errno));
+            jig_str *e = net_err(addr, sock_error());
+            sock_close(fd);
+            return e;
         }
         for (;;) {
             ssize_t k = recv(fd, tmp, sizeof tmp, 0);
-            if (k < 0 && errno == EINTR) continue;
-            if (k < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                close(fd);
+            if (k < 0 && sock_interrupted()) continue;
+            if (k < 0 && sock_timed_out()) {
+                sock_close(fd);
                 jig_buf_free(&b);
                 return net_err(addr, "timed out");
             }
             if (k <= 0) break;
             jig_buf_push(&b, tmp, (int64_t)k);
         }
-        close(fd);
+        sock_close(fd);
         *ok = true;
         return jig_buf_to_str(&b);
     }
@@ -2514,7 +2721,7 @@ jig_str *jig_net_fetch(const jig_str *addr, const jig_str *req, bool tls, bool *
     if (!ssl) {
         fail = tls_err(addr, "TLS setup failed", NULL);
     } else {
-        g_tls.set_fd(ssl, fd);
+        g_tls.set_fd(ssl, (int)fd);
         g_tls.ctrl(ssl, 55 /* SSL_CTRL_SET_TLSEXT_HOSTNAME */, 0, host);
         if (g_tls.set1_host(ssl, host) != 1 || g_tls.ssl_connect(ssl) != 1) fail = tls_err(addr, "TLS handshake failed", ssl);
     }
@@ -2530,16 +2737,19 @@ jig_str *jig_net_fetch(const jig_str *addr, const jig_str *req, bool tls, bool *
     }
     while (!fail) {
         errno = 0;
+#ifdef _WIN32
+        WSASetLastError(0);
+#endif
         int k = g_tls.ssl_read(ssl, tmp, (int)sizeof tmp);
         if (k <= 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) fail = net_err(addr, "timed out");
+            if (sock_timed_out()) fail = net_err(addr, "timed out");
             break;
         }
         jig_buf_push(&b, tmp, (int64_t)k);
     }
     if (ssl) g_tls.ssl_free(ssl);
     if (ctx) g_tls.ctx_free(ctx);
-    close(fd);
+    sock_close(fd);
     if (fail) {
         jig_buf_free(&b);
         return fail;
