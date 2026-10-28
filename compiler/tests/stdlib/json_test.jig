@@ -1,0 +1,91 @@
+import "std/json"
+
+// JSON: values both ways, the grammar's edges, errors with their place, and round trips.
+
+test "documents read into values" {
+  let v = json
+    .parse(
+      "{\"name\": \"Ada\", \"age\": 36, \"langs\": [\"en\", \"fr\"], \"x\": null, \"ok\": true}",
+    )
+    .unwrap()
+  assert(v.get("name") == Some(json.Json.String("Ada")))
+  assert(v.get("age").unwrap().as_int() == Some(36))
+  assert(v.get("langs").unwrap().at(1).unwrap().as_str() == Some("fr"))
+  assert(v.get("x") == Some(json.Json.Null) && v.get("ok").unwrap().as_bool() == Some(true))
+  assert(v.get("missing") == None && v.at(0) == None)
+  assert(
+    json.parse(" [ ] ") == Ok(json.Json.Array([])) && json.parse("{}") == Ok(json.Json.Object([])),
+  )
+}
+
+test "numbers: integers stay exact, the rest are floats" {
+  assert(json.parse("9007199254740993") == Ok(json.Json.Int(9007199254740993)))
+  assert(json.parse("-0") == Ok(json.Json.Int(0)))
+  assert(json.parse("2.5") == Ok(json.Json.Float(2.5)))
+  assert(json.parse("1e3") == Ok(json.Json.Float(1000.0)))
+  assert(json.parse("-1.5E-2").unwrap().as_float() == Some(-0.015))
+  assert(json.parse("99999999999999999999").unwrap().as_float() == Some(100000000000000000000.0))
+  for bad in ["01", "+1", ".5", "1.", "1e", "-", "1.e3", "0x10", "NaN", "Infinity"] {
+    assert(json.parse(bad).is_err())
+  }
+}
+
+test "strings: escapes, \\u escapes and surrogate pairs" {
+  assert(json.parse("\"a\\\"b\\\\c\\/d\\n\\t\"") == Ok(json.Json.String("a\"b\\c/d\n\t")))
+  assert(json.parse("\"\\u00e9\\u4e2d\"") == Ok(json.Json.String("é中")))
+  assert(json.parse("\"\\ud83d\\ude00\"") == Ok(json.Json.String("😀")))
+  assert(json.parse("\"\\ud83d x\"") == Ok(json.Json.String("� x")))
+  assert(json.parse("\"tab\there\"").is_err())
+  assert(json.parse("\"\\q\"").is_err() && json.parse("\"\\u12g4\"").is_err())
+}
+
+test "errors say what is wrong and where" {
+  assert(json.parse("") == Err("line 1, column 1: a value is missing"))
+  assert(
+    json.parse("[1,\n  2,,]") == Err("line 2, column 5: a value cannot start with this character"),
+  )
+  assert(json.parse("{\"a\" 1}") == Err("line 1, column 6: expected `:`"))
+  assert(json.parse("[1] x") == Err("line 1, column 5: text after the value"))
+  assert(json.parse("\"é") == Err("line 1, column 3: a string is not closed"))
+  assert(json.parse("tru") == Err("line 1, column 1: unknown word"))
+  assert(json.parse("[".repeat(json.MAX_DEPTH) + "]".repeat(json.MAX_DEPTH)).is_ok())
+  assert(
+    json.parse("[".repeat(json.MAX_DEPTH + 1)) ==
+      Err("line 1, column 513: nested more than 512 deep"),
+  )
+}
+
+test "values write as compact or indented JSON" {
+  let v = json.Json.Object(
+    [
+      ("a", json.Json.Array([json.Json.Int(1), json.Json.Float(2.5), json.Json.Float(3.0)])),
+      ("b \"q\"", json.Json.String("line\nbreak\u{1}")),
+      ("c", json.Json.Object([])),
+    ],
+  )
+  assert(
+    json.stringify(v) == "{\"a\":[1,2.5,3.0],\"b \\\"q\\\"\":\"line\\nbreak\\u0001\",\"c\":{}}",
+  )
+  assert(
+    json.pretty(v) ==
+      "{\n  \"a\": [\n    1,\n    2.5,\n    3.0\n  ],\n  \"b \\\"q\\\"\": \"line\\nbreak\\u0001\",\n  \"c\": {}\n}",
+  )
+  assert(json.parse(json.stringify(v)) == Ok(v) && json.parse(json.pretty(v)) == Ok(v))
+}
+
+test "any text reads back from its JSON string"(s: Str) {
+  assert(json.parse(json.quote(s)) == Ok(json.Json.String(s)))
+}
+
+test "any integer reads back from its JSON"(n: Int) {
+  assert(json.parse(json.stringify(json.Json.Int(n))) == Ok(json.Json.Int(n)))
+}
+
+test "any list of strings reads back"(xs: List<Str>) {
+  var items: List<json.Json> = []
+  for x in xs {
+    items.push(json.Json.String(x))
+  }
+  let v = json.Json.Array(items)
+  assert(json.parse(json.stringify(v)) == Ok(v) && json.parse(json.pretty(v)) == Ok(v))
+}

@@ -1,0 +1,539 @@
+// JSON (RFC 8259): `parse` reads a document into a `Json` value and `stringify` and `pretty`
+// write one. Numbers without a fraction or exponent that fit in an `Int` stay exact; others
+// are `Float`s. Objects keep their keys in the order written. Nesting deeper than
+// `MAX_DEPTH` is an error rather than a deep recursion.
+
+/// A JSON value.
+pub enum Json {
+  Null
+  Bool(value: Bool)
+  Int(value: Int)
+  Float(value: Float)
+  String(value: Str)
+  Array(items: List<Json>)
+  Object(fields: List<(Str, Json)>)
+}
+
+/// How deeply arrays and objects may nest in a document `parse` reads.
+pub const MAX_DEPTH: Int = 512
+
+/// A parse in progress: the text, its bytes, the offset reached and the nesting depth.
+struct Reader {
+  s: Str
+  b: List<U8>
+  i: Int
+  depth: Int
+  invariant b.len() == s.len() && i >= 0 && i <= b.len() && depth >= 0
+}
+
+/// The value `src` holds, or what is wrong and where (`line 3, column 7: ...`).
+pub fn parse(src: Str) -> Result<Json, Str> {
+  var r = Reader { s: src, b: src.bytes(), i: 0, depth: 0 }
+  r.ws()
+  let v = r.value()?
+  r.ws()
+  if r.i != r.b.len() {
+    return Err(r.err("text after the value"))
+  }
+  return Ok(v)
+}
+
+fn Reader.ws(&mut self)
+  ensures self.i >= old(self.i)
+{
+  let start = self.i
+  for self.i < self.b.len() &&
+    (self.b[self.i] == 32 || self.b[self.i] == 9 || self.b[self.i] == 10 || self.b[self.i] == 13)
+    invariant self.i >= start && self.i <= self.b.len()
+  {
+    self.i += 1
+  }
+}
+
+/// `msg` with where the reader is: `line 2, column 5: msg`.
+fn Reader.err(self, msg: Str) -> Str
+  ensures result.len() > msg.len()
+{
+  var line = 1
+  var col = 1
+  for k in 0..self.i invariant line >= 1 && line <= k + 1 && col >= 1 && col <= k + 1 {
+    if self.b[k] == 10 {
+      line += 1
+      col = 1
+    } else if self.b[k] < 128 || self.b[k] >= 192 {
+      col += 1
+    }
+  }
+  return "line " + line.str() + ", column " + col.str() + ": " + msg
+}
+
+/// Whether the next byte is `c`.
+fn Reader.at(self, c: U8) -> Bool
+  ensures !result || self.i < self.b.len()
+{
+  return self.i < self.b.len() && self.b[self.i] == c
+}
+
+fn Reader.word(&mut self, w: Str, v: Json) -> Result<Json, Str>
+  ensures self.i >= old(self.i)
+{
+  if w.len() <= self.s.len() - self.i && self.s[self.i..self.i + w.len()] == w {
+    self.i += w.len()
+    return Ok(v)
+  }
+  return Err(self.err("unknown word"))
+}
+
+fn Reader.value(&mut self) -> Result<Json, Str>
+  ensures self.i >= old(self.i)
+{
+  if self.i >= self.b.len() {
+    return Err(self.err("a value is missing"))
+  }
+  let c = self.b[self.i]
+  if c == 110 {
+    return self.word("null", Json.Null)
+  }
+  if c == 116 {
+    return self.word("true", Json.Bool(true))
+  }
+  if c == 102 {
+    return self.word("false", Json.Bool(false))
+  }
+  if c == 34 {
+    return Ok(Json.String(self.string()?))
+  }
+  if c == 91 || c == 123 {
+    if self.depth >= MAX_DEPTH {
+      return Err(self.err("nested more than " + MAX_DEPTH.str() + " deep"))
+    }
+    self.depth += 1
+    let v = if c == 91 { self.array()? } else { self.object()? }
+    self.depth = max(self.depth - 1, 0)
+    return Ok(v)
+  }
+  if c == 45 || c >= 48 && c <= 57 {
+    return self.number()
+  }
+  return Err(self.err("a value cannot start with this character"))
+}
+
+fn Reader.array(&mut self) -> Result<Json, Str>
+  requires self.i < self.b.len()
+  ensures self.i >= old(self.i)
+{
+  let i0 = self.i
+  self.i += 1
+  var items: List<Json> = []
+  self.ws()
+  if self.at(93) {
+    self.i += 1
+    return Ok(Json.Array(items))
+  }
+  for invariant self.i > i0 && self.i <= self.b.len() {
+    self.ws()
+    items.push(self.value()?)
+    self.ws()
+    if self.at(44) {
+      self.i += 1
+    } else if self.at(93) {
+      self.i += 1
+      return Ok(Json.Array(items))
+    } else {
+      return Err(self.err("expected `,` or `]`"))
+    }
+  }
+}
+
+fn Reader.object(&mut self) -> Result<Json, Str>
+  requires self.i < self.b.len()
+  ensures self.i >= old(self.i)
+{
+  let i0 = self.i
+  self.i += 1
+  var fields: List<(Str, Json)> = []
+  self.ws()
+  if self.at(125) {
+    self.i += 1
+    return Ok(Json.Object(fields))
+  }
+  for invariant self.i > i0 && self.i <= self.b.len() {
+    self.ws()
+    if !self.at(34) {
+      return Err(self.err("expected a key in quotes"))
+    }
+    let k = self.string()?
+    self.ws()
+    if !self.at(58) {
+      return Err(self.err("expected `:`"))
+    }
+    self.i += 1
+    self.ws()
+    fields.push((k, self.value()?))
+    self.ws()
+    if self.at(44) {
+      self.i += 1
+    } else if self.at(125) {
+      self.i += 1
+      return Ok(Json.Object(fields))
+    } else {
+      return Err(self.err("expected `,` or `}`"))
+    }
+  }
+}
+
+/// How many digits start at `self.i`.
+fn Reader.digits(&mut self) -> Int
+  ensures result >= 0 && self.i - old(self.i) == result
+{
+  let start = self.i
+  for self.i < self.b.len() && self.b[self.i] >= 48 && self.b[self.i] <= 57
+    invariant self.i >= start && self.i <= self.b.len()
+  {
+    self.i += 1
+  }
+  return self.i - start
+}
+
+/// A number, as the grammar has it: `-`, then `0` or digits not starting with `0`, then
+/// optionally `.` and digits, then optionally `e` or `E`, a sign and digits.
+fn Reader.number(&mut self) -> Result<Json, Str>
+  ensures self.i >= old(self.i)
+{
+  let start = self.i
+  if self.at(45) {
+    self.i += 1
+  }
+  let first = self.i
+  let whole = self.digits()
+  if whole == 0 || whole > 1 && self.b[first] == 48 {
+    return Err(self.err("a number needs digits, and no leading zero"))
+  }
+  var exact = true
+  if self.at(46) {
+    self.i += 1
+    exact = false
+    if self.digits() == 0 {
+      return Err(self.err("a fraction needs digits"))
+    }
+  }
+  if self.at(101) || self.at(69) {
+    self.i += 1
+    exact = false
+    if self.at(43) || self.at(45) {
+      self.i += 1
+    }
+    if self.digits() == 0 {
+      return Err(self.err("an exponent needs digits"))
+    }
+  }
+  let text = self.s[start..self.i]
+  if exact {
+    match text.to_int() {
+      Some(n) => {
+        return Ok(Json.Int(n))
+      }
+      None => {}
+    }
+  }
+  return match text.to_float() {
+    Some(f) => Ok(Json.Float(f))
+    None => Err(self.err("not a number"))
+  }
+}
+
+/// The value of hex digit `b`, or -1.
+fn hex_digit(b: U8) -> Int
+  ensures result >= -1 && result < 16
+{
+  if b >= 48 && b <= 57 {
+    return b as Int - 48
+  }
+  if b >= 97 && b <= 102 {
+    return b as Int - 87
+  }
+  if b >= 65 && b <= 70 {
+    return b as Int - 55
+  }
+  return -1
+}
+
+/// The four hex digits after `\u`.
+fn Reader.hex4(&mut self) -> Result<Int, Str>
+  ensures self.i >= old(self.i), result.is_err() || result.unwrap() >= 0 && result.unwrap() < 65536
+{
+  if 4 > self.b.len() - self.i {
+    return Err(self.err("a \\u escape needs four hex digits"))
+  }
+  let (a, b, c, d) = (
+    hex_digit(self.b[self.i]),
+    hex_digit(self.b[self.i + 1]),
+    hex_digit(self.b[self.i + 2]),
+    hex_digit(self.b[self.i + 3]),
+  )
+  if a < 0 || b < 0 || c < 0 || d < 0 {
+    return Err(self.err("a \\u escape needs four hex digits"))
+  }
+  self.i += 4
+  return Ok(a * 4096 + b * 256 + c * 16 + d)
+}
+
+/// A string, from its opening quote to its closing one, escapes read.
+fn Reader.string(&mut self) -> Result<Str, Str>
+  requires self.i < self.b.len()
+  ensures self.i >= old(self.i)
+{
+  let i0 = self.i
+  self.i += 1
+  var out = ""
+  for invariant self.i > i0 && self.i <= self.b.len() {
+    let start = self.i
+    for self.i < self.b.len() &&
+      self.b[self.i] != 34 &&
+      self.b[self.i] != 92 &&
+      self.b[self.i] >= 32 invariant self.i >= start && self.i <= self.b.len() {
+      self.i += 1
+    }
+    out += self.s[start..self.i]
+    if self.i >= self.b.len() {
+      return Err(self.err("a string is not closed"))
+    }
+    let q = self.b[self.i]
+    if q == 34 {
+      self.i += 1
+      return Ok(out)
+    }
+    if q < 32 {
+      return Err(self.err("a control character must be escaped in a string"))
+    }
+    self.i += 1
+    if self.i >= self.b.len() {
+      return Err(self.err("an escape is not finished"))
+    }
+    let e = self.b[self.i]
+    self.i += 1
+    if e == 117 {
+      var cp = self.hex4()?
+      if cp >= 55296 &&
+        cp < 56320 &&
+        self.at(92) &&
+        self.i + 1 < self.b.len() &&
+        self.b[self.i + 1] == 117 {
+        let back = self.i
+        self.i += 2
+        let lo = self.hex4()?
+        if lo >= 56320 && lo < 57344 {
+          cp = 65536 + (cp - 55296) * 1024 + (lo - 56320)
+        } else {
+          self.i = back
+        }
+      }
+      // A surrogate without its other half is not a character: the replacement character.
+      out += ((if cp >= 55296 && cp < 57344 { 65533 } else { cp }) as Char).str()
+      continue
+    }
+    out += if e == 34 {
+      "\""
+    } else if e == 92 {
+      "\\"
+    } else if e == 47 {
+      "/"
+    } else if e == 98 {
+      (8 as Char).str()
+    } else if e == 102 {
+      (12 as Char).str()
+    } else if e == 110 {
+      "\n"
+    } else if e == 114 {
+      "\r"
+    } else if e == 116 {
+      "\t"
+    } else {
+      return Err(self.err("unknown escape"))
+    }
+  }
+}
+
+/// `s` as a JSON string: in quotes, with `"`, `\` and control characters escaped.
+pub fn quote(s: Str) -> Str
+  ensures result.len() >= s.len() + 2
+{
+  var out = "\""
+  var start = 0
+  let hex = "0123456789abcdef"
+  for i in 0..s.len() invariant start >= 0 && start <= i && out.len() >= start + 1 {
+    let b = s[i]
+    if b == 34 || b == 92 || b < 32 {
+      let e = if b == 34 {
+        "\\\""
+      } else if b == 92 {
+        "\\\\"
+      } else if b == 10 {
+        "\\n"
+      } else if b == 13 {
+        "\\r"
+      } else if b == 9 {
+        "\\t"
+      } else {
+        let n = b as Int
+        "\\u00" + hex[n / 16..n / 16 + 1] + hex[n % 16..n % 16 + 1]
+      }
+      out += s[start..i] + e
+      start = i + 1
+    }
+  }
+  return out + s[start..s.len()] + "\""
+}
+
+/// A number as JSON writes it: integral values without a fraction, and `null` for what JSON
+/// cannot write (infinities and NaN).
+fn number_text(f: Float) -> Str
+  ensures !result.is_empty()
+{
+  if f.is_nan() || f > 1.7976931348623157e308 || f < -1.7976931348623157e308 {
+    return "null"
+  }
+  if f == f.floor() && f.abs() < 1000000000000000.0 {
+    return (f as Int).str() + ".0"
+  }
+  let t = f.str()
+  return if t.is_empty() { "null" } else { t }
+}
+
+/// `j` as compact JSON text.
+pub fn stringify(j: Json) -> Str
+  ensures !result.is_empty()
+{
+  return match j {
+    Null => "null"
+    Bool(b) => if b { "true" } else { "false" }
+    Int(n) => n.str()
+    Float(f) => number_text(f)
+    String(s) => quote(s)
+    Array(items) => {
+      var parts: List<Str> = []
+      for x in items {
+        parts.push(stringify(x))
+      }
+      "[" + parts.join(",") + "]"
+    }
+    Object(fields) => {
+      var parts: List<Str> = []
+      for f in fields {
+        parts.push(quote(f.0) + ":" + stringify(f.1))
+      }
+      "{" + parts.join(",") + "}"
+    }
+  }
+}
+
+/// `j` as JSON text indented by two spaces a level, one item or field a line.
+pub fn pretty(j: Json) -> Str
+  ensures !result.is_empty()
+{
+  return indented(j, "")
+}
+
+fn indented(j: Json, pad: Str) -> Str
+  ensures !result.is_empty()
+{
+  let inner = pad + "  "
+  return match j {
+    Array(items) => if items.is_empty() {
+      "[]"
+    } else {
+      var parts: List<Str> = []
+      for x in items {
+        parts.push(inner + indented(x, inner))
+      }
+      "[\n" + parts.join(",\n") + "\n" + pad + "]"
+    }
+    Object(fields) => if fields.is_empty() {
+      "{}"
+    } else {
+      var parts: List<Str> = []
+      for f in fields {
+        parts.push(inner + quote(f.0) + ": " + indented(f.1, inner))
+      }
+      "{\n" + parts.join(",\n") + "\n" + pad + "}"
+    }
+    _ => stringify(j)
+  }
+}
+
+/// The value of field `key`, if this is an object that has it (the first, if it has two).
+pub fn Json.get(self, key: Str) -> Option<Json> {
+  match self {
+    Object(fields) => {
+      for f in fields {
+        if f.0 == key {
+          return Some(f.1)
+        }
+      }
+    }
+    _ => {}
+  }
+  return None
+}
+
+/// Item `i`, if this is an array that long.
+pub fn Json.at(self, i: Int) -> Option<Json> {
+  return match self {
+    Array(items) => items.get(i)
+    _ => None
+  }
+}
+
+/// The text, if this is a string.
+pub fn Json.as_str(self) -> Option<Str> {
+  return match self {
+    String(s) => Some(s)
+    _ => None
+  }
+}
+
+/// The number, if this is an integer (or a float with an integral value that fits).
+pub fn Json.as_int(self) -> Option<Int> {
+  return match self {
+    Int(n) => Some(n)
+    Float(f) => if f == f.floor() && f.abs() < 9000000000000000000.0 {
+      Some(f as Int)
+    } else {
+      None
+    }
+    _ => None
+  }
+}
+
+/// The number, if this is one.
+pub fn Json.as_float(self) -> Option<Float> {
+  return match self {
+    Int(n) => Some(n as Float)
+    Float(f) => Some(f)
+    _ => None
+  }
+}
+
+/// The truth value, if this is `true` or `false`.
+pub fn Json.as_bool(self) -> Option<Bool> {
+  return match self {
+    Bool(b) => Some(b)
+    _ => None
+  }
+}
+
+/// The items, if this is an array.
+pub fn Json.as_list(self) -> Option<List<Json>> {
+  return match self {
+    Array(items) => Some(items)
+    _ => None
+  }
+}
+
+/// The fields, if this is an object.
+pub fn Json.as_fields(self) -> Option<List<(Str, Json)>> {
+  return match self {
+    Object(fields) => Some(fields)
+    _ => None
+  }
+}

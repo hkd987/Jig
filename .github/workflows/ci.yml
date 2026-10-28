@@ -94,12 +94,13 @@ jobs:
           set -e
           n=0
           for how in "" --native; do
-            jig run $how examples/guestbook -- :8080 3 > server.log 2>&1 &
+            jig run $how examples/guestbook -- :8080 4 > server.log 2>&1 &
             timeout 120 sh -c 'until grep -q listening server.log; do sleep 0.2; done' || { cat server.log; exit 1; }
             n=$((n + 1))
             test "$(curl -s -X POST --data "it's me" localhost:8080/)" = "signed as entry $n"
             test "$(curl -s localhost:8080/ | tail -1)" = "$n. it's me"
             test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8080/admin)" = 404
+            curl -s localhost:8080/api/entries | python3 -c "import json, sys; e = json.load(sys.stdin)[-1]; assert e == {'id': $n, 'message': \"it's me\"}, e"
             wait
           done
 

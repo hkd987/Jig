@@ -18,7 +18,7 @@ jig run examples/http -- :8080 # run it (then: curl localhost:8080)
 | [http](../examples/http) | A web server in 30 lines: `net.serve_http`, simulated requests in tests | `jig run examples/http -- :8080` |
 | [kv](../examples/kv) | A key-value store over HTTP; the store is the server's state | `jig run examples/kv -- :8080` |
 | [postgres](../examples/postgres) | Notes in a Postgres table, through libpq behind the `ffi` effect; SQL built and tested as pure code | `jig run examples/postgres -- list` |
-| [guestbook](../examples/guestbook) | A web app on Postgres: an HTTP handler that queries the database, tested against fakes | `jig test examples/guestbook` |
+| [guestbook](../examples/guestbook) | A web app on Postgres with a JSON API: an HTTP handler that queries the database, tested against fakes | `jig test examples/guestbook` |
 | [ssr](../examples/ssr) | Pages rendered on the server with `std/html`, a router package with `:params`, a blog served over HTTP | `jig run examples/ssr -- :8080` |
 | [greet](../examples/greet) | TCP client and server with `net.request` and `net.serve` | `jig test examples/greet` |
 | [wordfreq](../examples/wordfreq) | Reading standard input, maps, sorting | `echo "a b a" \| jig run examples/wordfreq` |

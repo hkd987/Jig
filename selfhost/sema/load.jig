@@ -9,7 +9,7 @@ import "syntax"
 
 /// The standard packages: import path and file name.
 fn std_packages() -> List<(Str, Str)>
-  ensures result.len() == 12
+  ensures result.len() == 13
 {
   return [
     ("std/io", "io.jig"),
@@ -24,6 +24,7 @@ fn std_packages() -> List<(Str, Str)>
     ("std/lists", "lists.jig"),
     ("std/strings", "strings.jig"),
     ("std/html", "html.jig"),
+    ("std/json", "json.jig"),
   ]
 }
 

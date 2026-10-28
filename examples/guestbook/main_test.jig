@@ -1,3 +1,4 @@
+import "std/json"
 import "std/net"
 import "std/sim"
 
@@ -46,5 +47,18 @@ test "the server answers each connection with the handler" {
   assert(served == Ok(2))
   assert(
     sim.answers(":8080") == [handle(two, get("/")), reply("201 Created", "signed as entry 3\n")],
+  )
+}
+
+test "the entries as JSON" {
+  let r = handle(two, get("/api/entries"))
+  let body = r.split("\r\n\r\n")[1]
+  assert(r.contains("Content-Type: application/json"))
+  let v = json.parse(body).unwrap()
+  assert(v.at(1).unwrap().get("message").unwrap().as_str() == Some("it's me"))
+  assert(v.at(0).unwrap().get("id") == Some(json.Json.Int(1)))
+  assert(
+    json.parse(handle(fn(_) { Err("down") }, get("/api/entries")).split("\r\n\r\n")[1]) ==
+      Ok(json.Json.Object([("error", json.Json.String("down"))])),
   )
 }

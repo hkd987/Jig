@@ -30,7 +30,7 @@ four threads (jigc, which `jig` now runs, takes about 210 ms on one).
 
 **Standard library.** `std/io`, `fs`, `net` (TCP request/response, HTTP serving for
 browsers and HTTP clients, and a simulator), `html` (pages as node trees, escaped when
-rendered),
+rendered), `json`,
 `time` (with UTC calendar dates, ISO 8601 and HTTP dates), `rand`, `os`, `task` (fork-join), `math`, `lists`, `strings`; 91% of its functions
 have contracts that prove.
 

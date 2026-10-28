@@ -1,13 +1,15 @@
 import "std/io"
+import "std/json"
 import "std/net"
 import "std/os"
 import "std/strings"
 
 // `guestbook [ADDR [N]]` serves a guestbook over HTTP on ADDR (default :8080), forever or
 // for N requests, and keeps it in Postgres (DATABASE_URL, or libpq's defaults without
-// it): `GET /` lists the entries and `POST /` signs it with the request's body. `handle`
-// takes the database as a function and performs its effects: libpq's (`ffi`) in `main`,
-// none in the tests, which run every request against a fake.
+// it): `GET /` lists the entries, `POST /` signs it with the request's body, and
+// `GET /api/entries` gives the entries as JSON. `handle` takes the database as a function
+// and performs its effects: libpq's (`ffi`) in `main`, none in the tests, which run every
+// request against a fake.
 
 // libpq's functions, behind the `ffi` effect. A connection and a result are pointers,
 // held as `Int`.
@@ -79,10 +81,45 @@ fn lines(rows: List<List<Str>>) -> Str {
   return out
 }
 
+/// The entries as JSON: `[{"id": 1, "message": "..."}]`.
+fn entries(rows: List<List<Str>>) -> json.Json {
+  var items: List<json.Json> = []
+  for row in rows {
+    if row.len() == 2 {
+      let id = match row[0].to_int() {
+        Some(n) => json.Json.Int(n)
+        None => json.Json.String(row[0])
+      }
+      items.push(json.Json.Object([("id", id), ("message", json.Json.String(row[1]))]))
+    }
+  }
+  return json.Json.Array(items)
+}
+
+/// An HTTP reply with a JSON body.
+fn json_reply(status: Str, body: json.Json) -> Str {
+  let text = json.stringify(body)
+  return "HTTP/1.1 " +
+    status +
+    "\r\nContent-Type: application/json\r\nContent-Length: " +
+    text.len().str() +
+    "\r\nConnection: close\r\n\r\n" +
+    text
+}
+
 /// One request, carried out on the database `db`, which runs a statement and returns its
 /// rows (each a list of its columns as text) or its error.
 fn handle(db: fn(Str) -> Result<List<List<Str>>, Str>, raw: Str) -> Str effects {db} {
   let r = parse(raw)
+  if r.path == "/api/entries" && r.method == "GET" {
+    return match db("SELECT id, message FROM guestbook ORDER BY id") {
+      Ok(rows) => json_reply("200 OK", entries(rows))
+      Err(e) => json_reply(
+        "500 Internal Server Error",
+        json.Json.Object([("error", json.Json.String(e))]),
+      )
+    }
+  }
   if r.path != "/" {
     return reply("404 Not Found", "no such page\n")
   }
