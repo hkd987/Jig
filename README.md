@@ -93,12 +93,37 @@ so far (see `bench/` and `docs/gates/`):
 | --- | --- | --- |
 | `jig check` on a 100k-line project | under 100 ms | about 210 ms (jigc, one thread; the Rust compiler takes 70 ms on 4 cores) |
 | Re-proof after changing one function | under 1 s | 0.2 s |
-| Runtime vs Rust, 8 benchmarks (instructions) | within 10% | 0.89 |
+| Runtime vs Rust, 8 benchmarks (instructions) | within 10% | 0.79 (slowest: nbody 1.44, wordfreq 1.13, fannkuch 1.12) |
 | Hello-world release binary | under 100 KB | 84 KB |
-| Self-hosted compiler vs bootstrap (instructions) | equal or faster | 0.92 |
+| Self-hosted compiler vs bootstrap (instructions) | equal or faster | 0.94 |
 | Standard library functions with proven contracts | over 80% | 91% |
+| Compiler functions with proven contracts | over 80% | 39% (477 of 1,225; 78% have no unproven obligation but a table index) |
 | Agent tasks reaching a verified build, vs Rust | equal or better | 6 of 6 (Rust 6 of 6) |
 | Agent turns per task, vs Rust and TypeScript | equal or fewer | 7.3 (Rust 6.8, TypeScript 6.2) |
+
+## Known gaps
+
+Jig is an alpha. What it does not do yet:
+
+- **Libraries.** The standard library has files, TCP and HTTP serving, time, randomness,
+  tasks and text helpers, but no JSON, regular expressions, hashing, date formatting or TLS
+  (so no HTTPS). A server answers one connection at a time.
+- **C interop** passes numbers and strings only: no structs, buffers or callbacks, so a
+  library that needs them (or a parameterized SQL query) needs a small C wrapper.
+- **Built-in methods** (`map`, `filter`, `fold`, ...) take pure functions; a loop does what
+  an effectful callback would. Your own functions can take effectful ones (D31).
+- **Verification** proves what contracts and safety checks say, not what the author meant.
+  Bit operations, `starts_with` and `join` are not modeled, and an invariant over every node
+  of a tree or table cannot be stated, so most of the compiler's own table lookups stay
+  run-time checks (D29).
+- **Speed.** `jig check` is about three times slower than the Rust compiler it replaced (one
+  thread against four), and float-heavy code runs behind Rust (nbody, 1.44).
+- **Agents** took a few more turns in Jig than in Rust and TypeScript (one run per task so
+  far).
+- **Platforms and tools.** CI and the release run on Linux only; other POSIX systems should
+  build it with `bootstrap/install.sh` but are untested. There is no editor or language
+  server support beyond the Claude Code plugin and `jig mcp`, and modules come from git
+  (`jig get`), with no registry.
 
 ## Self-hosted
 

@@ -147,6 +147,10 @@ fn effect_param(k: Int) -> Int {
 /// The parameters whose effects `set` includes.
 fn effect_params(set: Int) -> List<Int> {
   var out: List<Int> = []
+  // Most sets have none: only the eight effects (and `EFFECT_OPEN`).
+  if effects_minus(set, 255 | EFFECT_OPEN) == 0 {
+    return out
+  }
   for k in 0..MAX_EFFECT_PARAMS {
     if set & effect_param(k) != 0 {
       out.push(k)

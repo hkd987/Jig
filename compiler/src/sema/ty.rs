@@ -94,6 +94,9 @@ impl EffectSet {
     }
     /// The parameters whose effects this set includes.
     pub fn params(self) -> Vec<usize> {
+        if self.0 & !(Self::ALL.0 | Self::OPEN.0) == 0 {
+            return Vec::new();
+        }
         (0..MAX_EFFECT_PARAMS).filter(|k| self.0 & (1 << (8 + k)) != 0).collect()
     }
     pub fn is_open(self) -> bool {
