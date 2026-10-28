@@ -1,0 +1,50 @@
+import "std/net"
+import "std/sim"
+
+fn get(path: Str) -> Str {
+  return "GET " + path + " HTTP/1.1\r\n\r\n"
+}
+
+fn post(path: Str, body: Str) -> Str {
+  return "POST " + path + " HTTP/1.1\r\nContent-Length: " + body.len().str() + "\r\n\r\n" + body
+}
+
+/// A database with two entries.
+fn two(statement: Str) -> Result<List<List<Str>>, Str> {
+  if statement.starts_with("SELECT") {
+    return Ok([["1", "hello"], ["2", "it's me"]])
+  }
+  return Ok([["3"]])
+}
+
+test "GET / lists the entries" {
+  assert(handle(two, get("/")) == reply("200 OK", "1. hello\n2. it's me\n"))
+  assert(handle(fn(_) { Ok([]) }, get("/")) == reply("200 OK", "no entries yet\n"))
+}
+
+test "POST / signs with the body, quoted" {
+  let want = "INSERT INTO guestbook (message) VALUES ('it''s me') RETURNING id"
+  let db = fn(s) { if s == want { Ok([["4"]]) } else { Err("got " + s) } }
+  assert(handle(db, post("/", "it's me\n")) == reply("201 Created", "signed as entry 4\n"))
+  assert(handle(db, post("/", "  ")) == reply("400 Bad Request", "sign with a message\n"))
+}
+
+test "the database's errors are 500s; other pages and methods are refused" {
+  let down = fn(_) { Err("connection lost") }
+  assert(handle(down, get("/")) == reply("500 Internal Server Error", "connection lost\n"))
+  assert(handle(two, get("/admin")) == reply("404 Not Found", "no such page\n"))
+  assert(
+    handle(two, "DELETE / HTTP/1.1\r\n\r\n") ==
+      reply("405 Method Not Allowed", "use GET or POST\n"),
+  )
+}
+
+test "the server answers each connection with the handler" {
+  sim.connect(":8080", get("/"))
+  sim.connect(":8080", post("/", "hi"))
+  let served = net.serve_http(":8080", 0, fn(n, req) { (n + 1, handle(two, req)) }, 0)
+  assert(served == Ok(2))
+  assert(
+    sim.answers(":8080") == [handle(two, get("/")), reply("201 Created", "signed as entry 3\n")],
+  )
+}

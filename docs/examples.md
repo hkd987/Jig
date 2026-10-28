@@ -18,6 +18,7 @@ jig run examples/http -- :8080 # run it (then: curl localhost:8080)
 | [http](../examples/http) | A web server in 30 lines: `net.serve_http`, simulated requests in tests | `jig run examples/http -- :8080` |
 | [kv](../examples/kv) | A key-value store over HTTP; the store is the server's state | `jig run examples/kv -- :8080` |
 | [postgres](../examples/postgres) | Notes in a Postgres table, through libpq behind the `ffi` effect; SQL built and tested as pure code | `jig run examples/postgres -- list` |
+| [guestbook](../examples/guestbook) | A web app on Postgres: an HTTP handler that queries the database, tested against fakes | `jig test examples/guestbook` |
 | [greet](../examples/greet) | TCP client and server with `net.request` and `net.serve` | `jig test examples/greet` |
 | [wordfreq](../examples/wordfreq) | Reading standard input, maps, sorting | `echo "a b a" \| jig run examples/wordfreq` |
 | [calc](../examples/calc) | A tokenizer, a recursive-descent parser and an evaluator | `echo "2 * (3 + 4)" \| jig run examples/calc` |
@@ -202,6 +203,32 @@ added note 2
 $ jig run examples/postgres -- list
 1. it's done
 2. x'); DROP TABLE notes; --
+```
+
+## A web app on a database
+
+`examples/guestbook` puts the two together: an HTTP server whose handler reads and writes
+Postgres. `GET /` lists the entries and `POST /` signs the book with the request's body.
+The handler takes the database as a function and has whatever effects that function has
+(an [effect parameter](reference.md#effects)):
+
+```
+fn handle(db: fn(Str) -> Result<List<List<Str>>, Str>, raw: Str) -> Str effects {db}
+```
+
+`main` passes a closure that runs the statement through libpq, so serving is
+`effects {net, ffi}`; the tests pass fakes (`fn(_) { Err("connection lost") }`) and run
+every request, and the server itself on simulated connections, without a database. CI
+serves it from a Postgres server and talks to it with curl.
+
+```
+$ export DATABASE_URL=postgresql://localhost/guestbook
+$ jig run examples/guestbook -- :8080 &
+listening on :8080
+$ curl -d "it's me" localhost:8080/
+signed as entry 1
+$ curl localhost:8080/
+1. it's me
 ```
 
 ## What the checks catch

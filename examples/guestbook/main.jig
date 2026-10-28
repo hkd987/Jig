@@ -1,0 +1,163 @@
+import "std/io"
+import "std/net"
+import "std/os"
+import "std/strings"
+
+// `guestbook [ADDR [N]]` serves a guestbook over HTTP on ADDR (default :8080), forever or
+// for N requests, and keeps it in Postgres (DATABASE_URL, or libpq's defaults without
+// it): `GET /` lists the entries and `POST /` signs it with the request's body. `handle`
+// takes the database as a function and performs its effects: libpq's (`ffi`) in `main`,
+// none in the tests, which run every request against a fake.
+
+// libpq's functions, behind the `ffi` effect. A connection and a result are pointers,
+// held as `Int`.
+fn PQconnectdb(conninfo: Str) -> Int effects {ffi}
+fn PQstatus(conn: Int) -> I32 effects {ffi}
+fn PQerrorMessage(conn: Int) -> Str effects {ffi}
+fn PQfinish(conn: Int) effects {ffi}
+fn PQexec(conn: Int, sql: Str) -> Int effects {ffi}
+fn PQresultStatus(res: Int) -> I32 effects {ffi}
+fn PQresultErrorMessage(res: Int) -> Str effects {ffi}
+
+fn PQntuples(res: Int) -> I32
+  ensures result >= 0
+  effects {ffi}
+
+fn PQnfields(res: Int) -> I32
+  ensures result >= 0
+  effects {ffi}
+
+fn PQgetvalue(res: Int, row: I32, col: I32) -> Str effects {ffi}
+fn PQclear(res: Int) effects {ffi}
+
+const CONNECTION_OK: I32 = 0
+const PGRES_COMMAND_OK: I32 = 1
+const PGRES_TUPLES_OK: I32 = 2
+
+/// Run first on the connection: backslashes are plain text in string literals (what
+/// `quote` relies on), notices stay quiet, and the table is made on first use.
+const SETUP: Str = "SET standard_conforming_strings TO on; SET client_min_messages TO warning; " +
+  "CREATE TABLE IF NOT EXISTS guestbook (id serial PRIMARY KEY, message text NOT NULL)"
+
+struct Request {
+  method: Str
+  path: Str
+  body: Str
+}
+
+/// The method and path of the request line, and the body after the headers.
+fn parse(raw: Str) -> Request {
+  let (head, body) = strings.split_once(raw, "\r\n\r\n").unwrap_or((raw, ""))
+  let words = head.split(" ")
+  let path = if words.len() > 1 { words[1] } else { "" }
+  return Request { method: words[0], path: path, body: body }
+}
+
+fn reply(status: Str, body: Str) -> Str
+  ensures result.len() > body.len()
+{
+  return "HTTP/1.1 " +
+    status +
+    "\r\nContent-Type: text/plain\r\nContent-Length: " +
+    body.len().str() +
+    "\r\nConnection: close\r\n\r\n" +
+    body
+}
+
+/// `s` as an SQL string literal: in single quotes, with each quote in it doubled, so no
+/// text can end the literal early (`SETUP` makes backslashes plain text).
+fn quote(s: Str) -> Str {
+  return "'" + s.replace("'", "''") + "'"
+}
+
+/// Rows, one a line, their columns joined by ". ".
+fn lines(rows: List<List<Str>>) -> Str {
+  var out = ""
+  for row in rows {
+    out += row.join(". ") + "\n"
+  }
+  return out
+}
+
+/// One request, carried out on the database `db`, which runs a statement and returns its
+/// rows (each a list of its columns as text) or its error.
+fn handle(db: fn(Str) -> Result<List<List<Str>>, Str>, raw: Str) -> Str effects {db} {
+  let r = parse(raw)
+  if r.path != "/" {
+    return reply("404 Not Found", "no such page\n")
+  }
+  let message = r.body.trim()
+  return match r.method {
+    "GET" => match db("SELECT id, message FROM guestbook ORDER BY id") {
+      Ok(rows) => reply("200 OK", if rows.is_empty() { "no entries yet\n" } else { lines(rows) })
+      Err(e) => reply("500 Internal Server Error", e + "\n")
+    }
+    "POST" => if message.is_empty() {
+      reply("400 Bad Request", "sign with a message\n")
+    } else {
+      match db("INSERT INTO guestbook (message) VALUES (" + quote(message) + ") RETURNING id") {
+        Ok(rows) => reply("201 Created", "signed as entry " + lines(rows))
+        Err(e) => reply("500 Internal Server Error", e + "\n")
+      }
+    }
+    _ => reply("405 Method Not Allowed", "use GET or POST\n")
+  }
+}
+
+/// Run one statement on `conn`: its rows, each a list of its columns as text.
+fn exec(conn: Int, statement: Str) -> Result<List<List<Str>>, Str> effects {ffi} {
+  let res = PQexec(conn, statement)
+  let status = PQresultStatus(res)
+  if status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK {
+    let e = PQresultErrorMessage(res)
+    PQclear(res)
+    return Err(if e.is_empty() { PQerrorMessage(conn) } else { e }.trim())
+  }
+  let n = PQntuples(res)
+  let m = PQnfields(res)
+  var rows: List<List<Str>> = []
+  for r in 0..n as Int {
+    var row: List<Str> = []
+    for c in 0..m as Int {
+      row.push(PQgetvalue(res, r as I32, c as I32))
+    }
+    rows.push(row)
+  }
+  PQclear(res)
+  return Ok(rows)
+}
+
+fn main() effects {io, env, net, ffi} {
+  let args = os.args()
+  let addr = if args.len() > 1 { args[1] } else { ":8080" }
+  let limit = if args.len() > 2 { max(args[2].to_int().unwrap_or(0), 0) } else { 0 }
+  let conn = PQconnectdb(os.env("DATABASE_URL").unwrap_or(""))
+  if PQstatus(conn) != CONNECTION_OK {
+    io.eprintln(PQerrorMessage(conn).trim())
+    PQfinish(conn)
+    os.exit(1)
+  }
+  match exec(conn, SETUP) {
+    Ok(_) => {}
+    Err(e) => {
+      io.eprintln(e)
+      PQfinish(conn)
+      os.exit(1)
+    }
+  }
+  io.println("listening on " + addr)
+  let served = net.serve_http(
+    addr,
+    conn,
+    fn(c, req) { (c, handle(fn(s) { exec(c, s) }, req)) },
+    limit,
+  )
+  PQfinish(conn)
+  match served {
+    Ok(_) => {}
+    Err(e) => {
+      io.eprintln(e)
+      os.exit(1)
+    }
+  }
+}

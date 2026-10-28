@@ -44,11 +44,11 @@ trace collection.
 the Rust compiler that bootstrapped it prints, which is now frozen as the reference the
 tests compare with (D6).
 
-**Examples.** Seventeen small projects under `examples/`, listed in `docs/examples.md`: a
+**Examples.** Eighteen small projects under `examples/`, listed in `docs/examples.md`: a
 web server in 30 lines, a key-value store over HTTP, notes in Postgres through libpq, a
-to-do list on files, a stack and a vending machine whose contracts prove, Gherkin-first
-shopping-cart rules, units of measure and parallel prime counting among them. CI checks and
-tests each one with both compilers.
+guestbook web app on Postgres, a to-do list on files, a stack and a vending machine whose
+contracts prove, Gherkin-first shopping-cart rules, units of measure and parallel prime
+counting among them. CI checks and tests each one with both compilers.
 
 **Not yet.** Fewer agent turns than Rust and TypeScript (the first runs solved every task
 in all three, in 7.3, 6.8 and 6.2 turns on average), contracts on most of the compiler (475
