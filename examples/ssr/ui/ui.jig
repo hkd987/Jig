@@ -1,0 +1,76 @@
+// A small HTML engine. A page is a tree of nodes that components, plain functions, build;
+// `render` turns it into text on the server. Text and attribute values are escaped as they
+// are rendered, so no data, whatever it holds, can open a tag or end an attribute.
+
+/// A piece of a page.
+pub enum Node {
+  Text(text: Str)
+  Element(tag: Str, attrs: List<(Str, Str)>, children: List<Node>)
+}
+
+/// Text, shown as written.
+pub fn text(s: Str) -> Node {
+  return Node.Text(s)
+}
+
+/// An element with attributes (name and value) and children.
+fn el(tag: Str, attrs: List<(Str, Str)>, children: List<Node>) -> Node {
+  return Node.Element(tag, attrs, children)
+}
+
+/// An element with children and no attributes.
+pub fn tag(name: Str, children: List<Node>) -> Node {
+  return Node.Element(name, [], children)
+}
+
+/// A link to `href`.
+pub fn link(href: Str, label: Str) -> Node {
+  return el("a", [("href", href)], [text(label)])
+}
+
+/// Elements HTML writes without children or a closing tag.
+fn is_void(tag: Str) -> Bool {
+  return tag == "meta" ||
+    tag == "link" ||
+    tag == "br" ||
+    tag == "hr" ||
+    tag == "img" ||
+    tag == "input"
+}
+
+/// `s` with the characters HTML gives a meaning to replaced by entities.
+fn escape(s: Str) -> Str {
+  return s
+    .replace("&", "&amp;")
+    .replace("<", "&lt;")
+    .replace(">", "&gt;")
+    .replace("\"", "&quot;")
+    .replace("'", "&#39;")
+}
+
+/// `n` as HTML.
+fn render(n: Node) -> Str {
+  return match n {
+    Text(s) => escape(s)
+    Element(name, attrs, children) => {
+      var out = "<" + name
+      for a in attrs {
+        out += " " + a.0 + "=\"" + escape(a.1) + "\""
+      }
+      out += ">"
+      if !is_void(name) {
+        for c in children {
+          out += render(c)
+        }
+        out += "</" + name + ">"
+      }
+      out
+    }
+  }
+}
+
+/// A whole document: the doctype, and `<html>` with a head titled `title` and `body`.
+pub fn document(title: Str, body: List<Node>) -> Str {
+  let head = tag("head", [el("meta", [("charset", "utf-8")], []), tag("title", [text(title)])])
+  return "<!doctype html>\n" + render(tag("html", [head, tag("body", body)])) + "\n"
+}

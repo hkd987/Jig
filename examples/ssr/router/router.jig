@@ -1,0 +1,79 @@
+// Routing a request path to a page. A pattern is a path whose `:name` segments match any
+// one segment and capture it, decoded: `/posts/:id` matches `/posts/7` with `id` = "7".
+// The query string is ignored, and empty segments (a trailing slash) do not count.
+
+/// The segments of a path, without its query string or empty segments.
+fn segments(path: Str) -> List<Str> {
+  let p = match path.find("?") {
+    Some(i) => path[0..i]
+    None => path
+  }
+  return p.split("/").filter(fn(s) { !s.is_empty() })
+}
+
+/// The value of a hexadecimal digit, or -1.
+fn hex(b: U8) -> Int
+  ensures result >= -1 && result < 16
+{
+  let c = b as Int
+  if c >= 48 && c <= 57 {
+    return c - 48
+  }
+  if c >= 97 && c <= 102 {
+    return c - 87
+  }
+  if c >= 65 && c <= 70 {
+    return c - 55
+  }
+  return -1
+}
+
+/// `s` with each `%XX` replaced by the byte it stands for (`%20` is a space), if that
+/// leaves valid UTF-8, else `s`.
+fn decode(s: Str) -> Str {
+  let b = s.bytes()
+  var out: List<U8> = []
+  var i = 0
+  for i < b.len() invariant i >= 0 {
+    if b[i] == 37 && i + 2 < b.len() && hex(b[i + 1]) >= 0 && hex(b[i + 2]) >= 0 {
+      out.push((hex(b[i + 1]) * 16 + hex(b[i + 2])) as U8)
+      i += 3
+    } else {
+      out.push(b[i])
+      i += 1
+    }
+  }
+  return Str.from_bytes(out).unwrap_or(s)
+}
+
+/// What `pattern` captures from `path`, if it matches.
+fn match_path(pattern: Str, path: Str) -> Option<Map<Str, Str>> {
+  let want = segments(pattern)
+  let got = segments(path)
+  if want.len() != got.len() {
+    return None
+  }
+  var params: Map<Str, Str> = Map.new()
+  for i in 0..want.len() {
+    let w = want[i]
+    if w.starts_with(":") {
+      params.insert(w[1..w.len()], decode(got[i]))
+    } else if w != got[i] {
+      return None
+    }
+  }
+  return Some(params)
+}
+
+/// The first route whose pattern matches `path`, with what it captures.
+pub fn find<T>(routes: List<(Str, T)>, path: Str) -> Option<(T, Map<Str, Str>)> {
+  for r in routes {
+    match match_path(r.0, path) {
+      Some(params) => {
+        return Some((r.1, params))
+      }
+      None => {}
+    }
+  }
+  return None
+}

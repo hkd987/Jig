@@ -1,0 +1,125 @@
+import "std/io"
+import "std/lists"
+import "std/net"
+import "std/os"
+import "router"
+import "ui"
+
+// `ssr [ADDR [N]]` serves a small blog over HTTP on ADDR (default :8080), forever or for N
+// requests, every page rendered on the server: the pages are components built from `ui`'s
+// nodes, and `router` picks the page for a path. Whatever a post or a path holds is text
+// on the page, never markup.
+
+struct Post {
+  id: Int
+  title: Str
+  body: Str
+}
+
+fn posts() -> List<Post> {
+  return [
+    Post {
+      id: 1
+      title: "Hello from Jig"
+      body: "Every page on this site is built as a tree of nodes and rendered on the server."
+    },
+    Post {
+      id: 2
+      title: "Escaping <, > and &"
+      body: "Text is text: <b>this</b> shows as written, not in bold."
+    },
+  ]
+}
+
+enum Page {
+  Home
+  Article
+  About
+}
+
+fn routes() -> List<(Str, Page)> {
+  return [("/", Page.Home), ("/posts/:id", Page.Article), ("/about", Page.About)]
+}
+
+/// What every page shares: the navigation, the title, then `content`, then a footer that
+/// says which request this is.
+fn layout(title: Str, content: List<ui.Node>, visit: Int) -> Str {
+  let nav = ui.tag("nav", [ui.link("/", "Posts"), ui.text(" | "), ui.link("/about", "About")])
+  var body = [nav, ui.tag("h1", [ui.text(title)])]
+  body.extend(content)
+  body.push(ui.tag("footer", [ui.text("request " + visit.str())]))
+  return ui.document(title, body)
+}
+
+fn home(ps: List<Post>) -> List<ui.Node> {
+  var items: List<ui.Node> = []
+  for p in ps {
+    items.push(ui.tag("li", [ui.link("/posts/" + p.id.str(), p.title)]))
+  }
+  return [ui.tag("ul", items)]
+}
+
+/// The post whose id is `id`.
+fn post(id: Option<Str>) -> Option<Post> {
+  let n = match id {
+    Some(s) => s.to_int()
+    None => None
+  }
+  return match n {
+    Some(k) => lists.find(posts(), fn(p) { p.id == k })
+    None => None
+  }
+}
+
+/// The status and HTML for `path`, the `visit`th request.
+fn view(path: Str, visit: Int) -> (Str, Str) {
+  let missing = (
+    "404 Not Found",
+    layout("Not found", [ui.tag("p", [ui.text("Nothing at " + path)])], visit),
+  )
+  return match router.find(routes(), path) {
+    Some((Home, _)) => ("200 OK", layout("Posts", home(posts()), visit))
+    Some((Article, params)) => match post(params.get("id")) {
+      Some(p) => ("200 OK", layout(p.title, [ui.tag("p", [ui.text(p.body)])], visit))
+      None => missing
+    }
+    Some((About, _)) => {
+      let about = "A blog in Jig: a render engine, a router and net.serve_http."
+      ("200 OK", layout("About", [ui.tag("p", [ui.text(about)])], visit))
+    }
+    None => missing
+  }
+}
+
+fn reply(status: Str, html: Str) -> Str
+  ensures result.len() > html.len()
+{
+  return "HTTP/1.1 " +
+    status +
+    "\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: " +
+    html.len().str() +
+    "\r\nConnection: close\r\n\r\n" +
+    html
+}
+
+/// One request: `GET` a page; the state counts requests.
+fn handle(count: Int, raw: Str) -> (Int, Str) {
+  let n = if count < 1000000000 { count + 1 } else { count }
+  let words = raw.lines().first().unwrap_or("").split(" ")
+  if words[0] != "GET" || words.len() < 2 {
+    return (n, "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+  }
+  let (status, html) = view(words[1], n)
+  return (n, reply(status, html))
+}
+
+fn main() effects {io, env, net} {
+  let args = os.args()
+  let addr = if args.len() > 1 { args[1] } else { ":8080" }
+  let limit = if args.len() > 2 { max(args[2].to_int().unwrap_or(0), 0) } else { 0 }
+  io.println("listening on " + addr)
+  match net.serve_http(addr, 0, handle, limit) {
+    Ok(n) => io.println("served " + n.str() + " requests")
+    Err(e) => io.eprintln(e)
+  }
+}

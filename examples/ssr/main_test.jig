@@ -1,0 +1,44 @@
+import "std/sim"
+
+fn get(path: Str) -> Str {
+  return "GET " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n"
+}
+
+test "the home page lists the posts, titles escaped" {
+  let (status, html) = view("/", 1)
+  assert(status == "200 OK")
+  assert(html.contains("<li><a href=\"/posts/1\">Hello from Jig</a></li>"))
+  assert(html.contains("Escaping &lt;, &gt; and &amp;"))
+  assert(html.contains("<footer>request 1</footer>"))
+}
+
+test "a post's page shows its body as text" {
+  let (status, html) = view("/posts/2", 5)
+  assert(status == "200 OK")
+  assert(html.contains("<title>Escaping &lt;, &gt; and &amp;</title>"))
+  assert(
+    html.contains("<p>Text is text: &lt;b&gt;this&lt;/b&gt; shows as written, not in bold.</p>"),
+  )
+}
+
+test "unknown pages and posts are 404s, and the path is shown as text" {
+  assert(view("/posts/9", 1).0 == "404 Not Found")
+  assert(view("/posts/nine", 1).0 == "404 Not Found")
+  let (status, html) = view("/<script>", 1)
+  assert(status == "404 Not Found")
+  assert(html.contains("<p>Nothing at /&lt;script&gt;</p>"))
+}
+
+test "the server renders each request, counting them" {
+  sim.connect(":8080", get("/about"))
+  sim.connect(":8080", "POST / HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
+  sim.connect(":8080", get("/posts/1"))
+  sim.set_args(["ssr", ":8080", "3"])
+  main()
+  let answers = sim.answers(":8080")
+  assert(answers.len() == 3)
+  assert(answers[0] == reply("200 OK", view("/about", 1).1))
+  assert(answers[1].starts_with("HTTP/1.1 405 Method Not Allowed\r\n"))
+  assert(answers[2].contains("<h1>Hello from Jig</h1>") && answers[2].contains("request 3"))
+  assert(sim.stdout() == "listening on :8080\nserved 3 requests\n")
+}

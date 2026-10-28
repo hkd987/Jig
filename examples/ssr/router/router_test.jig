@@ -1,0 +1,34 @@
+test "segments match literally, and `:name` segments capture" {
+  let m = match_path("/posts/:id", "/posts/7")
+  assert(m.is_some())
+  assert(m.unwrap().get("id") == Some("7"))
+  assert(match_path("/posts/:id", "/posts") == None)
+  assert(match_path("/posts/:id", "/users/7") == None)
+  assert(match_path("/", "/").is_some())
+}
+
+test "the query string and a trailing slash do not count" {
+  assert(match_path("/about", "/about/?ref=home").is_some())
+  assert(match_path("/posts/:id", "/posts/7/?x=1").unwrap().get("id") == Some("7"))
+}
+
+test "captures are decoded" {
+  assert(decode("a%20b%2Fc") == "a b/c")
+  assert(decode("100%") == "100%")
+  assert(decode("%zz%4") == "%zz%4")
+  assert(match_path("/tags/:t", "/tags/caf%C3%A9").unwrap().get("t") == Some("café"))
+}
+
+test "the first matching route wins" {
+  let routes = [("/posts/new", 1), ("/posts/:id", 2), ("/", 3)]
+  assert(find(routes, "/posts/new").map(fn(r) { r.0 }) == Some(1))
+  assert(find(routes, "/posts/9").map(fn(r) { r.0 }) == Some(2))
+  assert(find(routes, "/nope/9").is_none())
+}
+
+// A segment without "/", "?" or "%" is captured as it is.
+test "a pattern captures any segment"(id: Str)
+  requires !id.is_empty(), !id.contains("/"), !id.contains("?"), !id.contains("%")
+{
+  assert(match_path("/posts/:id", "/posts/" + id).unwrap().get("id") == Some(id))
+}
