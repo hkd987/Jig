@@ -273,7 +273,9 @@ Changes to both compilers:
 
 Tools and platforms:
 
-- [ ] macOS in CI and in the release.
+- [x] macOS in CI and in the release: a job on Apple silicon builds jigc from the C bootstrap
+      with the system's clang, checks the fixed point and runs every suite; the release
+      publishes a macOS arm64 binary next to the Linux one.
 - [ ] Editor support (D36): `jig lsp` (diagnostics, types on hover, go to definition,
       formatting) and a VS Code extension.
 - [ ] Modules: a package index on the site. Modules already resolve by URL and git tag, as

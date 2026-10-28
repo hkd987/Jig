@@ -20,7 +20,7 @@ Some rows are research rather than implementation; they say so.
 | Prover: invariants over a table's every element (D29) | quantified invariants checked incrementally | open; research: the design is not settled |
 | Checker speed | 100k lines under 100 ms with jigc | open |
 | Float-heavy code behind Rust | nbody within 10% | open |
-| Linux only | macOS in CI and the release | open |
+| Linux only | macOS in CI and the release | done: CI's macOS job (Apple silicon) checks the fixed point and passes every suite with jigc; the release builds for both |
 | No editor support | `jig lsp` and a VS Code extension (D36) | open |
 | No package registry | an index on the site; modules resolve by URL and tag | open; a hosted registry is outside this repository |
 | No Windows | port the runtime | open; a port of sockets, threads and C loading |

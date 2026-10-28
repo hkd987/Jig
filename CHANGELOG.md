@@ -35,6 +35,9 @@ rendered), `json`, `hash` (SHA-256, HMAC-SHA-256), `regex` (matched in linear ti
 `time` (with UTC calendar dates, ISO 8601 and HTTP dates), `rand`, `os`, `task` (fork-join),
 `math`, `lists`, `strings`; 83% of its functions have contracts that prove completely.
 
+**Platforms.** Linux (x86-64) and macOS (Apple silicon), each tested in CI with the
+compiler built from the C bootstrap; release binaries for both.
+
 **Documentation.** A documentation site, built from the repository's Markdown by `site/`,
 a Jig program, and deployed to GitHub Pages.
 
