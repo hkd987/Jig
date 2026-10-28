@@ -26,6 +26,7 @@ own sources into C that rebuilds it byte for byte. The language may still change
 - [Language reference](docs/reference.md) (about 6,000 tokens: it fits in an agent's context)
 - [Build plan](docs/plan.md) and the gate reports in [`docs/gates`](docs/gates)
 - [Decisions](docs/decisions.md)
+- [Packages](docs/packages.md): using and publishing modules, and the index of published ones
 - [The agent plugin](plugin/README.md)
 - [The self-hosted compiler](selfhost/README.md) and [its bootstrap](bootstrap/README.md)
 

@@ -18,6 +18,7 @@ fn pages() -> List<(Str, Str)> {
     ("README.md", "index.html"),
     ("docs/reference.md", "reference.html"),
     ("docs/examples.md", "examples.html"),
+    ("docs/packages.md", "packages.html"),
     ("docs/plan.md", "plan.html"),
     ("docs/decisions.md", "decisions.html"),
     ("CHANGELOG.md", "changelog.html"),
@@ -37,6 +38,7 @@ fn nav() -> List<(Str, Str)> {
   return [
     ("Reference", "reference.html"),
     ("Examples", "examples.html"),
+    ("Packages", "packages.html"),
     ("Plan", "plan.html"),
     ("Decisions", "decisions.html"),
     ("Changelog", "changelog.html"),

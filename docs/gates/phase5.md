@@ -18,10 +18,10 @@ Some rows are research rather than implementation; they say so.
 | C interop: numbers and strings only | buffers, pointers, structs, callbacks (D35) | done for buffers (`List<U8>`, `&mut List<U8>`), pointers (`Int`) and structs (buffers read by offset), natively and on both interpreters; callbacks are out: jigc's interpreter cannot be re-entered from C (D35) |
 | Prover: `starts_with`, `join`, bit operations | models in both provers | done for bit operations (exact for constant shifts, masks and `~`, bounded otherwise) and the length facts of `starts_with`/`ends_with`/`contains`; string contents and `join` stay out, as strings are lengths to the prover |
 | Prover: invariants over a table's every element (D29) | quantified invariants checked incrementally | open; research: the design is not settled |
-| Checker speed | 100k lines under 100 ms with jigc | open |
-| Float-heavy code behind Rust | nbody within 10% | open |
+| Checker speed | 100k lines under 100 ms with jigc | open; research. jigc checks on one thread, and checking on several needs reference counts that stay cheap on the thread that owns a value (phase 4's report). Today's additions left the check where it was: instruction counts are within CI's 2% gate on every push, and wall times on this machine (0.40 to 0.48 s for the 98k-line corpus) show no trend across the day's commits |
+| Float-heavy code behind Rust | nbody within 10% | open; measured. Jig's inner loop is 43 instructions with no checks left in it (bounds proved, the list made unique once per call); Rust's is fully unrolled, because LLVM sees that the vector holds five bodies and keeps them in registers for a whole step. Jig's list is built by runtime calls, so its length is not visible to the C compiler; `-O3` and `-funroll-loops` change nothing. 1.47 in instructions, 1.18 to 1.4 in time |
 | Linux only | macOS in CI and the release | done: CI's macOS job (Apple silicon) checks the fixed point and passes every suite with jigc; the release builds for both |
 | No editor support | `jig lsp` and a VS Code extension (D36) | open |
-| No package registry | an index on the site; modules resolve by URL and tag | open; a hosted registry is outside this repository |
+| No package registry | an index on the site; modules resolve by URL and tag | done: [`docs/packages.md`](../packages.md), on the site as Packages: using and publishing a module, and the index (published by pull request); a hosted registry is outside this repository |
 | No Windows | port the runtime | open; a port of sockets, threads and C loading |
 | Agent turns | three runs per task and language | open; needs agent runs outside CI |
