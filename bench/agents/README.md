@@ -39,4 +39,7 @@ python3 bench/agents/run.py ~/.local/bin/jig \
 ```
 
 Each language can run as its own process (`--lang jig`, `rust`, `ts`) at the same time.
-`docs/gates/phase4.md` has the results of the runs made so far.
+To see where the turns go, give the agent `--output-format stream-json --verbose` and
+`run.py --transcripts DIR`, which keeps each run's messages as `DIR/TASK-LANG.jsonl`.
+`docs/gates/phase4.md` has the first runs, one per task and language, and
+`docs/gates/phase5.md` three per task and language (`results/`).

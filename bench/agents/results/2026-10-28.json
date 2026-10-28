@@ -1,0 +1,548 @@
+{
+  "date": "2026-10-28",
+  "agent": "Claude Code (`claude -p`), three runs per task and language",
+  "command": "claude -p --output-format json --max-turns 40 --permission-mode acceptEdits --allowedTools Read Edit Write Glob Grep Bash(./check.sh:*) Bash(./prog:*) Bash(jig:*) Bash(rustc:*) Bash(node:*) Bash(cat:*) Bash(ls:*) Bash(head:*) Bash(diff:*) Bash(cmp:*) Bash(echo:*) --",
+  "jig": "jigc 0.1.0-alpha at 41daf20, built from bootstrap/jigc.c",
+  "runs": [
+    {
+      "run": 1,
+      "task": "intervals",
+      "lang": "jig",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 6,
+      "seconds": 23.1
+    },
+    {
+      "run": 2,
+      "task": "intervals",
+      "lang": "jig",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 6,
+      "seconds": 17.9
+    },
+    {
+      "run": 3,
+      "task": "intervals",
+      "lang": "jig",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 6,
+      "seconds": 18.3
+    },
+    {
+      "run": 1,
+      "task": "intervals",
+      "lang": "rust",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 6,
+      "seconds": 33.0
+    },
+    {
+      "run": 2,
+      "task": "intervals",
+      "lang": "rust",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 6,
+      "seconds": 17.6
+    },
+    {
+      "run": 3,
+      "task": "intervals",
+      "lang": "rust",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 6,
+      "seconds": 16.7
+    },
+    {
+      "run": 1,
+      "task": "intervals",
+      "lang": "ts",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 6,
+      "seconds": 23.8
+    },
+    {
+      "run": 2,
+      "task": "intervals",
+      "lang": "ts",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 6,
+      "seconds": 24.4
+    },
+    {
+      "run": 3,
+      "task": "intervals",
+      "lang": "ts",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 6,
+      "seconds": 16.3
+    },
+    {
+      "run": 1,
+      "task": "ledger",
+      "lang": "jig",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 7,
+      "seconds": 34.5
+    },
+    {
+      "run": 2,
+      "task": "ledger",
+      "lang": "jig",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 6,
+      "seconds": 36.7
+    },
+    {
+      "run": 3,
+      "task": "ledger",
+      "lang": "jig",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 8,
+      "seconds": 32.8
+    },
+    {
+      "run": 1,
+      "task": "ledger",
+      "lang": "rust",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 6,
+      "seconds": 27.4
+    },
+    {
+      "run": 2,
+      "task": "ledger",
+      "lang": "rust",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 7,
+      "seconds": 31.9
+    },
+    {
+      "run": 3,
+      "task": "ledger",
+      "lang": "rust",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 7,
+      "seconds": 28.6
+    },
+    {
+      "run": 1,
+      "task": "ledger",
+      "lang": "ts",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 6,
+      "seconds": 28.5
+    },
+    {
+      "run": 2,
+      "task": "ledger",
+      "lang": "ts",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 6,
+      "seconds": 24.3
+    },
+    {
+      "run": 3,
+      "task": "ledger",
+      "lang": "ts",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 7,
+      "seconds": 28.5
+    },
+    {
+      "run": 1,
+      "task": "maze",
+      "lang": "jig",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 6,
+      "seconds": 25.2
+    },
+    {
+      "run": 2,
+      "task": "maze",
+      "lang": "jig",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 6,
+      "seconds": 20.5
+    },
+    {
+      "run": 3,
+      "task": "maze",
+      "lang": "jig",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 6,
+      "seconds": 19.9
+    },
+    {
+      "run": 1,
+      "task": "maze",
+      "lang": "rust",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 6,
+      "seconds": 21.6
+    },
+    {
+      "run": 2,
+      "task": "maze",
+      "lang": "rust",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 6,
+      "seconds": 22.3
+    },
+    {
+      "run": 3,
+      "task": "maze",
+      "lang": "rust",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 6,
+      "seconds": 22.8
+    },
+    {
+      "run": 1,
+      "task": "maze",
+      "lang": "ts",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 6,
+      "seconds": 19.8
+    },
+    {
+      "run": 2,
+      "task": "maze",
+      "lang": "ts",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 6,
+      "seconds": 17.4
+    },
+    {
+      "run": 3,
+      "task": "maze",
+      "lang": "ts",
+      "passed": 5,
+      "cases": 5,
+      "solved": true,
+      "turns": 6,
+      "seconds": 17.6
+    },
+    {
+      "run": 1,
+      "task": "roman",
+      "lang": "jig",
+      "passed": 4,
+      "cases": 4,
+      "solved": true,
+      "turns": 9,
+      "seconds": 31.3
+    },
+    {
+      "run": 2,
+      "task": "roman",
+      "lang": "jig",
+      "passed": 4,
+      "cases": 4,
+      "solved": true,
+      "turns": 7,
+      "seconds": 29.8
+    },
+    {
+      "run": 3,
+      "task": "roman",
+      "lang": "jig",
+      "passed": 4,
+      "cases": 4,
+      "solved": true,
+      "turns": 7,
+      "seconds": 25.9
+    },
+    {
+      "run": 1,
+      "task": "roman",
+      "lang": "rust",
+      "passed": 4,
+      "cases": 4,
+      "solved": true,
+      "turns": 6,
+      "seconds": 23.2
+    },
+    {
+      "run": 2,
+      "task": "roman",
+      "lang": "rust",
+      "passed": 4,
+      "cases": 4,
+      "solved": true,
+      "turns": 6,
+      "seconds": 22.7
+    },
+    {
+      "run": 3,
+      "task": "roman",
+      "lang": "rust",
+      "passed": 4,
+      "cases": 4,
+      "solved": true,
+      "turns": 10,
+      "seconds": 32.8
+    },
+    {
+      "run": 1,
+      "task": "roman",
+      "lang": "ts",
+      "passed": 4,
+      "cases": 4,
+      "solved": true,
+      "turns": 7,
+      "seconds": 33.0
+    },
+    {
+      "run": 2,
+      "task": "roman",
+      "lang": "ts",
+      "passed": 4,
+      "cases": 4,
+      "solved": true,
+      "turns": 6,
+      "seconds": 21.3
+    },
+    {
+      "run": 3,
+      "task": "roman",
+      "lang": "ts",
+      "passed": 4,
+      "cases": 4,
+      "solved": true,
+      "turns": 6,
+      "seconds": 25.6
+    },
+    {
+      "run": 1,
+      "task": "rpn",
+      "lang": "jig",
+      "passed": 7,
+      "cases": 7,
+      "solved": true,
+      "turns": 8,
+      "seconds": 29.0
+    },
+    {
+      "run": 2,
+      "task": "rpn",
+      "lang": "jig",
+      "passed": 7,
+      "cases": 7,
+      "solved": true,
+      "turns": 6,
+      "seconds": 36.5
+    },
+    {
+      "run": 3,
+      "task": "rpn",
+      "lang": "jig",
+      "passed": 7,
+      "cases": 7,
+      "solved": true,
+      "turns": 6,
+      "seconds": 29.2
+    },
+    {
+      "run": 1,
+      "task": "rpn",
+      "lang": "rust",
+      "passed": 7,
+      "cases": 7,
+      "solved": true,
+      "turns": 6,
+      "seconds": 20.3
+    },
+    {
+      "run": 2,
+      "task": "rpn",
+      "lang": "rust",
+      "passed": 7,
+      "cases": 7,
+      "solved": true,
+      "turns": 6,
+      "seconds": 26.3
+    },
+    {
+      "run": 3,
+      "task": "rpn",
+      "lang": "rust",
+      "passed": 7,
+      "cases": 7,
+      "solved": true,
+      "turns": 6,
+      "seconds": 26.0
+    },
+    {
+      "run": 1,
+      "task": "rpn",
+      "lang": "ts",
+      "passed": 7,
+      "cases": 7,
+      "solved": true,
+      "turns": 6,
+      "seconds": 22.4
+    },
+    {
+      "run": 2,
+      "task": "rpn",
+      "lang": "ts",
+      "passed": 7,
+      "cases": 7,
+      "solved": true,
+      "turns": 6,
+      "seconds": 22.3
+    },
+    {
+      "run": 3,
+      "task": "rpn",
+      "lang": "ts",
+      "passed": 7,
+      "cases": 7,
+      "solved": true,
+      "turns": 6,
+      "seconds": 20.3
+    },
+    {
+      "run": 1,
+      "task": "wordfreq",
+      "lang": "jig",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 9,
+      "seconds": 21.9
+    },
+    {
+      "run": 2,
+      "task": "wordfreq",
+      "lang": "jig",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 6,
+      "seconds": 18.9
+    },
+    {
+      "run": 3,
+      "task": "wordfreq",
+      "lang": "jig",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 6,
+      "seconds": 17.9
+    },
+    {
+      "run": 1,
+      "task": "wordfreq",
+      "lang": "rust",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 6,
+      "seconds": 30.1
+    },
+    {
+      "run": 2,
+      "task": "wordfreq",
+      "lang": "rust",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 6,
+      "seconds": 21.5
+    },
+    {
+      "run": 3,
+      "task": "wordfreq",
+      "lang": "rust",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 6,
+      "seconds": 17.7
+    },
+    {
+      "run": 1,
+      "task": "wordfreq",
+      "lang": "ts",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 6,
+      "seconds": 16.7
+    },
+    {
+      "run": 2,
+      "task": "wordfreq",
+      "lang": "ts",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 6,
+      "seconds": 15.6
+    },
+    {
+      "run": 3,
+      "task": "wordfreq",
+      "lang": "ts",
+      "passed": 6,
+      "cases": 6,
+      "solved": true,
+      "turns": 6,
+      "seconds": 23.2
+    }
+  ]
+}

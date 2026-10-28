@@ -91,8 +91,8 @@ human approval between steps. `jig mcp` serves the same tools over MCP.
 
 ## Numbers
 
-Measured in CI on every push, except the agent runs, which are one run per task and language
-so far (see `bench/` and `docs/gates/`):
+Measured in CI on every push, except the agent runs, which are three runs per task and
+language (see `bench/` and `docs/gates/`):
 
 | Metric | Target | Now |
 | --- | --- | --- |
@@ -103,8 +103,8 @@ so far (see `bench/` and `docs/gates/`):
 | Self-hosted compiler vs bootstrap (instructions) | equal or faster | 0.94 |
 | Standard library functions with proven contracts | over 80% | 83% (134 of 161) |
 | Compiler functions with proven contracts | over 80% | 39% (477 of 1,229; 78% have no unproven obligation but a table index) |
-| Agent tasks reaching a verified build, vs Rust | equal or better | 6 of 6 (Rust 6 of 6) |
-| Agent turns per task, vs Rust and TypeScript | equal or fewer | 7.3 (Rust 6.8, TypeScript 6.2) |
+| Agent tasks reaching a verified build, vs Rust | equal or better | 18 of 18 runs (Rust 18 of 18) |
+| Agent turns per task, vs Rust and TypeScript | equal or fewer | 6.7 (Rust 6.3, TypeScript 6.1) |
 
 ## Known gaps
 
@@ -124,8 +124,8 @@ Jig is an alpha. What it does not do yet (phase 5 of [the plan](docs/plan.md) cl
   lookups stay run-time checks (D29).
 - **Speed.** `jig check` is about three times slower than the Rust compiler it replaced (one
   thread against four), and float-heavy code runs behind Rust (nbody, 1.44).
-- **Agents** took a few more turns in Jig than in Rust and TypeScript (one run per task so
-  far).
+- **Agents** took about half a turn more in Jig than in Rust and TypeScript (three runs per
+  task and language).
 - **Platforms and tools.** CI and the release cover Linux (x86-64) and macOS (Apple
   silicon); other POSIX systems should build it with `bootstrap/install.sh` but are untested,
   and there is no Windows port. The language server (`jig lsp`, and the VS Code extension in

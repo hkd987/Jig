@@ -297,8 +297,9 @@ Tools and platforms:
 - [x] Modules: a package index on the site. Modules already resolve by URL and git tag, as
       Go's do; hosting a registry service is outside what this repository can deploy.
 - [ ] Windows: the runtime is POSIX (sockets, threads, `dlopen`), so it needs a port.
-- [ ] Agent benchmark: three runs per task and language, to separate the turn counts from
-      the noise.
+- [x] Agent benchmark: three runs per task and language, to separate the turn counts from
+      the noise. Every run solved its task; Jig 6.7 turns, Rust 6.3, TypeScript 6.1
+      (`docs/gates/phase5.md`).
 
 ## Working rules
 

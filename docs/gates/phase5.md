@@ -24,4 +24,27 @@ Some rows are research rather than implementation; they say so.
 | No editor support | `jig lsp` and a VS Code extension (D36) | done: diagnostics as you type, hover, definition and formatting, tested by a scripted session in jigc's suites and against vscode-jsonrpc; `editors/vscode` packages in CI. Completion, references and rename are not done |
 | No package registry | an index on the site; modules resolve by URL and tag | done: [`docs/packages.md`](../packages.md), on the site as Packages: using and publishing a module, and the index (published by pull request); a hosted registry is outside this repository |
 | No Windows | port the runtime | open; a port. The runtime needs Winsock for sockets, `LoadLibrary` for `dlopen`, its own `getline` and no `SIGPIPE` (MinGW-w64 has pthreads and `dirent`); jigc runs the C compiler and git through a POSIX shell (`mkdir -p '…'`, quoting, redirections) for `jig build` and `jig get`. With no Windows machine here, it would be iterated against a CI runner |
-| Agent turns | three runs per task and language | open; needs agent runs outside CI |
+| Agent turns | three runs per task and language | done: three runs of each of the six tasks in each language (below); every run reached a verified build. Jig took 6.7 turns on average, Rust 6.3 and TypeScript 6.1, so the PRD's "equal or fewer" is still not met, by less than the one-turn spread between runs of the same task |
+
+## Agent runs
+
+`bench/agents/run.py` on 2026-10-28, with jigc at 41daf20 as `jig`: a Claude Code agent
+(`claude -p`, at most 40 turns, the same short list of tools in every language), three
+times per task and language (`bench/agents/results/2026-10-28.json`). Turns per run:
+
+| Task | Jig | Rust | TypeScript |
+| --- | --- | --- | --- |
+| intervals | 6, 6, 6 | 6, 6, 6 | 6, 6, 6 |
+| ledger | 7, 6, 8 | 6, 7, 7 | 6, 6, 7 |
+| maze | 6, 6, 6 | 6, 6, 6 | 6, 6, 6 |
+| roman | 9, 7, 7 | 6, 6, 10 | 7, 6, 6 |
+| rpn | 8, 6, 6 | 6, 6, 6 | 6, 6, 6 |
+| wordfreq | 9, 6, 6 | 6, 6, 6 | 6, 6, 6 |
+| Mean | 6.7 | 6.3 | 6.1 |
+
+All 54 runs solved their task, and most took six turns in every language. Three more Jig
+runs kept their transcripts (`run.py --transcripts`) to show what the turns above six are.
+Most are the agent's own extra care, such as probing amounts near 2^63 in `ledger` or
+dumping the cases with `cat -A`. One was the language: a lookup table written as
+`const VALUES: List<Int> = [...]` failed with E0329, since a constant could only be a
+literal or arithmetic on other constants.

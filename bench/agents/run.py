@@ -13,7 +13,8 @@ usage:
       For each task and language, give the agent a fresh workspace with the task, a stub and
       a check script, run it, then score the result on the cases (the workspace's own copy may
       have been edited). Turns are read from the agent's JSON output (`num_turns`) when it
-      prints one.
+      prints one. With `--transcripts DIR`, each run's output is kept as DIR/TASK-LANG.jsonl
+      (give the agent `--output-format stream-json --verbose` to keep every message).
 
 A task is `tasks/NAME/task.md` (what to build: a program reading standard input) and
 `tasks/NAME/cases/*.in|.out`. A Jig solution must also pass `jig check` (types, effects,
@@ -126,6 +127,18 @@ echo "$pass passed, $fail failed"
     os.chmod(path, 0o755)
 
 
+def agent_turns(out):
+    """`num_turns` from the agent's JSON output: one object (`--output-format json`), or the
+    last line of a stream (`stream-json`)."""
+    lines = out.strip().splitlines()
+    for text in [out] + lines[-1:]:
+        try:
+            return json.loads(text).get("num_turns")
+        except (ValueError, AttributeError):
+            pass
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("jig")
@@ -134,6 +147,7 @@ def main():
     ap.add_argument("--lang", default=",".join(LANGS))
     ap.add_argument("--task")
     ap.add_argument("--out")
+    ap.add_argument("--transcripts")
     ap.add_argument("--timeout", type=int, default=1800)
     a = ap.parse_args()
     jig = os.path.abspath(a.jig)
@@ -155,10 +169,11 @@ def main():
                     r = subprocess.run(a.agent.split() + [PROMPT.format(lang={"jig": "Jig", "rust": "Rust", "ts": "TypeScript"}[lang], src=SOURCE[lang])],
                                        cwd=ws, capture_output=True, text=True, timeout=a.timeout)
                     secs = time.time() - t
-                    try:
-                        turns = json.loads(r.stdout).get("num_turns")
-                    except (ValueError, AttributeError):
-                        turns = None
+                    if a.transcripts:
+                        os.makedirs(a.transcripts, exist_ok=True)
+                        with open(os.path.join(a.transcripts, f"{task}-{lang}.jsonl"), "w") as f:
+                            f.write(r.stdout)
+                    turns = agent_turns(r.stdout)
                 passed, total, first = score(jig, lang, task, ws)
                 ok = passed == total
                 failures += not ok
