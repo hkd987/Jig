@@ -20,6 +20,7 @@ jig run examples/http -- :8080 # run it (then: curl localhost:8080)
 | [postgres](../examples/postgres) | Notes in a Postgres table, through libpq behind the `ffi` effect; SQL built and tested as pure code | `jig run examples/postgres -- list` |
 | [guestbook](../examples/guestbook) | A web app on Postgres with a JSON API: an HTTP handler that queries the database, tested against fakes | `jig test examples/guestbook` |
 | [ssr](../examples/ssr) | Pages rendered on the server with `std/html`, a router package with `:params`, a blog served over HTTP | `jig run examples/ssr -- :8080` |
+| [fetch](../examples/fetch) | An HTTP client: `net.get` and `net.post`, HTTPS with checked certificates, redirects; tested on simulated servers | `jig run examples/fetch -- https://example.com` |
 | [greet](../examples/greet) | TCP client and server with `net.request` and `net.serve` | `jig test examples/greet` |
 | [wordfreq](../examples/wordfreq) | Reading standard input, maps, sorting | `echo "a b a" \| jig run examples/wordfreq` |
 | [calc](../examples/calc) | A tokenizer, a recursive-descent parser and an evaluator | `echo "2 * (3 + 4)" \| jig run examples/calc` |
@@ -251,6 +252,27 @@ listening on :8080
 $ curl localhost:8080/posts/2
 <!doctype html>
 <html><head><meta charset="utf-8"><title>Escaping &lt;, &gt; and &amp;</title></head>...
+```
+
+## An HTTP client
+
+`examples/fetch` GETs a URL, or POSTs a body to it, and prints the status and the body.
+`net.get` follows redirects; `https://` goes over TLS through the system's OpenSSL, and the
+server's certificate must chain to a trusted root and name the host, or the fetch fails
+with the reason. The work is in `run(args) -> Int`, which returns the exit code, so the
+tests call it directly against simulated servers (`sim.reply`) and check the requests it
+sent (`sim.requests`); CI also runs it, natively and on the interpreter, against a local
+HTTPS server whose certificate a throwaway CA signs.
+
+```
+$ jig run examples/fetch -- https://example.com
+200
+<!doctype html>...
+$ jig run examples/fetch -- https://localhost:8443/   # a certificate no trusted root signed
+fetch: localhost:8443: TLS handshake failed: unable to get local issuer certificate
+$ jig run examples/fetch -- http://localhost:8080/notes text/plain "buy milk"
+201
+...
 ```
 
 ## What the checks catch

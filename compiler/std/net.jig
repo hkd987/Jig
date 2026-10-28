@@ -5,6 +5,15 @@
 /// Send `request` to the server at `addr` and return its reply.
 pub fn request(addr: Str, request: Str) -> Result<Str, Str> effects {net}
 
+/// Send the HTTP request `request` to `addr` and read the reply until the server closes the
+/// connection, which a request with `Connection: close` asks it to; unlike `request`, the
+/// sending side stays open. With `tls`, the connection is TLS through the system's OpenSSL,
+/// opened when first needed: the server's certificate must chain to a trusted root (the
+/// system's, or the file `SSL_CERT_FILE` names) and name the host in `addr`. A read waits at
+/// most 30 seconds. In tests it answers from the replies queued with `sim.reply` for `addr`,
+/// as `request` does. `get`, `post` and `send` build on it.
+pub fn fetch(addr: Str, request: Str, tls: Bool) -> Result<Str, Str> effects {net}
+
 /// Serve on `addr`, one connection at a time. Each request goes to `handle` with the
 /// current state, which returns the new state and the reply; serving performs whatever
 /// effects `handle` has. Returns the final state after `limit` requests (0: keep serving).
@@ -27,3 +36,411 @@ pub fn serve_http<S>(
 ) -> Result<S, Str>
   requires limit >= 0
   effects {net, handle}
+
+// ---- HTTP messages, written in Jig ----
+
+/// A URL `send` can fetch: `http://` or `https://`, a host, an optional port and a path with
+/// any query (`/` if none).
+pub struct Url {
+  pub tls: Bool
+  pub host: Str
+  pub port: Int
+  pub path: Str
+  invariant port >= 1 && port <= 65535
+}
+
+/// An HTTP reply.
+pub struct Response {
+  pub status: Int
+  pub headers: List<(Str, Str)>
+  pub body: Str
+}
+
+/// An HTTP request, as `serve_http` hands it to a handler.
+pub struct Request {
+  pub method: Str
+  pub path: Str
+  pub headers: List<(Str, Str)>
+  pub body: Str
+}
+
+/// Where `part` first occurs in `s` at or after `from`, or -1.
+fn index_from(s: Str, part: Str, from: Int) -> Int
+  requires from >= 0
+  ensures result == -1 || result >= from && result <= s.len() - part.len()
+{
+  let n = part.len()
+  if n > s.len() {
+    return -1
+  }
+  for i in from..s.len() - n + 1 {
+    if s[i..i + n] == part {
+      return i
+    }
+  }
+  return -1
+}
+
+/// `url`'s parts, or what is wrong with it.
+pub fn parse_url(url: Str) -> Result<Url, Str>
+  ensures result.is_err() || !result.unwrap().host.is_empty()
+{
+  var tls = false
+  var start = 0
+  if url.len() >= 8 && url[0..8].to_lower() == "https://" {
+    tls = true
+    start = 8
+  } else if url.len() >= 7 && url[0..7].to_lower() == "http://" {
+    start = 7
+  } else {
+    return Err("`" + url + "` is not an http:// or https:// URL")
+  }
+  // The host and port end at the first `/`, `?` or `#`.
+  var end = start
+  for end < url.len() && url[end] != 47 && url[end] != 63 && url[end] != 35
+    invariant end >= start && end <= url.len()
+  {
+    end += 1
+  }
+  let authority = url[start..end]
+  var path = url[end..url.len()]
+  let hash = index_from(path, "#", 0)
+  if hash >= 0 {
+    path = path[0..hash]
+  }
+  if path.is_empty() || path[0] != 47 {
+    path = "/" + path
+  }
+  if index_from(authority, "@", 0) >= 0 {
+    return Err("`" + url + "`: a user name or password in a URL is not supported")
+  }
+  var host = authority
+  var port = if tls { 443 } else { 80 }
+  let colon = index_from(authority, ":", 0)
+  if colon >= 0 {
+    host = authority[0..colon]
+    match authority[colon + 1..authority.len()].to_int() {
+      Some(p) => {
+        if p < 1 || p > 65535 {
+          return Err("`" + url + "`: the port must be 1 to 65535")
+        }
+        port = p
+      }
+      None => {
+        return Err("`" + url + "`: the port is not a number")
+      }
+    }
+  }
+  if host.is_empty() {
+    return Err("`" + url + "` has no host")
+  }
+  return Ok(Url { tls: tls, host: host, port: port, path: path })
+}
+
+/// The value of the header `name` (in any case) among `headers`.
+fn header_in(headers: List<(Str, Str)>, name: Str) -> Option<Str>
+  ensures result.is_none() || !headers.is_empty()
+{
+  let want = name.to_lower()
+  for i in 0..headers.len() {
+    if headers[i].0.to_lower() == want {
+      return Some(headers[i].1)
+    }
+  }
+  return None
+}
+
+/// The value of the reply's header `name`, in any case.
+pub fn Response.header(self, name: Str) -> Option<Str>
+  ensures result.is_none() || !self.headers.is_empty()
+{
+  return header_in(self.headers, name)
+}
+
+/// The value of the request's header `name`, in any case.
+pub fn Request.header(self, name: Str) -> Option<Str>
+  ensures result.is_none() || !self.headers.is_empty()
+{
+  return header_in(self.headers, name)
+}
+
+/// The text of a `method` request for `u`: the request line, `Host`, `Connection: close`, a
+/// `Content-Length` when there is a body, then `headers` and `body`.
+pub fn request_text(method: Str, u: Url, headers: List<(Str, Str)>, body: Str) -> Str
+  ensures result.len() > method.len()
+{
+  let default_port = if u.tls { 443 } else { 80 }
+  let host = if u.port == default_port { u.host } else { u.host + ":" + u.port.str() }
+  var out = method + " " + u.path + " HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n"
+  if !body.is_empty() || method == "POST" || method == "PUT" || method == "PATCH" {
+    out += "Content-Length: " + body.len().str() + "\r\n"
+  }
+  for i in 0..headers.len() invariant out.len() > method.len() {
+    out += headers[i].0 + ": " + headers[i].1 + "\r\n"
+  }
+  return out + "\r\n" + body
+}
+
+/// A message's start line and headers, and where its body starts.
+fn parse_head(raw: Str) -> Result<(Str, List<(Str, Str)>, Int), Str>
+  ensures result.is_err() || result.unwrap().2 >= 0 && result.unwrap().2 <= raw.len()
+{
+  let end = index_from(raw, "\r\n\r\n", 0)
+  if end < 0 {
+    return Err("the message ends before its headers do")
+  }
+  let lines = raw[0..end].split("\r\n")
+  var headers: List<(Str, Str)> = []
+  for i in 1..lines.len() {
+    let l = lines[i]
+    let colon = index_from(l, ":", 0)
+    if colon <= 0 {
+      return Err("a header line has no name: `" + l + "`")
+    }
+    headers.push((l[0..colon].trim(), l[colon + 1..l.len()].trim()))
+  }
+  return Ok((lines.get(0).unwrap_or(""), headers, end + 4))
+}
+
+/// The number a chunk's size line gives, in hexadecimal before any `;`, or -1.
+fn hex_value(line: Str) -> Int
+  ensures result >= -1
+{
+  var n = 0
+  var digits = 0
+  for i in 0..line.len() invariant n >= 0 && n < 1099511627776 && digits >= 0 && digits <= i {
+    let b = line[i]
+    if b == 59 {
+      break
+    }
+    if b == 32 || b == 9 {
+      continue
+    }
+    let d = if b >= 48 && b <= 57 {
+      b as Int - 48
+    } else if b >= 97 && b <= 102 {
+      b as Int - 87
+    } else if b >= 65 && b <= 70 {
+      b as Int - 55
+    } else {
+      -1
+    }
+    if d < 0 || n >= 68719476736 {
+      return -1
+    }
+    n = n * 16 + d
+    digits += 1
+  }
+  return if digits == 0 { -1 } else { n }
+}
+
+/// A chunked body (`Transfer-Encoding: chunked`), its chunks joined.
+fn dechunk(s: Str) -> Result<Str, Str>
+  ensures result.is_err() || result.unwrap().len() <= s.len()
+{
+  var out = ""
+  var i = 0
+  for i < s.len() invariant i >= 0 && i <= s.len() && out.len() <= i {
+    let eol = index_from(s, "\r\n", i)
+    if eol < 0 {
+      return Err("a chunk's size line does not end")
+    }
+    let size = hex_value(s[i..eol])
+    if size < 0 {
+      return Err("a chunk's size is not hexadecimal")
+    }
+    let start = eol + 2
+    if size == 0 {
+      return Ok(out)
+    }
+    if size > s.len() - start {
+      return Err("the body ends inside a chunk")
+    }
+    out += s[start..start + size]
+    i = start + size
+    if i > s.len() - 2 || s[i..i + 2] != "\r\n" {
+      return Err("a chunk does not end with a line break")
+    }
+    i += 2
+  }
+  return Err("the body ends before its last chunk")
+}
+
+/// A message's body from `rest`, what follows its headers: joined from chunks, cut to its
+/// `Content-Length`, or all of it.
+fn body_of(headers: List<(Str, Str)>, rest: Str) -> Result<Str, Str>
+  ensures result.is_err() || result.unwrap().len() <= rest.len()
+{
+  match header_in(headers, "transfer-encoding") {
+    Some(te) => {
+      if te.to_lower().contains("chunked") {
+        return dechunk(rest)
+      }
+    }
+    None => {}
+  }
+  return match header_in(headers, "content-length") {
+    Some(v) => match v.to_int() {
+      Some(n) => if n < 0 {
+        Err("a Content-Length is negative")
+      } else if n > rest.len() {
+        Err("the message ends before its body does")
+      } else {
+        Ok(rest[0..n])
+      }
+      None => Err("a Content-Length is not a number: `" + v + "`")
+    }
+    None => Ok(rest)
+  }
+}
+
+/// A reply's status, headers and body, or what is wrong with it.
+pub fn parse_response(raw: Str) -> Result<Response, Str>
+  ensures result.is_err() || result.unwrap().status >= 100 && result.unwrap().status <= 999
+  ensures result.is_err() || result.unwrap().body.len() <= raw.len()
+{
+  let (line, headers, at) = parse_head(raw)?
+  let parts = line.split(" ")
+  if parts.len() < 2 || parts[0].len() < 5 || parts[0][0..5] != "HTTP/" {
+    return Err("not an HTTP reply: `" + line + "`")
+  }
+  let status = parts[1].to_int().unwrap_or(0)
+  if status < 100 || status > 999 {
+    return Err("not an HTTP status: `" + parts[1] + "`")
+  }
+  let body = body_of(headers, raw[at..raw.len()])?
+  return Ok(Response { status: status, headers: headers, body: body })
+}
+
+/// A request's method, path, headers and body, from the text `serve_http` hands a handler.
+pub fn parse_request(raw: Str) -> Result<Request, Str>
+  ensures result.is_err() || result.unwrap().body.len() <= raw.len()
+{
+  let (line, headers, at) = parse_head(raw)?
+  let parts = line.split(" ")
+  if parts.len() != 3 || parts[2].len() < 5 || parts[2][0..5] != "HTTP/" {
+    return Err("not an HTTP request line: `" + line + "`")
+  }
+  let body = body_of(headers, raw[at..raw.len()])?
+  return Ok(Request { method: parts[0], path: parts[1], headers: headers, body: body })
+}
+
+/// The reason phrase HTTP gives `status`, for the common ones.
+fn reason(status: Int) -> Str {
+  let known = [
+    (200, "OK"),
+    (201, "Created"),
+    (204, "No Content"),
+    (301, "Moved Permanently"),
+    (302, "Found"),
+    (303, "See Other"),
+    (304, "Not Modified"),
+    (307, "Temporary Redirect"),
+    (308, "Permanent Redirect"),
+    (400, "Bad Request"),
+    (401, "Unauthorized"),
+    (403, "Forbidden"),
+    (404, "Not Found"),
+    (405, "Method Not Allowed"),
+    (409, "Conflict"),
+    (413, "Content Too Large"),
+    (422, "Unprocessable Content"),
+    (429, "Too Many Requests"),
+    (500, "Internal Server Error"),
+    (502, "Bad Gateway"),
+    (503, "Service Unavailable"),
+  ]
+  for k in known {
+    if k.0 == status {
+      return k.1
+    }
+  }
+  return "Status"
+}
+
+/// A reply for `serve_http` to send: the status line, `Content-Type`, `Content-Length` and
+/// `Connection: close`, then `body`.
+pub fn reply(status: Int, content_type: Str, body: Str) -> Str
+  ensures result.len() > body.len()
+{
+  return "HTTP/1.1 " +
+    status.str() +
+    " " +
+    reason(status) +
+    "\r\nContent-Type: " +
+    content_type +
+    "\r\nContent-Length: " +
+    body.len().str() +
+    "\r\nConnection: close\r\n\r\n" +
+    body
+}
+
+/// Send a `method` request with `headers` and `body` to `url`, and read the reply.
+pub fn send(method: Str, url: Str, headers: List<(Str, Str)>, body: Str) -> Result<Response, Str>
+  ensures result.is_err() || result.unwrap().status >= 100
+  effects {net}
+{
+  let u = parse_url(url)?
+  for h in headers {
+    if h.0.contains(":") || (h.0 + h.1).contains("\r") || (h.0 + h.1).contains("\n") {
+      return Err("a header name has a colon, or a header a line break: `" + h.0 + "`")
+    }
+  }
+  return parse_response(
+    fetch(u.host + ":" + u.port.str(), request_text(method, u, headers, body), u.tls)?,
+  )
+}
+
+/// Where a redirect's `location` points, from `base`: itself when it is absolute, else on
+/// `base`'s scheme, host and port.
+fn resolve(base: Str, location: Str) -> Str {
+  let lower = location.to_lower()
+  if lower.starts_with("http://") || lower.starts_with("https://") {
+    return location
+  }
+  return match parse_url(base) {
+    Ok(u) => {
+      let origin = (if u.tls { "https://" } else { "http://" }) + u.host + ":" + u.port.str()
+      if location.starts_with("/") {
+        origin + location
+      } else {
+        let cut = u.path.split("?").get(0).unwrap_or("/")
+        let parts = cut.split("/")
+        origin + parts[0..max(parts.len() - 1, 0)].join("/") + "/" + location
+      }
+    }
+    Err(_) => location
+  }
+}
+
+/// GET `url`, following up to five redirects.
+pub fn get(url: Str) -> Result<Response, Str>
+  ensures result.is_err() || result.unwrap().status >= 100
+  effects {net}
+{
+  var at = url
+  for _ in 0..6 {
+    let r = send("GET", at, [], "")?
+    let moved = r.status == 301 ||
+      r.status == 302 ||
+      r.status == 303 ||
+      r.status == 307 ||
+      r.status == 308
+    let next = if moved { r.header("location") } else { None }
+    match next {
+      Some(loc) => at = resolve(at, loc)
+      None => {
+        return Ok(r)
+      }
+    }
+  }
+  return Err("more than five redirects from `" + url + "`")
+}
+
+/// POST `body`, of type `content_type`, to `url`.
+pub fn post(url: Str, content_type: Str, body: Str) -> Result<Response, Str>
+  ensures result.is_err() || result.unwrap().status >= 100
+  effects {net}
+{
+  return send("POST", url, [("Content-Type", content_type)], body)
+}

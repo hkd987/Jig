@@ -478,6 +478,7 @@ def suite_net(r):
     if server.communicate(timeout=30)[0].decode() != "greeted 1\n":
         failures.append("net: the interpreted server did not finish")
     failures += net_http(r)
+    failures += net_fetch(r)
     return failures
 
 
@@ -516,6 +517,54 @@ def net_http(r):
         out = server.communicate(timeout=30)[0].decode()
         if out != "listening on %s\nserved 3\n" % addr:
             failures.append("net: the %s http server printed %r" % (how, out))
+    return failures
+
+
+def net_fetch(r):
+    """The fetch example over HTTP and HTTPS against compiler/tests/https_server.py, natively
+    and on the interpreter: certificates are checked, redirects followed, chunks joined."""
+    if not shutil.which("openssl"):
+        print("net: skipping fetch over TLS (no openssl command)")
+        return []
+    failures = []
+    d = r.scratch("net-fetch")
+    certs = os.path.join(d, "certs")
+    os.makedirs(certs, exist_ok=True)
+    shutil.copy(os.path.join(ROOT, "examples/fetch/main.jig"), os.path.join(d, "main.jig"))
+    exe = os.path.join(d, "fetch")
+    code, _, err = r.run(["build", d, "-o", exe])
+    if code != 0:
+        return ["net: fetch build failed: " + err]
+    tls, plain = free_addr().split(":")[1], free_addr().split(":")[1]
+    server = subprocess.Popen([sys.executable, os.path.join(TESTS, "https_server.py"), certs, tls, plain],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    if server.stdout.readline() != b"ready\n":
+        server.kill()
+        return ["net: the HTTPS test server did not start"]
+    ca = os.path.join(certs, "ca.pem")
+    cases = [
+        (["https://localhost:%s/hello" % tls], True, 0, "200\npath=/hello host=localhost:%s\n" % tls),
+        (["https://localhost:%s/old" % tls], True, 0, "200\npath=/hello?x=1 host=localhost:%s\n" % tls),
+        (["https://localhost:%s/echo" % tls, "text/plain", "ping"], True, 0, "201\ngot ping!\n"),
+        (["http://localhost:%s/hello" % plain], False, 0, "200\npath=/hello host=localhost:%s\n" % plain),
+        (["https://localhost:%s/hello" % tls], False, 1,
+         "fetch: localhost:%s: TLS handshake failed: unable to get local issuer certificate\n" % tls),
+        (["https://127.0.0.1:%s/hello" % tls], True, 1,
+         "fetch: 127.0.0.1:%s: TLS handshake failed: IP address mismatch\n" % tls),
+    ]
+    try:
+        for args, trust, want_code, want in cases:
+            env = {k: v for k, v in os.environ.items() if k not in ("SSL_CERT_FILE", "SSL_CERT_DIR")}
+            if trust:
+                env["SSL_CERT_FILE"] = ca
+            for how, cmd in (("native", [exe]), ("interpreted", [r.jigc, "run", d, "--"])):
+                p = subprocess.run(cmd + args, capture_output=True, env=env, cwd=ROOT, timeout=60)
+                got = (p.stdout if want_code == 0 else p.stderr).decode()
+                if (p.returncode, got) != (want_code, want):
+                    failures.append("net: %s fetch %s gave %d %r, not %d %r" % (how, args, p.returncode, got, want_code, want))
+    finally:
+        server.kill()
+        server.wait()
     return failures
 
 

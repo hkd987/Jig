@@ -129,6 +129,7 @@ pub enum Op {
     SimConnect,
     SimAnswers,
     NetRequest,
+    NetFetch,
     NetServe,
     NetServeHttp,
     // compiler-generated
@@ -312,6 +313,7 @@ pub fn lookup(pkg_path: &str, recv: Option<TyKey>, name: &str) -> Option<(Op, Op
             _ => return None,
         },
         ("std/net", None, "request") => NetRequest,
+        ("std/net", None, "fetch") => NetFetch,
         ("std/net", None, "serve") => NetServe,
         ("std/net", None, "serve_http") => NetServeHttp,
         ("std/rand", None, "int") => RandInt,

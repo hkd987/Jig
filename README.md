@@ -65,7 +65,7 @@ for agents.
 
 ## Examples
 
-[Nineteen small projects](docs/examples.md), each checked and tested in CI with both
+[Twenty small projects](docs/examples.md), each checked and tested in CI with both
 compilers, show what Jig code looks like:
 
 - [http](examples/http): a web server in 30 lines, tested on simulated requests
@@ -73,6 +73,7 @@ compilers, show what Jig code looks like:
 - [postgres](examples/postgres): notes in a Postgres table, through libpq behind the `ffi` effect
 - [guestbook](examples/guestbook): a web app on Postgres, its handler tested against a fake database
 - [ssr](examples/ssr): pages rendered on the server with `std/html`, and a router package
+- [fetch](examples/fetch): an HTTP client, HTTPS included, tested on simulated servers
 - [todo](examples/todo): a command-line app on files, every effect in its signatures
 - [stack](examples/stack) and [vending](examples/vending): contracts that all prove
 - [cart](examples/cart) and [bank](examples/bank): behaviour written first as `.feature` scenarios
@@ -96,9 +97,9 @@ so far (see `bench/` and `docs/gates/`):
 | `jig check` on a 100k-line project | under 100 ms | about 210 ms (jigc, one thread; the Rust compiler takes 70 ms on 4 cores) |
 | Re-proof after changing one function | under 1 s | 0.2 s |
 | Runtime vs Rust, 8 benchmarks (instructions) | within 10% | 0.79 (slowest: nbody 1.44, wordfreq 1.13, fannkuch 1.12) |
-| Hello-world release binary | under 100 KB | 84 KB |
+| Hello-world release binary | under 100 KB | 94 KB |
 | Self-hosted compiler vs bootstrap (instructions) | equal or faster | 0.94 |
-| Standard library functions with proven contracts | over 80% | 83% (117 of 141) |
+| Standard library functions with proven contracts | over 80% | 83% (134 of 161) |
 | Compiler functions with proven contracts | over 80% | 39% (477 of 1,225; 78% have no unproven obligation but a table index) |
 | Agent tasks reaching a verified build, vs Rust | equal or better | 6 of 6 (Rust 6 of 6) |
 | Agent turns per task, vs Rust and TypeScript | equal or fewer | 7.3 (Rust 6.8, TypeScript 6.2) |
@@ -108,9 +109,9 @@ so far (see `bench/` and `docs/gates/`):
 Jig is an alpha. What it does not do yet (phase 5 of [the plan](docs/plan.md) closes these;
 [`docs/gates/phase5.md`](docs/gates/phase5.md) tracks each one):
 
-- **Libraries.** The standard library has files, TCP and HTTP serving, HTML, JSON, regular
-  expressions, hashing, dates, randomness, tasks and text helpers, but no HTTP client and no
-  TLS (so no HTTPS). A server answers one connection at a time.
+- **Libraries.** The standard library has files, TCP, HTTP serving and an HTTP client (with
+  HTTPS through the system's OpenSSL), HTML, JSON, regular expressions, hashing, dates,
+  randomness, tasks and text helpers. A server answers one connection at a time.
 - **C interop** passes numbers and strings only: no structs, buffers or callbacks, so a
   library that needs them (or a parameterized SQL query) needs a small C wrapper.
 - **Verification** proves what contracts and safety checks say, not what the author meant.

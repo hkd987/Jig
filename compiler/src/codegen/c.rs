@@ -2286,6 +2286,15 @@ impl<'l, 'a> CGen<'l, 'a> {
                 let c = self.cty(ret);
                 format!("(nk{n} ? (({c}){{.tag = 0, .u.v0 = {{.f0 = nr{n}}}}}) : (({c}){{.tag = 1, .u.v1 = {{.f0 = nr{n}}}}}))")
             }
+            NetFetch => {
+                let _ = writeln!(
+                    cx.out,
+                    "    bool nk{n}; jig_str *nr{n} = jig_net_fetch({}, {}, {}, &nk{n});",
+                    a[0], a[1], a[2]
+                );
+                let c = self.cty(ret);
+                format!("(nk{n} ? (({c}){{.tag = 0, .u.v0 = {{.f0 = nr{n}}}}}) : (({c}){{.tag = 1, .u.v1 = {{.f0 = nr{n}}}}}))")
+            }
             NetServe | NetServeHttp => {
                 let serve = if intr.op == NetServe { "jig_net_serve" } else { "jig_net_serve_http" };
                 let st = intr.tys[0];

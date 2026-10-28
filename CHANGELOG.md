@@ -30,7 +30,8 @@ shared benchmark suite; a 100k-line project checks in about 70 ms with the Rust 
 four threads (jigc, which `jig` now runs, takes about 210 ms on one).
 
 **Standard library.** `std/io`, `fs`, `net` (TCP request/response, HTTP serving for
-browsers and HTTP clients, and a simulator), `html` (pages as node trees, escaped when
+browsers and HTTP clients, an HTTP client with HTTPS through the system's OpenSSL, and a
+simulator), `html` (pages as node trees, escaped when
 rendered), `json`, `hash` (SHA-256, HMAC-SHA-256), `regex` (matched in linear time),
 `time` (with UTC calendar dates, ISO 8601 and HTTP dates), `rand`, `os`, `task` (fork-join),
 `math`, `lists`, `strings`; 83% of its functions have contracts that prove completely.

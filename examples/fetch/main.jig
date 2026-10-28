@@ -1,0 +1,44 @@
+import "std/io"
+import "std/net"
+import "std/os"
+
+// `fetch URL` GETs the URL, following redirects, and prints the status and the body;
+// `fetch URL TYPE BODY` POSTs BODY as TYPE instead. https:// URLs go over TLS, with the
+// server's certificate checked against the system's roots (or those in SSL_CERT_FILE).
+
+/// What `fetch` prints for a reply: the status, then the body.
+fn summary(r: net.Response) -> Str
+  ensures result.len() >= r.body.len()
+{
+  return r.status.str() + "\n" + r.body
+}
+
+/// Fetch what `args` asks for and print it; the exit code: 0, 1 for a failed fetch, 2 for
+/// bad arguments.
+fn run(args: List<Str>) -> Int
+  ensures result >= 0 && result <= 2
+  effects {io, net}
+{
+  if args.len() < 2 {
+    io.eprintln("usage: fetch URL [TYPE BODY]")
+    return 2
+  }
+  let reply = if args.len() >= 4 { net.post(args[1], args[2], args[3]) } else { net.get(args[1]) }
+  return match reply {
+    Ok(r) => {
+      io.println(summary(r))
+      0
+    }
+    Err(e) => {
+      io.eprintln("fetch: " + e)
+      1
+    }
+  }
+}
+
+fn main() effects {io, net, env} {
+  let code = run(os.args())
+  if code != 0 {
+    os.exit(code)
+  }
+}

@@ -259,8 +259,12 @@ Changes to both compilers:
 - [x] Built-in methods (`map`, `filter`, `fold`, `any`, `all`, `sort_by`, ...) take functions
       with effects, as effect parameters do (D31): each declares `effects {f}`, so a call has
       the effects of the function passed, in the interpreter and in native code alike.
-- [ ] An HTTP client and TLS (D33): `http` and `https` requests from `std/net`, TLS through the
-      system's OpenSSL, linked only by programs that use it; simulated in tests.
+- [x] An HTTP client and TLS (D33): `http` and `https` requests from `std/net`, TLS through the
+      system's OpenSSL, linked only by programs that use it; simulated in tests. `net.fetch` in
+      both interpreters and the runtime; `get`, `post`, `send` and the message parsers in Jig,
+      every contract proving; `examples/fetch`, tested against a local HTTPS server with a
+      throwaway CA (an unknown root and a wrong name are refused) in `cargo test` and jigc's
+      suites.
 - [ ] Concurrent serving (D34): a server that answers connections in parallel.
 - [ ] C interop beyond numbers and strings (D35): byte buffers in and out, opaque pointers,
       structs passed by pointer, and callbacks.

@@ -1,0 +1,42 @@
+import "std/sim"
+
+test "a GET prints the status and the body" {
+  sim.reply("example.com:443", "HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nhello\n")
+  assert(run(["fetch", "https://example.com/hi"]) == 0)
+  assert(sim.stdout() == "200\nhello\n\n")
+  assert(
+    sim.requests("example.com:443") ==
+      ["GET /hi HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"],
+  )
+}
+
+test "a POST sends the body with its type" {
+  sim.reply(
+    "localhost:8080",
+    "HTTP/1.1 201 Created\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n",
+  )
+  assert(run(["fetch", "http://localhost:8080/notes", "text/plain", "buy milk"]) == 0)
+  assert(sim.stdout() == "201\nok\n")
+  assert(sim.requests("localhost:8080")[0].ends_with("Content-Type: text/plain\r\n\r\nbuy milk"))
+}
+
+test "a refused connection is reported" {
+  assert(run(["fetch", "http://localhost:9/"]) == 1)
+  assert(sim.stderr() == "fetch: localhost:9: Connection refused\n")
+}
+
+test "a bad URL is reported" {
+  assert(run(["fetch", "localhost/x"]) == 1)
+  assert(sim.stderr() == "fetch: `localhost/x` is not an http:// or https:// URL\n")
+}
+
+test "without a URL it says how to use it" {
+  assert(run(["fetch"]) == 2 && sim.stderr() == "usage: fetch URL [TYPE BODY]\n")
+}
+
+test "main reads the command line" {
+  sim.reply("example.com:80", "HTTP/1.1 204 No Content\r\n\r\n")
+  sim.set_args(["fetch", "http://example.com/"])
+  main()
+  assert(sim.stdout() == "204\n\n")
+}

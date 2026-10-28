@@ -792,11 +792,16 @@ fn Interp.intrinsic(
       }
       return ret_v(Value.Unit)
     }
-    NetRequest => {
+    NetRequest | NetFetch => {
       let addr = str_v(a[0])
       if self.fx.real {
+        let reply = if intr.op == Op.NetRequest {
+          net.request(addr, str_v(a[1]))
+        } else {
+          net.fetch(addr, str_v(a[1]), a[2] == Value.Bool(true))
+        }
         return ret_v(
-          match net.request(addr, str_v(a[1])) {
+          match reply {
             Ok(r) => ok_v(Value.Str(r))
             Err(e) => err_v(e)
           },

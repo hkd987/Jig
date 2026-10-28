@@ -62,3 +62,97 @@ fn greet_over_tcp() {
     assert_eq!(reply, "hello bob #1\n");
     assert_eq!(String::from_utf8_lossy(&server.wait_with_output().unwrap().stdout), "greeted 1\n");
 }
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}
+
+fn have(cmd: &str) -> bool {
+    Command::new(cmd).arg("version").output().is_ok_and(|o| o.status.success())
+}
+
+/// The fetch example over HTTP and HTTPS against `https_server.py`, natively and on the
+/// interpreter: certificates are checked (an unknown root and a name the certificate does not
+/// have are refused), redirects followed and chunked replies joined.
+#[test]
+fn fetch_over_tls() {
+    if !have_cc() || !have("openssl") || !Command::new("python3").arg("-V").output().is_ok_and(|o| o.status.success()) {
+        eprintln!("skipping: needs a C compiler, openssl and python3");
+        return;
+    }
+    let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("net-fetch");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(work.join("certs")).unwrap();
+    std::fs::copy(tests.join("../../examples/fetch/main.jig"), work.join("main.jig")).unwrap();
+    let mut prog = jig::sema::analyze(&Sources::Disk, &work);
+    assert!(!prog.diags.has_errors());
+    let exe = work.join("fetch");
+    let opts =
+        BuildOpts { release: false, build_dir: work.join("build"), out: exe.clone(), proven: Default::default() };
+    build(&mut prog, &opts).expect("build");
+
+    let (tls, plain) = (free_port(), free_port());
+    let mut server = Command::new("python3")
+        .arg(tests.join("https_server.py"))
+        .arg(work.join("certs"))
+        .args([tls.to_string(), plain.to_string()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut ready = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(server.stdout.take().unwrap()), &mut ready).unwrap();
+    assert_eq!(ready, "ready\n");
+    let ca = work.join("certs/ca.pem");
+    let jig = env!("CARGO_BIN_EXE_jig");
+    let cases: Vec<(Vec<String>, bool, i32, String)> = vec![
+        (vec![format!("https://localhost:{tls}/hello")], true, 0, format!("200\npath=/hello host=localhost:{tls}\n")),
+        (vec![format!("https://localhost:{tls}/old")], true, 0, format!("200\npath=/hello?x=1 host=localhost:{tls}\n")),
+        (
+            vec![format!("https://localhost:{tls}/echo"), "text/plain".into(), "ping".into()],
+            true,
+            0,
+            "201\ngot ping!\n".into(),
+        ),
+        (
+            vec![format!("http://localhost:{plain}/hello")],
+            false,
+            0,
+            format!("200\npath=/hello host=localhost:{plain}\n"),
+        ),
+        (
+            vec![format!("https://localhost:{tls}/hello")],
+            false,
+            1,
+            format!("fetch: localhost:{tls}: TLS handshake failed: unable to get local issuer certificate\n"),
+        ),
+        (
+            vec![format!("https://127.0.0.1:{tls}/hello")],
+            true,
+            1,
+            format!("fetch: 127.0.0.1:{tls}: TLS handshake failed: IP address mismatch\n"),
+        ),
+    ];
+    for (args, trust, code, want) in &cases {
+        for native in [true, false] {
+            let mut cmd = if native {
+                Command::new(&exe)
+            } else {
+                let mut c = Command::new(jig);
+                c.arg("run").arg(&work).arg("--");
+                c
+            };
+            cmd.args(args).env_remove("SSL_CERT_FILE").env_remove("SSL_CERT_DIR");
+            if *trust {
+                cmd.env("SSL_CERT_FILE", &ca);
+            }
+            let o = cmd.output().unwrap();
+            let got = String::from_utf8_lossy(if *code == 0 { &o.stdout } else { &o.stderr }).to_string();
+            let how = if native { "native" } else { "interpreted" };
+            assert_eq!((o.status.code(), got.as_str()), (Some(*code), want.as_str()), "{how} fetch {args:?}");
+        }
+    }
+    let _ = server.kill();
+    let _ = server.wait();
+}

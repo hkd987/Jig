@@ -10,6 +10,7 @@ pub mod ffi;
 pub mod interp;
 pub mod intrinsics;
 pub mod lower;
+pub mod tls;
 
 use crate::diag::Span;
 use crate::sema::defs::{Mode, TestId};

@@ -2047,6 +2047,22 @@ fn Cg.intrinsic(
         ");\n"
       return self.result_of(ret, "nk" + n, "nr" + n, "nr" + n)
     }
+    NetFetch => {
+      cx.out += "    bool nk" +
+        n +
+        "; jig_str *nr" +
+        n +
+        " = jig_net_fetch(" +
+        a[0] +
+        ", " +
+        a[1] +
+        ", " +
+        a[2] +
+        ", &nk" +
+        n +
+        ");\n"
+      return self.result_of(ret, "nk" + n, "nr" + n, "nr" + n)
+    }
     NetServe | NetServeHttp => {
       let serve = if intr.op == Op.NetServe { "jig_net_serve" } else { "jig_net_serve_http" }
       let st = intr.tys[0]

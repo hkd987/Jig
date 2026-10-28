@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -2188,6 +2189,198 @@ const char *jig_ccall_net_error(void) { return g_ccall_net_err; }
 
 /* The last failed C call's error, as the C library words it. */
 const char *jig_ccall_os_error(void) { return strerror(errno); }
+
+/* ---------- HTTP client (`net.fetch`) ----------
+   One request over TCP or TLS: send it, keep the sending side open (an HTTP server may take
+   a half-close for a client that has gone) and read the reply until the server closes, which
+   `Connection: close` asks it to. A read waits at most FETCH_TIMEOUT seconds.
+
+   TLS goes through the system's OpenSSL, opened when a program first fetches over it, so a
+   program that never does needs no OpenSSL to build or to run. These are the few functions it
+   calls, by their ABI, which is the same in OpenSSL 1.1 and 3. The server's certificate must
+   chain to a trusted root (the system's, or SSL_CERT_FILE's) and name the host. The Rust
+   interpreter does the same (`compiler/src/mir/tls.rs`), with the same messages. */
+
+#define FETCH_TIMEOUT 30
+
+typedef struct {
+    int ready; /* 0: not tried, 1: loaded, -1: missing */
+    const void *(*client_method)(void);
+    void *(*ctx_new)(const void *);
+    int (*ctx_default_paths)(void *);
+    void (*ctx_set_verify)(void *, int, void *);
+    void (*ctx_free)(void *);
+    void *(*ssl_new)(void *);
+    int (*set_fd)(void *, int);
+    long (*ctrl)(void *, int, long, void *);
+    int (*set1_host)(void *, const char *);
+    int (*ssl_connect)(void *);
+    int (*ssl_write)(void *, const void *, int);
+    int (*ssl_read)(void *, void *, int);
+    long (*verify_result)(const void *);
+    void (*ssl_free)(void *);
+    void (*err_clear)(void);
+    unsigned long (*err_get)(void);
+    void (*err_string)(unsigned long, char *, size_t);
+    const char *(*verify_string)(long);
+} tls_api;
+
+static tls_api g_tls;
+static pthread_mutex_t g_tls_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static bool tls_load(void) {
+    static const char *const names[] = {
+        "libssl.so.3", "libssl.so.1.1", "libssl.so", "libssl.3.dylib",
+        "/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib", "/usr/local/opt/openssl@3/lib/libssl.3.dylib",
+    };
+    pthread_mutex_lock(&g_tls_lock);
+    if (!g_tls.ready) {
+        void *h = NULL;
+        for (size_t i = 0; dlopen && dlsym && !h && i < sizeof names / sizeof *names; i++)
+            h = dlopen(names[i], RTLD_NOW | RTLD_GLOBAL);
+        g_tls.ready = -1;
+        if (h) {
+            void **f[] = {
+                (void **)&g_tls.client_method, (void **)&g_tls.ctx_new, (void **)&g_tls.ctx_default_paths,
+                (void **)&g_tls.ctx_set_verify, (void **)&g_tls.ctx_free, (void **)&g_tls.ssl_new,
+                (void **)&g_tls.set_fd, (void **)&g_tls.ctrl, (void **)&g_tls.set1_host,
+                (void **)&g_tls.ssl_connect, (void **)&g_tls.ssl_write, (void **)&g_tls.ssl_read,
+                (void **)&g_tls.verify_result, (void **)&g_tls.ssl_free, (void **)&g_tls.err_clear,
+                (void **)&g_tls.err_get, (void **)&g_tls.err_string, (void **)&g_tls.verify_string,
+            };
+            static const char *const syms[] = {
+                "TLS_client_method", "SSL_CTX_new", "SSL_CTX_set_default_verify_paths", "SSL_CTX_set_verify",
+                "SSL_CTX_free", "SSL_new", "SSL_set_fd", "SSL_ctrl", "SSL_set1_host", "SSL_connect",
+                "SSL_write", "SSL_read", "SSL_get_verify_result", "SSL_free", "ERR_clear_error",
+                "ERR_get_error", "ERR_error_string_n", "X509_verify_cert_error_string",
+            };
+            bool all = true;
+            for (size_t i = 0; i < sizeof syms / sizeof *syms; i++) {
+                *f[i] = dlsym(h, syms[i]);
+                all = all && *f[i];
+            }
+            g_tls.ready = all ? 1 : -1;
+        }
+    }
+    bool ok = g_tls.ready == 1;
+    pthread_mutex_unlock(&g_tls_lock);
+    return ok;
+}
+
+/* Why the TLS connection failed: the certificate check's reason, else OpenSSL's first error. */
+static jig_str *tls_err(const jig_str *addr, const char *what, void *ssl) {
+    char msg[512], detail[256] = "";
+    long v = ssl ? g_tls.verify_result(ssl) : 0;
+    unsigned long e = g_tls.err_get();
+    if (v != 0) {
+        snprintf(detail, sizeof detail, "%s", g_tls.verify_string(v));
+    } else if (e) {
+        g_tls.err_string(e, detail, sizeof detail);
+    }
+    if (detail[0]) snprintf(msg, sizeof msg, "%s: %s", what, detail);
+    else snprintf(msg, sizeof msg, "%s", what);
+    return net_err(addr, msg);
+}
+
+static int net_connect(const jig_str *addr, const char **err) {
+    struct addrinfo *res = net_resolve(addr, false, err);
+    if (!res) return -1;
+    int fd = -1;
+    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) continue;
+        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+    if (fd < 0) *err = strerror(errno);
+    return fd;
+}
+
+jig_str *jig_net_fetch(const jig_str *addr, const jig_str *req, bool tls, bool *ok) {
+    *ok = false;
+    if (tls && !tls_load()) return net_err(addr, "TLS needs OpenSSL (libssl), which was not found");
+    const char *err = NULL;
+    int fd = net_connect(addr, &err);
+    if (fd < 0) return net_err(addr, err);
+    struct timeval tv = {FETCH_TIMEOUT, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    jig_buf b = {0};
+    char tmp[1 << 14];
+    if (!tls) {
+        if (!net_send_all(fd, jig_str_data(req), (size_t)jig_str_len(req))) {
+            close(fd);
+            return net_err(addr, strerror(errno));
+        }
+        for (;;) {
+            ssize_t k = recv(fd, tmp, sizeof tmp, 0);
+            if (k < 0 && errno == EINTR) continue;
+            if (k < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                close(fd);
+                jig_buf_free(&b);
+                return net_err(addr, "timed out");
+            }
+            if (k <= 0) break;
+            jig_buf_push(&b, tmp, (int64_t)k);
+        }
+        close(fd);
+        *ok = true;
+        return jig_buf_to_str(&b);
+    }
+    /* The host the certificate must name: `addr` up to its last colon. */
+    char host[256];
+    int64_t n = jig_str_len(addr), colon = 0;
+    for (int64_t i = 0; i < n; i++)
+        if (jig_str_data(addr)[i] == ':') colon = i;
+    memcpy(host, jig_str_data(addr), (size_t)colon);
+    host[colon] = 0;
+    g_tls.err_clear();
+    void *ctx = g_tls.ctx_new(g_tls.client_method());
+    /* Before SSL_new, which copies the verification settings. */
+    if (ctx) {
+        g_tls.ctx_default_paths(ctx);
+        g_tls.ctx_set_verify(ctx, 1 /* SSL_VERIFY_PEER */, NULL);
+    }
+    void *ssl = ctx ? g_tls.ssl_new(ctx) : NULL;
+    jig_str *fail = NULL;
+    if (!ssl) {
+        fail = tls_err(addr, "TLS setup failed", NULL);
+    } else {
+        g_tls.set_fd(ssl, fd);
+        g_tls.ctrl(ssl, 55 /* SSL_CTRL_SET_TLSEXT_HOSTNAME */, 0, host);
+        if (g_tls.set1_host(ssl, host) != 1 || g_tls.ssl_connect(ssl) != 1) fail = tls_err(addr, "TLS handshake failed", ssl);
+    }
+    const char *p = jig_str_data(req);
+    int64_t left = jig_str_len(req);
+    while (!fail && left > 0) {
+        int k = g_tls.ssl_write(ssl, p, left > (1 << 30) ? (1 << 30) : (int)left);
+        if (k <= 0) fail = tls_err(addr, "TLS write failed", NULL);
+        else {
+            p += k;
+            left -= k;
+        }
+    }
+    while (!fail) {
+        errno = 0;
+        int k = g_tls.ssl_read(ssl, tmp, (int)sizeof tmp);
+        if (k <= 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) fail = net_err(addr, "timed out");
+            break;
+        }
+        jig_buf_push(&b, tmp, (int64_t)k);
+    }
+    if (ssl) g_tls.ssl_free(ssl);
+    if (ctx) g_tls.ctx_free(ctx);
+    close(fd);
+    if (fail) {
+        jig_buf_free(&b);
+        return fail;
+    }
+    *ok = true;
+    return jig_buf_to_str(&b);
+}
 
 /* ---------- runtime element types ---------- */
 

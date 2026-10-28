@@ -1485,6 +1485,25 @@ impl<'l, 'a> Interp<'l, 'a> {
                     Err(e) => Self::err(format!("{addr}: {}", os_error(&e))),
                 })
             }
+            NetFetch => {
+                let addr = self.str_arg(&a[0], span)?.to_string();
+                let req = self.str_arg(&a[1], span)?.to_string();
+                let tls = matches!(a[2], Value::Bool(true));
+                if self.fx.fake {
+                    self.fx.net_requests.entry(addr.clone()).or_default().push(req);
+                    return ret(match self.fx.net_replies.get_mut(&addr).and_then(|q| q.pop_front()) {
+                        Some(r) => Self::ok(Value::Str(Rc::from(r.as_str()))),
+                        None => Self::err(format!("{addr}: Connection refused")),
+                    });
+                }
+                if let Some(e) = addr_error(&addr) {
+                    return ret(Self::err(format!("{addr}: {e}")));
+                }
+                ret(match super::tls::fetch(&addr, &req, tls) {
+                    Ok(r) => Self::ok(Value::Str(Rc::from(r.as_str()))),
+                    Err(e) => Self::err(format!("{addr}: {e}")),
+                })
+            }
             NetServe | NetServeHttp => {
                 let http = intr.op == NetServeHttp;
                 let addr = self.str_arg(&a[0], span)?.to_string();

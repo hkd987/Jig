@@ -1,0 +1,113 @@
+import "std/net"
+import "std/sim"
+
+// HTTP in std/net: URLs, the requests it writes, the replies and requests it reads, and
+// get, post and send against simulated servers.
+
+test "URLs: scheme, host, port and path" {
+  let u = net.parse_url("https://api.example.com/v1/items?limit=2#top").unwrap()
+  assert(u.tls && u.host == "api.example.com" && u.port == 443 && u.path == "/v1/items?limit=2")
+  let p = net.parse_url("HTTP://localhost:8080").unwrap()
+  assert(!p.tls && p.host == "localhost" && p.port == 8080 && p.path == "/")
+  assert(net.parse_url("http://a.io?q=1").unwrap().path == "/?q=1")
+  assert(net.parse_url("ftp://a.io").is_err() && net.parse_url("http://").is_err())
+  assert(net.parse_url("http://a.io:0/").is_err() && net.parse_url("http://a.io:x/").is_err())
+  assert(net.parse_url("http://me:pw@a.io/").is_err())
+}
+
+test "requests name the host, close the connection and count the body" {
+  let u = net.parse_url("http://localhost:8080/notes").unwrap()
+  assert(
+    net.request_text("POST", u, [("Content-Type", "text/plain")], "hi") ==
+      "POST /notes HTTP/1.1\r\nHost: localhost:8080\r\nConnection: close\r\nContent-Length: 2\r\nContent-Type: text/plain\r\n\r\nhi",
+  )
+  let s = net.parse_url("https://example.com").unwrap()
+  assert(
+    net.request_text("GET", s, [], "") ==
+      "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n",
+  )
+}
+
+test "replies: Content-Length, chunks, or the rest" {
+  let r = net
+    .parse_response(
+      "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello, and more",
+    )
+    .unwrap()
+  assert(r.status == 200 && r.body == "hello" && r.header("content-type") == Some("text/plain"))
+  assert(r.header("CONTENT-LENGTH") == Some("5") && r.header("x-missing") == None)
+  let c = net
+    .parse_response(
+      "HTTP/1.1 201 Created\r\nTransfer-Encoding: chunked\r\n\r\n4;x=1\r\nWiki\r\nA\r\n pedia in \r\n0\r\n\r\n",
+    )
+    .unwrap()
+  assert(c.status == 201 && c.body == "Wiki pedia in ")
+  assert(net.parse_response("HTTP/1.0 204 No Content\r\n\r\n").unwrap().body == "")
+  assert(net.parse_response("HTTP/1.1 200 OK\r\n\r\nto the end").unwrap().body == "to the end")
+}
+
+test "a bad reply says what is wrong" {
+  assert(
+    net.parse_response("HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nshort") ==
+      Err("the message ends before its body does"),
+  )
+  assert(net.parse_response("HTTP/1.1 200 OK\r\n") == Err("the message ends before its headers do"))
+  assert(net.parse_response("SSH-2.0 hi\r\n\r\n") == Err("not an HTTP reply: `SSH-2.0 hi`"))
+  assert(net.parse_response("HTTP/1.1 abc\r\n\r\n") == Err("not an HTTP status: `abc`"))
+  assert(net.parse_response("HTTP/1.1 200 OK\r\nbad line\r\n\r\n").is_err())
+  assert(
+    net.parse_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nab") ==
+      Err("the body ends inside a chunk"),
+  )
+  assert(
+    net.parse_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n") ==
+      Err("a chunk's size is not hexadecimal"),
+  )
+}
+
+test "requests as serve_http hands them over, and replies to them" {
+  let q = net
+    .parse_request("POST /add?x=1 HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\n\r\nabc")
+    .unwrap()
+  assert(
+    q.method == "POST" && q.path == "/add?x=1" && q.body == "abc" && q.header("host") == Some("h"),
+  )
+  assert(net.parse_request("GET /\r\n\r\n").is_err())
+  assert(
+    net.reply(404, "text/plain", "no") ==
+      "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
+  )
+  assert(net.reply(418, "text/plain", "").starts_with("HTTP/1.1 418 Status\r\n"))
+}
+
+test "get, post and send against a simulated server" {
+  sim.reply("example.com:443", "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
+  let r = net.get("https://example.com/a").unwrap()
+  assert(r.status == 200 && r.body == "hi")
+  assert(
+    sim.requests("example.com:443") ==
+      ["GET /a HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"],
+  )
+  sim.reply("localhost:8080", "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")
+  assert(net.post("http://localhost:8080/notes", "application/json", "{}").unwrap().status == 201)
+  assert(sim.requests("localhost:8080")[0].ends_with("Content-Type: application/json\r\n\r\n{}"))
+  assert(net.get("http://nobody:9/").is_err())
+  assert(net.send("GET", "http://localhost:8080/", [("X-Bad", "a\r\nInjected: 1")], "").is_err())
+}
+
+test "get follows redirects, up to five" {
+  sim.reply("a.io:80", "HTTP/1.1 301 Moved\r\nLocation: https://b.io/new\r\n\r\n")
+  sim.reply("b.io:443", "HTTP/1.1 302 Found\r\nLocation: /final?x=1\r\n\r\n")
+  sim.reply("b.io:443", "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndone")
+  assert(net.get("http://a.io/old").unwrap().body == "done")
+  assert(sim.requests("b.io:443")[1].starts_with("GET /final?x=1 HTTP/1.1\r\nHost: b.io\r\n"))
+  for _ in 0..6 {
+    sim.reply("loop.io:80", "HTTP/1.1 302 Found\r\nLocation: /again\r\n\r\n")
+  }
+  assert(net.get("http://loop.io/") == Err("more than five redirects from `http://loop.io/`"))
+}
+
+test "any reply body reads back through Content-Length"(body: Str) {
+  let raw = "HTTP/1.1 200 OK\r\nContent-Length: " + body.len().str() + "\r\n\r\n" + body
+  assert(net.parse_response(raw).unwrap().body == body)
+}
