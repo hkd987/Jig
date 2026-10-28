@@ -7,7 +7,7 @@ Some rows are research rather than implementation; they say so.
 | Gap | Plan | Status |
 | --- | --- | --- |
 | HTML rendering in the standard library | `std/html` | done: 5 of its 7 functions prove completely; `examples/ssr` and the site use it |
-| Docs site | `site/`, a Jig program, deployed to GitHub Pages (D32) | done: 14 pages, built the same by both compilers in CI; deploying waits on Pages being turned on |
+| Docs site | `site/`, a Jig program, deployed to GitHub Pages (D32) | done: 15 pages, built the same by both compilers in CI; deploying waits on Pages being turned on |
 | Dates and times | `std/time` calendar dates and ISO 8601 | done: UTC dates in years 0 to 9999, ISO 8601 both ways, HTTP dates; every function proves; a round-trip property test |
 | JSON | `std/json` | done: strict RFC 8259 reader, compact and indented writers; every contract proves; round-trip property tests; the guestbook's `/api/entries` |
 | Hashing | `std/hash`: SHA-256, HMAC-SHA-256 | done: matches FIPS 180-4 and RFC 4231 vectors; every obligation proves; the site versions its stylesheet with it |
@@ -23,5 +23,5 @@ Some rows are research rather than implementation; they say so.
 | Linux only | macOS in CI and the release | done: CI's macOS job (Apple silicon) checks the fixed point and passes every suite with jigc; the release builds for both |
 | No editor support | `jig lsp` and a VS Code extension (D36) | done: diagnostics as you type, hover, definition and formatting, tested by a scripted session in jigc's suites and against vscode-jsonrpc; `editors/vscode` packages in CI. Completion, references and rename are not done |
 | No package registry | an index on the site; modules resolve by URL and tag | done: [`docs/packages.md`](../packages.md), on the site as Packages: using and publishing a module, and the index (published by pull request); a hosted registry is outside this repository |
-| No Windows | port the runtime | open; a port of sockets, threads and C loading |
+| No Windows | port the runtime | open; a port. The runtime needs Winsock for sockets, `LoadLibrary` for `dlopen`, its own `getline` and no `SIGPIPE` (MinGW-w64 has pthreads and `dirent`); jigc runs the C compiler and git through a POSIX shell (`mkdir -p '…'`, quoting, redirections) for `jig build` and `jig get`. With no Windows machine here, it would be iterated against a CI runner |
 | Agent turns | three runs per task and language | open; needs agent runs outside CI |
