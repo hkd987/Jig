@@ -27,6 +27,7 @@ use crate::diag::{SourceMap, Span};
 use crate::syntax::ast::{Ast, ExprId, FileAst, ItemId};
 use crate::syntax::lexer::{self, Comment};
 use crate::syntax::parser;
+use crate::syntax::token::TokenKind;
 use crate::util::intern::LocalInterner;
 use crate::util::{FxHashMap, FxHashSet};
 
@@ -47,7 +48,8 @@ pub fn format_source(src: &str) -> Result<String, String> {
 }
 
 /// [`format_source`] for another target width; tests use narrow widths to exercise every
-/// broken layout.
+/// broken layout. A file that parses only once [`repair_breaks`] has joined some lines is
+/// formatted as repaired; otherwise the errors are its own.
 fn format_source_width(src: &str, width: usize) -> Result<String, String> {
     let mut sm = SourceMap::new();
     let fid = sm.add("<input>".into(), src.to_string());
@@ -56,9 +58,89 @@ fn format_source_width(src: &str, width: usize) -> Result<String, String> {
     let mut interner = LocalInterner::default();
     let out = parser::parse_file(&mut ast, fid, src, base, &mut interner);
     if !out.diags.is_empty() {
+        if let Some(fixed) = repair_breaks(src) {
+            return format_source_width(&fixed, width);
+        }
         return Err(out.diags.iter().map(|d| d.render(&sm, false)).collect());
     }
     Ok(format_file_width(&ast, ast.files.len() - 1, src, base, width))
+}
+
+/// Tokens that can only continue what the line before them began, never start a statement
+/// or an item: an operator (but not `-`, `!` or `~`, which can start an expression), `->`,
+/// `=>`, `?`, `:`, `=`, `..`, `as`, `else`, `in`, `where`, and the `{` of a block whose
+/// header ended the line before.
+fn continues(k: TokenKind) -> bool {
+    use TokenKind::*;
+    matches!(
+        k,
+        As | Else
+            | LBrace
+            | In
+            | Where
+            | Colon
+            | DotDot
+            | Arrow
+            | FatArrow
+            | Question
+            | Amp
+            | Pipe
+            | Caret
+            | Eq
+            | EqEq
+            | Ne
+            | Lt
+            | Le
+            | Gt
+            | Ge
+            | Shl
+            | Shr
+            | Plus
+            | Star
+            | Slash
+            | Percent
+            | PlusEq
+            | MinusEq
+            | StarEq
+            | SlashEq
+            | PercentEq
+            | AmpEq
+            | PipeEq
+            | CaretEq
+            | ShlEq
+            | ShrEq
+    )
+}
+
+/// `src` without the line breaks that keep it from parsing: while its first error is at a
+/// line that starts with a token that can only continue the line before (`-> T` after a
+/// signature, `else` after `}`, a leading operator), the two lines are joined. `None` if
+/// that does not make it parse, or if a comment sits in a break that would be joined.
+fn repair_breaks(src: &str) -> Option<String> {
+    let mut s = src.to_string();
+    let inserted = |t: &crate::syntax::token::Token| t.kind == TokenKind::Semi && t.lo == t.hi;
+    let blank = |x: &str| x.bytes().all(|c| matches!(c, b' ' | b'\t' | b'\r' | b'\n'));
+    for _ in 0..=src.matches('\n').count() {
+        let mut sm = SourceMap::new();
+        let fid = sm.add("<input>".into(), s.clone());
+        let base = sm.file(fid).base;
+        let mut ast = Ast::default();
+        let mut interner = LocalInterner::default();
+        let out = parser::parse_file(&mut ast, fid, &s, base, &mut interner);
+        let Some(first) = out.diags.first() else { return Some(s) };
+        let pos = first.span.lo.saturating_sub(base) as usize;
+        let toks = lexer::lex(&s, 0).tokens;
+        let k = toks.iter().position(|t| t.lo as usize >= pos && !inserted(t))?;
+        let t = toks[k];
+        let prev = *toks[..k].iter().rev().find(|t| !inserted(t))?;
+        let (ph, tl) = (prev.hi as usize, t.lo as usize);
+        let gap = s.get(ph..tl)?;
+        if !continues(t.kind) || !gap.contains('\n') || !blank(gap) || !blank(s.get(pos..tl)?) {
+            return None;
+        }
+        s = format!("{} {}", &s[..ph], &s[tl..]);
+    }
+    None
 }
 
 fn format_file_width(ast: &Ast, file_index: usize, src: &str, base: u32, width: usize) -> String {
@@ -277,11 +359,23 @@ impl<'a> Printer<'a> {
                 out.push_str(self.comment(ci));
                 prev_end = Some(c.hi);
             }
+            // A trailing comment that would push the line past the width goes above it.
+            let end = expr::end_col(ind, &el.text);
+            let (above, beside): (Vec<u32>, Vec<u32>) = self
+                .slot(key, Slot::Trail(el.lo))
+                .iter()
+                .partition(|&&ci| end + 1 + expr::width(self.comment(ci)) > self.width);
+            for &ci in &above {
+                self.separate(&mut out, prev_end, el.lo, between.take(), blanks);
+                expr::indent(&mut out, ind);
+                out.push_str(self.comment(ci));
+                prev_end = Some(el.lo);
+            }
             self.separate(&mut out, prev_end, el.lo, between.take(), blanks);
             expr::indent(&mut out, ind);
             out.push_str(&el.text);
             prev_end = Some(el.hi);
-            for &ci in self.slot(key, Slot::Trail(el.lo)) {
+            for &ci in &beside {
                 out.push(' ');
                 out.push_str(self.comment(ci));
                 prev_end = Some(self.comments[ci as usize].hi);

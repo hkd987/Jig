@@ -94,6 +94,31 @@ fn contract_clauses_and_effects() {
 }
 
 #[test]
+fn lines_broken_where_they_cannot_be_are_joined() {
+    let input = "fn absorb(kinds: List<Int>, base: Int)\n  -> List<Int>\n{\n  return kinds\n}\n\n\
+                 fn total(a: Int, b: Int) -> Int {\n  let t = a\n    + b\n  if t > 0\n  {\n    return t\n  }\n  return 0\n}\n";
+    let want = "fn absorb(kinds: List<Int>, base: Int) -> List<Int> {\n  return kinds\n}\n\n\
+                fn total(a: Int, b: Int) -> Int {\n  let t = a + b\n  if t > 0 {\n    return t\n  }\n  return 0\n}\n";
+    check(input, want);
+}
+
+#[test]
+fn a_comment_in_a_broken_line_keeps_the_error() {
+    // Joining the lines would move `+ 1` into the comment.
+    let input = "fn f(a: Int) -> Int {\n  let t = a // first\n    + 1\n  return t\n}\n";
+    assert!(format_source(input).is_err());
+    // And a file broken some other way is refused as before.
+    assert!(format_source("fn f( {\n}\n").is_err());
+}
+
+#[test]
+fn long_trailing_comments_move_above_their_line() {
+    let input = "fn main() {\n  let x = [1, 2] // a trailing comment long enough to push this line well past the limit of the formatter's width\n  let _ = x // short\n}\n";
+    let want = "fn main() {\n  // a trailing comment long enough to push this line well past the limit of the formatter's width\n  let x = [1, 2]\n  let _ = x // short\n}\n";
+    check(input, want);
+}
+
+#[test]
 fn control_flow_and_else_on_next_line() {
     let (input, want) = golden("control");
     check(input, want);
@@ -145,13 +170,26 @@ fn comments_are_preserved() {
     }
 }
 
+/// `s` without its comments and blank lines: the program, wherever its comments stand.
+fn code_only(s: &str) -> String {
+    let mut code = String::new();
+    let mut at = 0;
+    for c in lexer::lex(s, 0).comments {
+        code.push_str(&s[at..c.lo as usize]);
+        at = c.hi as usize;
+    }
+    code.push_str(&s[at..]);
+    code.lines().map(str::trim_end).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n")
+}
+
 /// Narrow widths force every broken layout. Each result must parse, be a fixed point at its
-/// width, keep the comments, and mean the same program: formatting it at the real width gives
-/// the canonical text (blank lines aside, since breaking a short item changes the item-run
-/// blank-line rule).
+/// width, keep the comments in order, and mean the same program: formatting it at the real
+/// width gives the canonical code (comments aside, since a trailing comment too long for a
+/// narrow line moves above it for good, and blank lines aside, since breaking a short item
+/// changes the item-run blank-line rule).
 #[test]
 fn every_width_reparses_to_the_same_program() {
-    let non_blank = |s: &str| s.lines().filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
+    let non_blank = code_only;
     for (name, input) in inputs() {
         let canon = format_source(input).unwrap();
         for w in (8..=WIDTH).step_by(4) {

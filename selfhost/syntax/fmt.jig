@@ -83,7 +83,12 @@ struct Printer {
 pub fn format_source(src: Str) -> Result<Str, List<Diag>> {
   let parsed = parse(src, 1)
   if !parsed.errors.is_empty() {
-    return Err(parsed.errors)
+    // A file that parses once `repair_breaks` has joined some lines is formatted as
+    // repaired; otherwise the errors are its own.
+    return match repair_breaks(src) {
+      Some(fixed) => format_source(fixed)
+      None => Err(parsed.errors)
+    }
   }
   let lx = lex(src, 1)
   var claimed: List<Bool> = []
@@ -212,6 +217,89 @@ fn end_col(col: Int, s: Str) -> Int {
     }
   }
   return col + width(s)
+}
+
+/// Tokens that can only continue what the line before them began, never start a statement
+/// or an item: an operator (but not `-`, `!` or `~`, which can start an expression), `->`,
+/// `=>`, `?`, `:`, `=`, `..`, `as`, `else`, `in`, `where`, and the `{` of a block whose
+/// header ended the line before.
+fn continues(k: Kind) -> Bool {
+  return match k {
+    As | Else | LBrace | In | Where | Colon | DotDot | Arrow | FatArrow | Question => true
+    Amp | Pipe | Caret | Eq | EqEq | Ne | Lt | Le | Gt | Ge | Shl | Shr => true
+    Plus | Star | Slash | Percent | PlusEq | MinusEq | StarEq | SlashEq | PercentEq => true
+    AmpEq | PipeEq | CaretEq | ShlEq | ShrEq => true
+    _ => false
+  }
+}
+
+/// A statement end the lexer inserted at a line break.
+fn inserted(t: Token) -> Bool {
+  return t.kind == Kind.Semi && t.lo == t.hi
+}
+
+/// Only spaces, tabs and line breaks.
+fn blank_text(s: Str) -> Bool {
+  for b in s.bytes() {
+    if b != 32 && b != 9 && b != 13 && b != 10 {
+      return false
+    }
+  }
+  return true
+}
+
+/// `src` without the line breaks that keep it from parsing: while its first error is at a
+/// line that starts with a token that can only continue the line before (`-> T` after a
+/// signature, `else` after `}`, a leading operator), the two lines are joined. None if that
+/// does not make it parse, or if a comment sits in a break that would be joined.
+fn repair_breaks(src: Str) -> Option<Str> {
+  var s = src
+  var lines = 0
+  for b in src.bytes() {
+    if b == 10 {
+      lines += 1
+    }
+  }
+  for _ in 0..lines + 1 {
+    let parsed = parse(s, 1)
+    if parsed.errors.is_empty() {
+      return Some(s)
+    }
+    let pos = max(parsed.errors[0].lo - 1, 0)
+    let toks = lex(s, 0).tokens
+    var k = -1
+    for i in 0..toks.len() {
+      if k < 0 && toks[i].lo >= pos && !inserted(toks[i]) {
+        k = i
+      }
+    }
+    if k < 0 {
+      return None
+    }
+    var prev = -1
+    for i in 0..k {
+      if !inserted(toks[i]) {
+        prev = i
+      }
+    }
+    if prev < 0 {
+      return None
+    }
+    let ph = toks[prev].hi
+    let tl = toks[k].lo
+    if ph < 0 || ph > tl || tl > s.len() || pos > tl {
+      return None
+    }
+    let gap = s[ph..tl]
+    if !continues(toks[k].kind) ||
+      !gap.contains("\n") ||
+      !blank_text(gap) ||
+      !blank_text(s[pos..tl]) {
+      return None
+    }
+    s = s[0..ph] + " " + s[tl..s.len()]
+  }
+  return None
 }
 
 fn spaces(n: Int) -> Str
@@ -406,10 +494,27 @@ fn Printer.line_list(self, key: Key, elems: List<LineElem>, ind: Int, blanks: Bl
       out += spaces(ind) + self.comment(ci)
       prev_end = Some(c.hi)
     }
+    // A trailing comment that would push the line past the width goes above it.
+    let end = end_col(ind, el.text)
+    var above: List<Int> = []
+    var beside: List<Int> = []
+    for ci in self.slot(key, Slot.Trail(el.lo)) {
+      if end + 1 + width(self.comment(ci)) > WIDTH {
+        above.push(ci)
+      } else {
+        beside.push(ci)
+      }
+    }
+    for ci in above {
+      self.separate(&mut out, prev_end, el.lo, between, blanks)
+      between = None
+      out += spaces(ind) + self.comment(ci)
+      prev_end = Some(el.lo)
+    }
     self.separate(&mut out, prev_end, el.lo, between, blanks)
     out += spaces(ind) + el.text
     prev_end = Some(el.hi)
-    for ci in self.slot(key, Slot.Trail(el.lo)) {
+    for ci in beside {
       out += " " + self.comment(ci)
       prev_end = Some(self.comments[ci].hi)
     }

@@ -757,6 +757,13 @@ def suite_lsp(r):
     c.diagnostics()
     fm = c.request(6, "textDocument/formatting", {"textDocument": {"uri": uri}, "options": {"tabSize": 2, "insertSpaces": True}})
     check("formatting", fm and [e["newText"] for e in fm["result"]], [text])
+    # A buffer that only fails to parse because of where a line breaks is formatted joined.
+    broken = text.replace("  let a = geom.area(3)", "  let a = geom.area(3)\n    + 0")
+    c.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 5}, "contentChanges": [{"text": broken}]})
+    c.diagnostics()
+    fm = c.request(9, "textDocument/formatting", {"textDocument": {"uri": uri}, "options": {"tabSize": 2, "insertSpaces": True}})
+    check("formatting joins a broken line", fm and [e["newText"] for e in fm["result"]],
+          [text.replace("  let a = geom.area(3)", "  let a = geom.area(3) + 0")])
     un = c.request(7, "textDocument/references", {})
     check("unknown method", un and un["error"]["code"], -32601)
     check("shutdown", c.request(8, "shutdown", None), {"jsonrpc": "2.0", "id": 8, "result": None})

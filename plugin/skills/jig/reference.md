@@ -489,7 +489,7 @@ its position; `Str.to_int` and `to_float` ignore surrounding spaces and accept a
 | `jig get` | download the modules `jig.mod` requires |
 | `jig build [--release] [-o out]` | native binary (debug: checks on; release: `clang -O2`, contracts off) |
 | `jig run [--native] [-- args]` | run `main` (interpreter, or a native debug build) |
-| `jig fmt [--check]` | canonical formatting; no options |
+| `jig fmt [--check]` | canonical formatting; no options. A line that can only continue the one before it (`-> T`, a leading operator, a `{` after an `if` line) is joined to it, and a trailing comment that would make its line too long moves above it |
 | `jig trace [fn F \| scenario S \| uncovered] [--json]` | traceability between scenarios and code |
 | `jig explain <code>` | long explanation of a diagnostic code |
 | `jig lsp` | a language server for editors over stdio: diagnostics as you type, types and signatures on hover, go to definition, formatting (`editors/vscode` is the VS Code extension) |

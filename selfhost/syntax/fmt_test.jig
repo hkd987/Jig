@@ -1,0 +1,30 @@
+// The formatter's line handling: lines broken where they cannot be are joined, and a trailing
+// comment that would make its line too long moves above it.
+
+fn formatted(src: Str) -> Str {
+  return match format_source(src) {
+    Ok(out) => out
+    Err(_) => "<does not parse>"
+  }
+}
+
+test "a line that can only continue the one before it is joined to it" {
+  let src = "fn total(a: Int, b: Int) -> Int {\n  let t = a\n    + b\n  if t > 0\n  {\n    return t\n  }\n  return 0\n}\n"
+  let want = "fn total(a: Int, b: Int) -> Int {\n  let t = a + b\n  if t > 0 {\n    return t\n  }\n  return 0\n}\n"
+  assert(formatted(src) == want)
+}
+
+test "a break with a comment in it is not joined" {
+  assert(
+    formatted("fn f(a: Int) -> Int {\n  let t = a // first\n    + 1\n  return t\n}\n") ==
+      "<does not parse>",
+  )
+}
+
+test "a long trailing comment moves above its line" {
+  let long = "// a trailing comment long enough to push this line well past the limit of the formatter's width"
+  let src = "fn main() {\n  let x = [1, 2] " + long + "\n  let _ = x // short\n}\n"
+  assert(
+    formatted(src) == "fn main() {\n  " + long + "\n  let x = [1, 2]\n  let _ = x // short\n}\n",
+  )
+}

@@ -26,7 +26,10 @@ fields, unused exports and impossible arms are errors, and `jig trace` maps scen
 the code they exercise.
 
 **Editors.** `jig lsp`, a language server (diagnostics as you type, hover, go to definition,
-formatting), and a VS Code extension in `editors/vscode`.
+formatting), and a VS Code extension in `editors/vscode`. Formatting, in the editor as with
+`jig fmt`, rewraps code to 100 columns, joins a line that can only continue the one before
+it (`-> T`, a leading operator, a `{` after an `if` line) instead of refusing the file, and
+moves a trailing comment that would make its line too long above it.
 
 **Toolchain.** One command: `check`, `test`, `prove`, `run`, `build`, `trace`, `fmt`, `get`,
 `explain`, `search`, `reference`, `mcp`. Structured JSON diagnostics with stable codes.
