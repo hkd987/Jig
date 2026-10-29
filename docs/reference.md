@@ -322,6 +322,11 @@ fn parse_port(s: Str) -> Result<Int, Str> {
   passed as a function. For a local, use `assert`.
 - Contract expressions are pure. They may call pure functions, and use
   `forall i in a..b: pred` and `exists i in a..b: pred`.
+- A struct invariant, a field's `where` clause and a refinement alias are checked at run
+  time where a value changes, so they use only what that check evaluates: fields (or
+  `self`), literals, constants and variants, arithmetic, comparisons and logic, `.len()` and
+  `.is_empty()`, list elements and their fields (`forall i in 0..xs.len(): xs[i].lo <= hi`),
+  and quantifiers; a call is an error (E0333).
 
 `jig prove` checks each function against its own contract and its callees' contracts, never
 their bodies, and also proves the absence of traps (overflow, division by zero, bounds,

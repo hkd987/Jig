@@ -280,7 +280,11 @@ Changes to both compilers:
       not prove); `starts_with`, `ends_with` and `contains` give length facts. String
       contents, and so `join`, stay unmodeled: strings are lengths to the prover.
 - [ ] Table invariants (D29): invariants over every element of a list, checked where an
-      element changes and assumed by the prover, applied to the compiler's arenas.
+      element changes and assumed by the prover, applied to the compiler's arenas. Done:
+      such invariants are proved where the list changes, assumed where it is read and
+      checked at run time otherwise, and a predicate the check cannot evaluate is an error
+      (E0333). Not done: checking only the changed element, invariants over enum payloads
+      (pattern tests in contracts), and the arenas.
 - [ ] Checker speed: `jig check` on 100k lines under 100 ms with jigc.
 - [ ] Float-heavy code within 10% of Rust (nbody).
 

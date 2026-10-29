@@ -1257,6 +1257,7 @@ fn Sema.check_test(&mut self, tid: Int) {
 }
 
 fn Sema.check_adt_predicates(&mut self, aid: Int) {
+  var preds: List<(Int, Str)> = []
   let ad = self.defs.adts[aid]
   let item = self.ast.items[ad.item]
   self.generics = ad.generics
@@ -1277,6 +1278,7 @@ fn Sema.check_adt_predicates(&mut self, aid: Int) {
             self.body.locals[id].used = true
             self.check_bool(pred)
             self.pop_scope()
+            preds.push((pred, "field's `where` clause"))
           }
           None => {}
         }
@@ -1290,6 +1292,7 @@ fn Sema.check_adt_predicates(&mut self, aid: Int) {
         }
         for e in invariants {
           self.check_bool(e)
+          preds.push((e, "struct invariant"))
         }
         self.pop_scope()
       }
@@ -1314,6 +1317,7 @@ fn Sema.check_adt_predicates(&mut self, aid: Int) {
               self.body.locals[id].used = true
               self.check_bool(pred)
               self.pop_scope()
+              preds.push((pred, "field's `where` clause"))
             }
             None => {}
           }
@@ -1324,6 +1328,9 @@ fn Sema.check_adt_predicates(&mut self, aid: Int) {
   }
   self.ctx = Ctx.Code
   self.finish()
+  for (pred, what) in preds {
+    self.check_checkable(pred, what)
+  }
 }
 
 fn Sema.check_alias_predicate(&mut self, al: Int) {
@@ -1344,6 +1351,99 @@ fn Sema.check_alias_predicate(&mut self, al: Int) {
     None => {}
   }
   self.finish()
+  match ad.refine {
+    Some(pred) => self.check_checkable(pred, "refinement")
+    None => {}
+  }
+}
+
+/// The prover assumes a struct's, variant's or alias's predicate wherever such a value is
+/// read, which is sound only because every value is checked where it is built or changed;
+/// those checks evaluate only some forms (the lowering's `eval_pred_names`), so the others
+/// are an error.
+fn Sema.check_checkable(&mut self, pred: Int, what: Str) {
+  match self.unchecked_part(pred) {
+    Some(span) => {
+      let part = self.fix_snippet(span)
+      let shown = if part.is_empty() { "this expression" } else { "`" + part + "`" }
+      self.push(
+        diag("E0333", span, "a " + what + " cannot use " + shown).note(
+          "it is checked at run time where the value changes, which evaluates only fields (or `self`), literals, constants and variants, arithmetic, comparisons and logic, `.len()` and `.is_empty()`, list elements and their fields, and `forall` and `exists`",
+        ),
+      )
+    }
+    None => {}
+  }
+}
+
+/// The first part of a predicate that the run-time check cannot evaluate, if any.
+fn Sema.unchecked_part(self, e: Int) -> Option<syntax.Span> {
+  let x = self.ast.exprs[e]
+  return match x.kind {
+    Name(_) => match self.tab.expr_res[e] {
+      Local(_) | Const(_) | Variant(_, _) => None
+      _ => Some(x.span)
+    }
+    Int(_) | Float | Bool(_) | Str(_) | Char(_) => None
+    Paren(y) => self.unchecked_part(y)
+    Field(base, _) => match self.tab.expr_res[e] {
+      Field(_) => self.unchecked_part(base)
+      Variant(_, _) | Const(_) => None
+      _ => Some(x.span)
+    }
+    Index(base, index) => {
+      let range = match self.ast.exprs[index].kind {
+        Range(_, _) => true
+        _ => false
+      }
+      let listy = match self.tys.kinds[self.tab.expr_ty[base]] {
+        List(_) => true
+        _ => false
+      }
+      if range || !listy {
+        return Some(x.span)
+      }
+      return match self.unchecked_part(base) {
+        Some(s) => Some(s)
+        None => self.unchecked_part(index)
+      }
+    }
+    Quant(_, _, lo, hi, body) => match self.unchecked_part(lo) {
+      Some(s) => Some(s)
+      None => match self.unchecked_part(hi) {
+        Some(s) => Some(s)
+        None => self.unchecked_part(body)
+      }
+    }
+    Call(callee, args) => {
+      let (base, name) = match self.ast.exprs[callee].kind {
+        Field(b, nm) => (b, nm.text)
+        _ => {
+          return Some(x.span)
+        }
+      }
+      let lenlike = name == "len" || name == "is_empty"
+      let sized = match self.tys.kinds[self.tab.expr_ty[base]] {
+        Str | List(_) => true
+        _ => false
+      }
+      if !args.is_empty() || !lenlike || !sized {
+        return Some(x.span)
+      }
+      return self.unchecked_part(base)
+    }
+    Unary(_, inner) => self.unchecked_part(inner)
+    Binary(op, lhs, rhs) => {
+      if op == syntax.BinOp.Add && self.tys.kinds[self.tab.expr_ty[lhs]] == TyKind.Str {
+        return Some(x.span)
+      }
+      return match self.unchecked_part(lhs) {
+        Some(s) => Some(s)
+        None => self.unchecked_part(rhs)
+      }
+    }
+    _ => Some(x.span)
+  }
 }
 
 // ---------- shared helpers ----------

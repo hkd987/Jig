@@ -1,0 +1,5 @@
+End 3..3
+2
+<panic: invariant failed: `Pool` requires forall i in 0..xs.len(): xs[i] >= 0 && xs[i] < cap
+  cap = 10
+  xs = [3, 9, 30]>

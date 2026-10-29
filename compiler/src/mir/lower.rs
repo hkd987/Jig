@@ -1907,9 +1907,10 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
         }
     }
 
-    /// A small evaluator for struct predicates: names, literals, comparisons, arithmetic,
-    /// logic, and `.len()` and `.is_empty()` of strings and lists. Returns false if the
-    /// predicate uses something else.
+    /// A small evaluator for struct predicates: names, literals, variants and constants,
+    /// comparisons, arithmetic, logic, `.len()` and `.is_empty()` of strings and lists, list
+    /// elements and their fields, and `forall` and `exists`. Returns false if the predicate
+    /// uses something else.
     fn eval_pred_names(&mut self, e: ExprId, names: &[(Symbol, Local)], dest: Place) -> bool {
         let k = self.ast.exprs[e].kind;
         match k {
@@ -1918,7 +1919,14 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                     self.assign(dest, Rvalue::Use(Operand::local(l)));
                     true
                 }
-                None => false,
+                None => match self.tables.expr_res[e.0 as usize] {
+                    Res::Const(_) | Res::Variant(..) => {
+                        let op = self.expr(e);
+                        self.assign(dest, Rvalue::Use(op));
+                        true
+                    }
+                    _ => false,
+                },
             },
             ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Str(_) | ExprKind::Char(_) => {
                 let op = self.expr(e);
@@ -1926,6 +1934,91 @@ impl<'l, 'a> FnBuilder<'l, 'a> {
                 true
             }
             ExprKind::Paren(x) => self.eval_pred_names(x, names, dest),
+            ExprKind::Field { base, .. } => match self.tables.expr_res[e.0 as usize] {
+                Res::Field(fi) => {
+                    let bt = self.ty(base);
+                    let b = self.temp(bt);
+                    if !self.eval_pred_names(base, names, Place::local(b)) {
+                        return false;
+                    }
+                    self.assign(dest, Rvalue::Use(Operand::Copy(Place::local(b).field(fi))));
+                    self.push(Stmt::Drop(b));
+                    true
+                }
+                Res::Variant(..) | Res::Const(_) => {
+                    let op = self.expr(e);
+                    self.assign(dest, Rvalue::Use(op));
+                    true
+                }
+                _ => false,
+            },
+            ExprKind::Index { base, index } if !matches!(self.ast.exprs[index].kind, ExprKind::Range { .. }) => {
+                let bt = self.ty(base);
+                if !matches!(self.lw.tys.kind(bt), TyKind::List(_)) {
+                    return false;
+                }
+                let b = self.temp(bt);
+                if !self.eval_pred_names(base, names, Place::local(b)) {
+                    return false;
+                }
+                let it = self.ty(index);
+                let i = self.temp(it);
+                if !self.eval_pred_names(index, names, Place::local(i)) {
+                    return false;
+                }
+                let span = self.ast.exprs[e].span;
+                self.assign(dest, Rvalue::Use(Operand::Copy(Place::local(b).index(Operand::local(i), span))));
+                self.push(Stmt::Drop(b));
+                true
+            }
+            ExprKind::Quant { forall, var, lo, hi, body } => {
+                // As `lower_quant` does, with the bound variable named before the fields.
+                let it = self.ty(lo);
+                let i = self.temp(it);
+                if !self.eval_pred_names(lo, names, Place::local(i)) {
+                    return false;
+                }
+                let h = self.temp(it);
+                if !self.eval_pred_names(hi, names, Place::local(h)) {
+                    return false;
+                }
+                self.assign(dest.clone(), Rvalue::Use(Operand::bool(forall)));
+                let head = self.new_block();
+                let body_bb = self.new_block();
+                let found = self.new_block();
+                let latch = self.new_block();
+                let exit = self.new_block();
+                self.goto(head);
+                self.cur = head;
+                let c = self.temp(self.lw.tys.bool);
+                self.assign(Place::local(c), Rvalue::Binary(ast::BinOp::Lt, Operand::local(i), Operand::local(h), it));
+                self.terminate(Terminator::If(Operand::local(c), body_bb, exit));
+                self.cur = body_bb;
+                let b = self.temp(self.lw.tys.bool);
+                let mut inner = vec![(var.sym, i)];
+                inner.extend_from_slice(names);
+                let ok = self.eval_pred_names(body, &inner, Place::local(b));
+                if forall {
+                    self.terminate(Terminator::If(Operand::local(b), latch, found));
+                } else {
+                    self.terminate(Terminator::If(Operand::local(b), found, latch));
+                }
+                self.cur = found;
+                self.assign(dest, Rvalue::Use(Operand::bool(!forall)));
+                self.goto(exit);
+                self.cur = latch;
+                let one = Operand::Const(Const::Int(
+                    1,
+                    match self.lw.tys.kind(it) {
+                        TyKind::Int(k, _) => *k,
+                        _ => IntTy::I64,
+                    },
+                ));
+                self.assign(Place::local(i), Rvalue::Binary(ast::BinOp::Add, Operand::local(i), one, it));
+                self.goto(head);
+                self.cur = exit;
+                ok
+            }
             ExprKind::Call { callee, args } if args.is_empty() => {
                 let ExprKind::Field { base, name } = self.ast.exprs[callee].kind else { return false };
                 let bt = self.ty(base);

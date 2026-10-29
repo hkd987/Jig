@@ -208,6 +208,14 @@ codes! {
         "A variant whose fields are refined (a refinement alias or a `where` clause) checks \
          them where it is built, so it can only be called, not passed as a function. Wrap it \
          in a closure: `xs.map(fn(c) { State.Paying(c) })`.";
+    E0333 = 333, "unchecked-predicate", "predicate cannot be checked at run time",
+        "Struct invariants, `where` clauses on fields and refinement aliases are checked at run \
+         time wherever a value is built or changed, unless the prover shows the check cannot \
+         fail, and the prover assumes them wherever the value is read. So they may use only \
+         what those checks evaluate: the fields (or `self`), literals, constants and variants, \
+         arithmetic, comparisons and logic, `.len()` and `.is_empty()` of strings and lists, \
+         list elements and their fields, and `forall` and `exists`. Move anything else, such \
+         as a call, into the `requires` and `ensures` of the functions that need it.";
 
     // ---- E04: effects ----
     E0401 = 401, "undeclared-effect", "effect not declared",

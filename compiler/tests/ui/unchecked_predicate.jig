@@ -1,0 +1,30 @@
+// Predicates on types are checked at run time where a value changes, and only some forms
+// can be: anything else would be assumed by the prover without ever being checked.
+
+pub fn is_small(n: Int) -> Bool {
+  return n < 3
+}
+
+type Small = Int where is_small(self) //~ E0333
+
+pub struct Window {
+  lo: Int
+  hi: Int
+  invariant lo <= hi && is_small(hi - lo) //~ E0333
+}
+
+pub enum Shape {
+  Line(points: List<Int> where points.contains(0)) //~ E0333
+}
+
+pub fn small(n: Small) -> Small {
+  return n
+}
+
+pub fn window(lo: Int, hi: Int) -> Window {
+  return Window { lo: lo, hi: hi }
+}
+
+pub fn line() -> Shape {
+  return Shape.Line([0])
+}

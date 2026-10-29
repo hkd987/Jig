@@ -1258,6 +1258,7 @@ impl<'a> Cx<'a> {
     }
 
     fn check_adt_predicates(&mut self, aid: AdtId) {
+        let mut preds: Vec<(ExprId, &str)> = Vec::new();
         let ad = &self.defs.adts[aid];
         let item = self.ast.items[ad.item];
         self.file = item.file as usize;
@@ -1280,6 +1281,7 @@ impl<'a> Cx<'a> {
                         let b = self.tys.bool;
                         self.check_expr(pred, Some(b));
                         self.pop_scope();
+                        preds.push((pred, "field's `where` clause"));
                     }
                 }
                 let invs: Vec<ExprId> = self.ast.expr_lists.get(invariants).to_vec();
@@ -1293,6 +1295,7 @@ impl<'a> Cx<'a> {
                     for e in invs {
                         let b = self.tys.bool;
                         self.check_expr(e, Some(b));
+                        preds.push((e, "struct invariant"));
                     }
                     self.pop_scope();
                 }
@@ -1319,6 +1322,7 @@ impl<'a> Cx<'a> {
                             let b = self.tys.bool;
                             self.check_expr(pred, Some(b));
                             self.pop_scope();
+                            preds.push((pred, "field's `where` clause"));
                         }
                     }
                 }
@@ -1327,6 +1331,9 @@ impl<'a> Cx<'a> {
         }
         self.ctx = Ctx::Code;
         self.finish();
+        for (pred, what) in preds {
+            self.check_checkable(pred, what);
+        }
     }
 
     fn check_alias_predicate(&mut self, al: AliasId) {
@@ -1347,6 +1354,71 @@ impl<'a> Cx<'a> {
             self.ctx = Ctx::Code;
         }
         self.finish();
+        if let Some(pred) = self.defs.aliases[al].refine {
+            self.check_checkable(pred, "refinement");
+        }
+    }
+
+    /// The prover assumes a struct's, variant's or alias's predicate wherever such a value is
+    /// read, which is sound only because every value is checked where it is built or changed;
+    /// those checks evaluate only some forms (the lowering's `eval_pred_names`), so the others
+    /// are an error.
+    fn check_checkable(&mut self, pred: ExprId, what: &str) {
+        let Some(span) = self.unchecked_part(pred) else { return };
+        let part = self.snippet(span);
+        let shown = if part.is_empty() { "this expression".to_string() } else { format!("`{part}`") };
+        let d = Diagnostic::error(codes::E0333, span, format!("a {what} cannot use {shown}"))
+            .note("it is checked at run time where the value changes, which evaluates only fields (or `self`), literals, constants and variants, arithmetic, comparisons and logic, `.len()` and `.is_empty()`, list elements and their fields, and `forall` and `exists`");
+        self.push(d);
+    }
+
+    /// The first part of a predicate that the run-time check cannot evaluate, if any.
+    fn unchecked_part(&self, e: ExprId) -> Option<Span> {
+        let x = self.ast.exprs[e];
+        let kind_of = |id: ExprId| self.tys.kind(self.tables.expr_ty[id.0 as usize]).clone();
+        match x.kind {
+            ast::ExprKind::Name(_) => match self.tables.expr_res[e.0 as usize] {
+                Res::Local(_) | Res::Const(_) | Res::Variant(..) => None,
+                _ => Some(x.span),
+            },
+            ast::ExprKind::Int(_)
+            | ast::ExprKind::Float(_)
+            | ast::ExprKind::Bool(_)
+            | ast::ExprKind::Str(_)
+            | ast::ExprKind::Char(_) => None,
+            ast::ExprKind::Paren(y) => self.unchecked_part(y),
+            ast::ExprKind::Field { base, .. } => match self.tables.expr_res[e.0 as usize] {
+                Res::Field(_) => self.unchecked_part(base),
+                Res::Variant(..) | Res::Const(_) => None,
+                _ => Some(x.span),
+            },
+            ast::ExprKind::Index { base, index } => {
+                let range = matches!(self.ast.exprs[index].kind, ast::ExprKind::Range { .. });
+                if range || !matches!(kind_of(base), TyKind::List(_)) {
+                    return Some(x.span);
+                }
+                self.unchecked_part(base).or_else(|| self.unchecked_part(index))
+            }
+            ast::ExprKind::Quant { lo, hi, body, .. } => {
+                self.unchecked_part(lo).or_else(|| self.unchecked_part(hi)).or_else(|| self.unchecked_part(body))
+            }
+            ast::ExprKind::Call { callee, args } => {
+                let ast::ExprKind::Field { base, name } = self.ast.exprs[callee].kind else { return Some(x.span) };
+                let len = matches!(name.sym.as_str(), "len" | "is_empty");
+                if !args.is_empty() || !len || !matches!(kind_of(base), TyKind::Str | TyKind::List(_)) {
+                    return Some(x.span);
+                }
+                self.unchecked_part(base)
+            }
+            ast::ExprKind::Unary { expr, .. } => self.unchecked_part(expr),
+            ast::ExprKind::Binary { op, lhs, rhs } => {
+                if op == ast::BinOp::Add && matches!(kind_of(lhs), TyKind::Str) {
+                    return Some(x.span);
+                }
+                self.unchecked_part(lhs).or_else(|| self.unchecked_part(rhs))
+            }
+            _ => Some(x.span),
+        }
     }
 
     // ---------- shared helpers ----------

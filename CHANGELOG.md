@@ -18,7 +18,9 @@ effect, with numbers, strings and byte buffers. No nil, no zero values, no impli
 Z3 against callees' contracts (and, read off their bodies, what they write and, for pure
 functions, what they read), cached by content so one edit re-proves one function;
 counterexamples are replayed to confirm them. Whatever does not prove stays a runtime
-check and becomes a generated property test with shrinking. Gherkin scenarios bind to
+check and becomes a generated property test with shrinking; struct invariants, which may
+speak of every element of a list, are checked where a value changes and assumed where it
+is read. Gherkin scenarios bind to
 typed step functions at compile time and run as tests. Unreachable functions, unread
 fields, unused exports and impossible arms are errors, and `jig trace` maps scenarios to
 the code they exercise.

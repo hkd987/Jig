@@ -1,0 +1,45 @@
+import "std/io"
+
+// Invariants over every element of a list are checked where the list changes, as other
+// struct invariants are, so the prover may assume them wherever the struct is read.
+
+enum Kind {
+  Word
+  End
+}
+
+struct Tok {
+  kind: Kind
+  lo: Int
+  hi: Int
+}
+
+struct Toks {
+  items: List<Tok>
+  invariant items.len() > 0 && items[items.len() - 1].kind == Kind.End
+  invariant forall i in 0..items.len(): items[i].lo <= items[i].hi
+}
+
+struct Pool {
+  cap: Int
+  xs: List<Int>
+  invariant forall i in 0..xs.len(): xs[i] >= 0 && xs[i] < cap
+}
+
+fn Pool.add(&mut self, v: Int) {
+  self.xs.push(v)
+}
+
+fn main() effects {io} {
+  let t = Toks {
+    items: [Tok { kind: Kind.Word, lo: 0, hi: 3 }, Tok { kind: Kind.End, lo: 3, hi: 3 }]
+  }
+  let last = t.items[t.items.len() - 1]
+  io.println(last.kind.str() + " " + last.lo.str() + ".." + last.hi.str())
+  var p = Pool { cap: 10, xs: [] }
+  p.add(3)
+  p.add(9)
+  io.println(p.xs.len().str())
+  p.add(30)
+  io.println("unreachable")
+}

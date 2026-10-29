@@ -121,9 +121,9 @@ Jig is an alpha. What it does not do yet (phase 5 of [the plan](docs/plan.md) cl
   offset), but C cannot call back into Jig, so a library that takes a callback needs a small
   C wrapper.
 - **Verification** proves what contracts and safety checks say, not what the author meant.
-  Strings are known to the prover by their length, not their contents, and an invariant over
-  every node of a tree or table cannot be stated, so most of the compiler's own table
-  lookups stay run-time checks (D29).
+  Strings are known to the prover by their length, not their contents, and an invariant can
+  speak of every element of a list but not yet of the indices inside a tree's nodes, so most
+  of the compiler's own table lookups stay run-time checks (D29).
 - **Speed.** `jig check` takes 1.6 to 1.8 times as long as the Rust compiler it replaced
   (both on four threads), and float-heavy code runs behind Rust (nbody, 1.44).
 - **Agents** took about half a turn more in Jig than in Rust and TypeScript (three runs per

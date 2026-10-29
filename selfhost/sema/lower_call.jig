@@ -555,8 +555,9 @@ fn Lw.check_with_names(&mut self, pred: Int, names: List<(Str, Int)>, kind: Chec
   }
 }
 
-/// A small evaluator for struct predicates: names, literals, comparisons, arithmetic, logic,
-/// and `.len()` and `.is_empty()` of strings and lists. Returns false if the predicate uses
+/// A small evaluator for struct predicates: names, literals, variants and constants,
+/// comparisons, arithmetic, logic, `.len()` and `.is_empty()` of strings and lists, list
+/// elements and their fields, and `forall` and `exists`. Returns false if the predicate uses
 /// something else.
 fn Lw.eval_pred_names(&mut self, e: Int, names: List<(Str, Int)>, dest: Place) -> Bool {
   match self.fb.ast.exprs[e].kind {
@@ -567,7 +568,14 @@ fn Lw.eval_pred_names(&mut self, e: Int, names: List<(Str, Int)>, dest: Place) -
           return true
         }
       }
-      return false
+      return match self.res(e) {
+        Const(_) | Variant(_, _) => {
+          let op = self.expr(e)
+          self.assign(dest, Rvalue.Use(op))
+          true
+        }
+        _ => false
+      }
     }
     Int(_) | Float | Bool(_) | Str(_) | Char(_) => {
       let op = self.expr(e)
@@ -576,6 +584,95 @@ fn Lw.eval_pred_names(&mut self, e: Int, names: List<(Str, Int)>, dest: Place) -
     }
     Paren(x) => {
       return self.eval_pred_names(x, names, dest)
+    }
+    Field(base, _) => match self.res(e) {
+      Field(fi) => {
+        let bt = self.ty(base)
+        let b = self.temp(bt)
+        if !self.eval_pred_names(base, names, place_of(b)) {
+          return false
+        }
+        self.assign(dest, Rvalue.Use(Operand.Copy(place_of(b).field(fi))))
+        self.push(Stmt.Drop(b))
+        return true
+      }
+      Variant(_, _) | Const(_) => {
+        let op = self.expr(e)
+        self.assign(dest, Rvalue.Use(op))
+        return true
+      }
+      _ => {
+        return false
+      }
+    }
+    Index(base, index) => {
+      let range = match self.fb.ast.exprs[index].kind {
+        Range(_, _) => true
+        _ => false
+      }
+      let bt = self.ty(base)
+      let listy = match self.s.tys.kinds[bt] {
+        List(_) => true
+        _ => false
+      }
+      if range || !listy {
+        return false
+      }
+      let b = self.temp(bt)
+      if !self.eval_pred_names(base, names, place_of(b)) {
+        return false
+      }
+      let it = self.ty(index)
+      let i = self.temp(it)
+      if !self.eval_pred_names(index, names, place_of(i)) {
+        return false
+      }
+      let span = self.fb.ast.exprs[e].span
+      self.assign(dest, Rvalue.Use(Operand.Copy(place_of(b).index(op_local(i), span))))
+      self.push(Stmt.Drop(b))
+      return true
+    }
+    Quant(forall, binder, lo, hi, body) => {
+      // As `lower_quant` does, with the bound variable named before the fields.
+      let it = self.ty(lo)
+      let i = self.temp(it)
+      if !self.eval_pred_names(lo, names, place_of(i)) {
+        return false
+      }
+      let h = self.temp(it)
+      if !self.eval_pred_names(hi, names, place_of(h)) {
+        return false
+      }
+      self.assign(dest, Rvalue.Use(op_bool(forall)))
+      let head = self.new_block()
+      let body_bb = self.new_block()
+      let found_bb = self.new_block()
+      let latch = self.new_block()
+      let exit = self.new_block()
+      self.goto(head)
+      self.fb.cur = head
+      let c = self.temp(self.s.tys.bool)
+      self.assign(place_of(c), Rvalue.Binary(syntax.BinOp.Lt, op_local(i), op_local(h), it))
+      self.terminate(Terminator.If(op_local(c), body_bb, exit))
+      self.fb.cur = body_bb
+      let b = self.temp(self.s.tys.bool)
+      var inner = [(binder.text, i)]
+      inner.extend(names)
+      let ok = self.eval_pred_names(body, inner, place_of(b))
+      if forall {
+        self.terminate(Terminator.If(op_local(b), latch, found_bb))
+      } else {
+        self.terminate(Terminator.If(op_local(b), found_bb, latch))
+      }
+      self.fb.cur = found_bb
+      self.assign(dest, Rvalue.Use(op_bool(!forall)))
+      self.goto(exit)
+      self.fb.cur = latch
+      let one = Operand.Const(Const.Int(false, 1, int_kind_of(self.s.tys, it)))
+      self.assign(place_of(i), Rvalue.Binary(syntax.BinOp.Add, op_local(i), one, it))
+      self.goto(head)
+      self.fb.cur = exit
+      return ok
     }
     Call(callee, args) => {
       if !args.is_empty() {
